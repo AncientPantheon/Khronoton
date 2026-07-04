@@ -1,0 +1,71 @@
+# Deprecate a published version of @ancientpantheon/khronoton-core.
+#
+# Triggered by pushing a tag `deprecate-<version>` (e.g. `deprecate-0.1.0`).
+# The tag's version is deprecated on the registry with a fixed message
+# pointing consumers at the current line. `npm deprecate` does NOT unpublish —
+# the version stays installable, it just carries a warning. To UN-deprecate,
+# re-run with an empty message (or `npm deprecate <pkg>@<v> ""`).
+#
+# Auth mirrors publish.yml exactly: the AncientPantheon org secret NPM_TOKEN,
+# written into a root .npmrc, never echoed. Requires the same token that
+# publishes the package.
+name: Deprecate version
+
+on:
+  push:
+    tags:
+      - "deprecate-*"
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve target version from tag
+        id: ver
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/deprecate-}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF" ]; then
+            echo "::error::Could not parse a version from tag '$GITHUB_REF' (expected 'deprecate-<version>')."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Deprecating @ancientpantheon/khronoton-core@$VERSION"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Write .npmrc with auth token
+        run: |
+          cat > .npmrc <<EOF
+          //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
+          @ancientpantheon:registry=https://registry.npmjs.org
+          always-auth=true
+          EOF
+          echo "--- .npmrc structure (token redacted) ---"
+          sed 's|=.*|=***|' .npmrc
+
+      # Fail fast: a missing or expired NPM_TOKEN dies here before touching the registry.
+      - name: Verify auth
+        run: npm whoami
+
+      - name: Verify the target version exists on the registry
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          if ! npm view "@ancientpantheon/khronoton-core@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::@ancientpantheon/khronoton-core@$VERSION is not on the registry — nothing to deprecate."
+            exit 1
+          fi
+
+      - name: Deprecate the version
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          npm deprecate "@ancientpantheon/khronoton-core@$VERSION" \
+            "Superseded by a later release — this version's exports map is ESM-only (no \`require\` condition) and cannot be loaded by CommonJS runtimes; pin the latest 0.1.x instead."
+          echo "Deprecated @ancientpantheon/khronoton-core@$VERSION"
+
+      - name: Confirm deprecation is live
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          npm view "@ancientpantheon/khronoton-core@$VERSION" deprecated
