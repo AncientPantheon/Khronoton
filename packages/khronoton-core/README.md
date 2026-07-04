@@ -6,7 +6,7 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
-**`0.1.0` on public npmjs** — first published version of the headless scheduler engine. Both engines are implemented and locked by contract suites in `tests/`: the schedule math (the 7-mode model, `computeNextFire`, `summariseSchedule`, and the in-tree cron parser) and the injectable `tickOnce(now, deps)` tick engine. Consumed by the AncientHoldings hub, which injects storage and firing through the three hooks.
+**`0.1.1` on public npmjs** — headless scheduler engine, drop-in for both ESM and CommonJS consumers. Both engines are implemented and locked by contract suites in `tests/`: the schedule math (the 7-mode model, `computeNextFire`, `summariseSchedule`, and the in-tree cron parser) and the injectable `tickOnce(now, deps)` tick engine. Consumed by the AncientHoldings hub, which injects storage and firing through the three hooks.
 
 ## Schedule engine
 
@@ -147,6 +147,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.1.1** — Packaging fix: added a `require` condition to the exports map so the package is a drop-in for CommonJS consumers (e.g. the hub's tsx/CJS worker) as well as ESM. No API or behaviour change from v0.1.0.
 
 **v0.1.0** — First published version: 7-mode schedule engine + injectable tickOnce tick engine.
 
