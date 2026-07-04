@@ -1,0 +1,31 @@
+{
+  "name": "khronoton",
+  "version": "0.0.0",
+  "description": "AncientPantheon scheduler Constructor workspace — home of @ancientpantheon/khronoton-core, the headless framework-agnostic scheduling engine.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@ancientpantheon/khronoton-core",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces",
+    "test:watch": "npm run test:watch --workspaces",
+    "clean": "npm run clean --workspaces"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AncientPantheon/Khronoton.git"
+  },
+  "license": "UNLICENSED"
+}

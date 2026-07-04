@@ -1,0 +1,179 @@
+name: Publish to npmjs.org
+
+# Triggered by pushing a version tag (e.g. v0.1.0).
+#
+# Single-package repo: the tag `vX.Y.Z` must match the version in
+# packages/khronoton-core/package.json exactly — a mismatch fails the
+# workflow before npm sees a single byte. Documentation gates (README
+# Status line, README version history, CHANGELOG first heading) then
+# verify the docs shipped inside the npm artifact reference the version
+# being published.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    name: Publish @ancientpantheon/khronoton-core
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The default GITHUB_TOKEN has read-only `contents` scope. Creating
+    # a Release via `gh release create` requires `contents: write`.
+    # `id-token: write` is required for npm publish's `--provenance`
+    # flag — npm uses the OIDC token GitHub Actions issues via this
+    # permission to mint a SLSA attestation linking the published
+    # tarball to the exact workflow run that produced it.
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Plain Node setup — no registry-url here so setup-node doesn't
+      # write its own scoped .npmrc. We write the root .npmrc ourselves
+      # in the next step.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Explicit .npmrc for the publish — written at the repo root so
+      # npm picks it up regardless of working directory. `always-auth`
+      # + the registry-specific _authToken line is the canonical pattern
+      # npm itself documents for CI publishing. The token comes from the
+      # AncientPantheon org secret NPM_TOKEN and is never echoed — only
+      # the redacted structure is printed.
+      - name: Write .npmrc with auth token
+        run: |
+          cat > .npmrc <<EOF
+          //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
+          @ancientpantheon:registry=https://registry.npmjs.org
+          always-auth=true
+          EOF
+          echo "--- .npmrc structure (token redacted) ---"
+          sed 's|=.*|=***|' .npmrc
+
+      # Fail fast: a missing or expired NPM_TOKEN should kill the run
+      # here, before any build minutes are spent. Bare `npm whoami`
+      # (no `|| echo` fallback) exits non-zero when auth is broken.
+      - name: Verify npm auth
+        run: npm whoami
+
+      - name: Install dependencies
+        run: npm install --prefer-offline --no-audit --no-fund
+
+      # Belt-and-suspenders: typecheck + build + tests gate the publish
+      # so a broken package never makes it to the registry.
+      #
+      # ORDER: typecheck → build → test. Build before test so an emit
+      # failure fails the gate early and `dist/` is guaranteed present
+      # for the publish step; tests import source relatively and do not
+      # consume `dist/`.
+      - name: Typecheck + Build + Test
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+
+      # The tag IS the release version. It must equal the version in
+      # packages/khronoton-core/package.json — otherwise the tag is
+      # wrong and nothing publishes.
+      - name: Verify tag matches package version
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(node -p "require('./packages/khronoton-core/package.json').version")
+          echo "Tag version: $TAG_VERSION"
+          echo "khronoton-core version: $PKG_VERSION"
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match packages/khronoton-core/package.json version $PKG_VERSION"
+            echo "::error::Bump packages/khronoton-core/package.json to $TAG_VERSION before tagging."
+            exit 1
+          fi
+
+          echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      # README + CHANGELOG version-parity gate. Both files ship inside
+      # the npm artifact and render on npmjs.com — they must reference
+      # the version being published, or the published page lies about
+      # what it contains.
+      - name: Verify README + CHANGELOG mention the publish version
+        run: |
+          TAG_VERSION="${{ steps.version.outputs.TAG_VERSION }}"
+          PKG_DIR="packages/khronoton-core"
+          echo "── Validating @ancientpantheon/khronoton-core ──"
+
+          # README: ## Status block must reference the version
+          if ! grep -qE "\`${TAG_VERSION}\`[[:space:]]+on public npmjs" "${PKG_DIR}/README.md"; then
+            echo "::error::${PKG_DIR}/README.md ## Status block does not lead with version ${TAG_VERSION}"
+            echo "::error::Expected: a line containing \`${TAG_VERSION}\` on public npmjs"
+            exit 1
+          fi
+          echo "✓ ${PKG_DIR}/README.md ## Status block references ${TAG_VERSION}"
+
+          # README: version history must contain a **vX.Y.Z** entry
+          if ! grep -qE "^\*\*v${TAG_VERSION}\*\*[[:space:]]" "${PKG_DIR}/README.md"; then
+            echo "::error::${PKG_DIR}/README.md version history is missing a **v${TAG_VERSION}** paragraph"
+            exit 1
+          fi
+          echo "✓ ${PKG_DIR}/README.md version history contains **v${TAG_VERSION}** entry"
+
+          # CHANGELOG: first ## heading must be the version
+          FIRST_HEADING=$(grep -m1 '^## ' "${PKG_DIR}/CHANGELOG.md")
+          if ! echo "$FIRST_HEADING" | grep -qE "^## ${TAG_VERSION}[[:space:]]"; then
+            echo "::error::${PKG_DIR}/CHANGELOG.md's first ## heading does not match version ${TAG_VERSION}"
+            echo "::error::First heading found: ${FIRST_HEADING}"
+            exit 1
+          fi
+          echo "✓ ${PKG_DIR}/CHANGELOG.md leads with: ${FIRST_HEADING}"
+
+          echo "All documentation gates passed at v${TAG_VERSION}."
+
+      # Idempotent publish — skip if the version already exists on npm.
+      # If a re-tag-push re-runs this workflow after a partial failure,
+      # `npm publish` would fail with "version already published".
+      # Pre-check via `npm view` and skip — the registry is the source
+      # of truth.
+      #
+      # NOTE: `--provenance` requires the GitHub repo to be public at
+      # the time the first tag is pushed — provenance attestation on a
+      # private repo fails the publish.
+      - name: Publish @ancientpantheon/khronoton-core to npmjs.org
+        run: |
+          TAG_VERSION="${{ steps.version.outputs.TAG_VERSION }}"
+          if npm view @ancientpantheon/khronoton-core@${TAG_VERSION} version >/dev/null 2>&1; then
+            echo "@ancientpantheon/khronoton-core@${TAG_VERSION} already on npm — skipping (idempotent)."
+          else
+            npm publish --workspace=@ancientpantheon/khronoton-core --access public --provenance
+          fi
+
+      # One Release per tag. The Release body is the annotated-tag
+      # message; granular history lives in the package CHANGELOG and
+      # on npmjs.com.
+      - name: Create GitHub Release for the pushed tag
+        env:
+          # Prefer a user-supplied PAT (RELEASE_TOKEN) when present —
+          # bypasses any org-level "Workflow permissions" lockdown that
+          # caps the auto-provided GITHUB_TOKEN at read-only. Falls back
+          # to GITHUB_TOKEN when the org policy allows write or when
+          # the secret is unset.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Skip if Release already exists (idempotent — supports manual re-runs).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release for $TAG already exists — skipping."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-from-tag \
+              --latest
+            echo "Created GitHub Release for $TAG."
+          fi

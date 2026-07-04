@@ -45,5 +45,6 @@ scheduler is Phase 4 of the AncientPantheon kickstart plan.
 
 ## License
 
-See [LICENSE](LICENSE) — all rights reserved pending a final
-(expected permissive) license decision before first release.
+Proprietary — **all rights reserved**. See [LICENSE](LICENSE). No rights
+are granted to any third party; the software is for the exclusive use of
+AncientHoldings (ancientholdings.eu). Not open source.
