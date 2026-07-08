@@ -41,3 +41,6 @@ pnpm-debug.log*
 # Test output
 test-results/
 playwright-report/
+
+# Local source art (not tracked)
+.media/
