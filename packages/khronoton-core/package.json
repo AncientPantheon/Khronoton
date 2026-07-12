@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js",
+      "require": "./dist/server/index.js"
     }
   },
   "files": [
@@ -38,5 +43,12 @@
     "registry": "https://registry.npmjs.org",
     "access": "public"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "optionalDependencies": {
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.11.1"
+  }
 }

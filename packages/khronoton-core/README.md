@@ -6,7 +6,7 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
-**`0.1.1` on public npmjs** — headless scheduler engine, drop-in for both ESM and CommonJS consumers. Both engines are implemented and locked by contract suites in `tests/`: the schedule math (the 7-mode model, `computeNextFire`, `summariseSchedule`, and the in-tree cron parser) and the injectable `tickOnce(now, deps)` tick engine. Consumed by the AncientHoldings hub, which injects storage and firing through the three hooks.
+**`0.2.0` on public npmjs** — the headless scheduler engine at the root `.` import (unchanged), plus a new **server/automaton engine** at the `@ancientpantheon/khronoton-core/server` subpath. The root schedule math (the 7-mode model, `computeNextFire`, `summariseSchedule`, the in-tree cron parser) and the injectable `tickOnce(now, deps)` engine are locked by contract suites; the `/server` surface adds the full stand-alone automaton behind six injection seams — the store + atomic claim-before-fire (exactly-once), the headless single-transaction executor, the server tick + `startKhronotonLoop`, the server-resolver registry, and `installSchema` — so a consuming Automaton (e.g. Mnemosyne) can run scheduled on-chain firing by injecting only its host adapters. Both import conditions (ESM `import` + CJS `require`) resolve on both the root and the subpath.
 
 ## Schedule engine
 
@@ -138,15 +138,87 @@ const result = tickOnce(new Date('2026-05-24T12:00:00.500Z'), {
 
 Persistence, queues, timers, HTTP, or any framework binding — those stay in the host (the AncientHoldings hub keeps its own glue and imports this package for the scheduling logic). The `tickOnce` tick engine walks due schedules and invokes host hooks, but it never touches storage, queues, or clocks itself — the host injects all coupling through `loadDue`/`enqueueFire`/`persistNextFire`.
 
-## Install
+## Server engine (`/server`)
 
-Not yet installable — the package is unpublished. Once released:
+The `@ancientpantheon/khronoton-core/server` subpath is the stand-alone automaton layer: everything needed to run scheduled, signed, on-chain firing on top of the root schedule engine. It ships **no** chain client, **no** database driver, and **no** framework — the host injects those through six seams. The root `.` import (pure schedule math + `tickOnce`) is byte-unchanged and carries no server dependency.
+
+```ts
+import {
+  installSchema,
+  codexCronotonTickOnce,
+  processDueManualBatchesOnce,
+  startKhronotonLoop,
+  executeCodexTransaction,
+  registerServerResolver,
+  fireByServerResolver,
+} from '@ancientpantheon/khronoton-core/server';
+```
+
+### The six injection seams
+
+The host provides these; the engine stays framework- and chain-agnostic:
+
+- **`KeyResolver`** — resolves a public key to a signing keypair (`getKeyPairByPublicKey`, `listCodexPubs`). This is where the codex signs.
+- **`ChainRuntime`** — the chain client + constants: a Pact builder, `createClient(url) → { dirtyRead, submit, listen }`, a universal signer, gas helpers (`calculateAutoGasLimit`, `anuToStoa`), and `networkId` / `namespace` / `getPactUrl` / `gasStationAccount`.
+- **`Database`** — a minimal structural handle (`exec`, `prepare(...).run/get/all`); a `better-sqlite3` instance satisfies it structurally, but any driver of that shape works. Run `installSchema(db)` once to create the three tables.
+- **`onAudit`** — a sink called once per fire with `{ action, result, targetKind, targetId, detail }`.
+- **`resolveFireMode`** — synchronous `(cronotonId) => 'test' | 'live'`; a per-row `fire_mode_override='live'` wins first.
+- **`Config`** — six optional knobs; each defaults when omitted:
+
+  | Field | Default | Meaning |
+  | --- | --- | --- |
+  | `tickIntervalMs` | `30_000` | Loop interval |
+  | `listenTimeoutMs` | `300_000` | Fire listen timeout |
+  | `autoGasCeiling` | `2_000_000` | AUTO-gas pre-flight build ceiling |
+  | `singleTxGasGuard` | `1_600_000` | Server-resolver single-tx gas guard |
+  | `tickBatchLimit` | `100` | Rows claimed per tick |
+  | `manualBatch` | `{ min: 2, max: 60, intervalSeconds: 60 }` | Manual-batch bounds + spacing |
+
+  (There is no `gasPriceFloor` or `ttl` knob — the executor uses each cronoton's own `definition.config` gas price and TTL directly.)
+
+### Exactly-once (claim-before-fire)
+
+A due fire happens **once and only once**. Before firing, the tick issues an atomic conditional `UPDATE` that re-asserts the row is still due and advances its `next_fire_at` in the same statement; it fires only if that write claimed the row (`changes === 1`). Two overlapping ticks on the same row → the second claim is a no-op → no double-submit. This is the primary double-fire guard and needs **no leader election**; a multi-worker lease, if ever wanted, is the host's concern.
+
+### Wire-in recipe (Automaton host, e.g. Mnemosyne)
+
+```ts
+import Database from 'better-sqlite3';
+import { installSchema, startKhronotonLoop } from '@ancientpantheon/khronoton-core/server';
+
+const db = new Database('automaton.db');
+db.pragma('foreign_keys = ON');
+installSchema(db);
+
+const ctx = {
+  db,
+  resolver,        // your KeyResolver adapter
+  runtime,         // your ChainRuntime adapter
+  onAudit,         // your audit sink
+  resolveFireMode, // () => 'test' | 'live'
+  config,          // full Config (or omit fields to take the defaults above)
+};
+
+const { stop } = startKhronotonLoop(ctx); // ticks every config.tickIntervalMs; call stop() to halt
+```
+
+### API route contract (deferred)
+
+This bump ships the engine only. Framework-agnostic HTTP handlers (create/edit/list/trigger/simulate a cronoton) are **not** included — a host writes thin routes over the exported store + `executeCodexTransaction`/`fireByServerResolver` surface. The route contract is documented for that; concrete handlers arrive in a later bump.
+
+### Node floor
+
+The `/server` subpath's CJS `require` condition relies on Node's `require(esm)` support (Node **≥ 20.19 / ≥ 22.12**), the same mechanism as the root's 0.1.1 `require` condition — so the effective Node floor for CommonJS consumers is ≥ 20.19. The package `engines` field stays `>=20` (unchanged), matching the root.
+
+## Install
 
 ```bash
 npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.2.0** — Added the server/automaton engine on the new `@ancientpantheon/khronoton-core/server` subpath (dual ESM `import` + CJS `require`), behind six injection seams (`KeyResolver`, `ChainRuntime`, `Database`, `onAudit`, `resolveFireMode`, `Config`): the store + atomic claim-before-fire (exactly-once, proven end-to-end), the headless single-transaction executor (never-throws-on-fire, dirty-read pre-flight, AUTO-gas calibrate, 504/derived-key recovery), the server tick + `startKhronotonLoop`, the server-resolver registry/dispatcher, and `installSchema` for the three tables — lifted faithfully from the AncientHoldings hub's inline `codex-cronoton` system and generalised. The root `.` schedule engine is unchanged.
 
 **v0.1.1** — Packaging fix: added a `require` condition to the exports map so the package is a drop-in for CommonJS consumers (e.g. the hub's tsx/CJS worker) as well as ESM. No API or behaviour change from v0.1.0.
 
