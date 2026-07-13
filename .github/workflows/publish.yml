@@ -81,11 +81,16 @@ jobs:
       # khronoton-stoachain package lives in the same workspace but is not
       # published here; its real-`@stoachain` integration tests must not gate
       # core's release. (`npm run build` is already the core-only root script.)
-      - name: Typecheck + Build + Test (khronoton-core)
-        run: |
-          npm run typecheck --workspace=@ancientpantheon/khronoton-core
-          npm run build
-          npm test --workspace=@ancientpantheon/khronoton-core
+      # Split into three steps so a failure localises to typecheck / build / test
+      # from the run summary alone (log access can be gated). `npm test` runs the
+      # deterministic gate suite; the `*.real.test.ts` chain-SDK integration tests
+      # are excluded (see packages/khronoton-core/vitest.config.ts).
+      - name: Typecheck (khronoton-core)
+        run: npm run typecheck --workspace=@ancientpantheon/khronoton-core
+      - name: Build (khronoton-core)
+        run: npm run build
+      - name: Test (khronoton-core)
+        run: npm test --workspace=@ancientpantheon/khronoton-core
 
       # The tag IS the release version. It must equal the version in
       # packages/khronoton-core/package.json — otherwise the tag is
