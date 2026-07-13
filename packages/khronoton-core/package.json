@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,28 @@
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js",
       "require": "./dist/server/index.js"
-    }
+    },
+    "./handlers": {
+      "types": "./dist/handlers/index.d.ts",
+      "import": "./dist/handlers/index.js",
+      "require": "./dist/handlers/index.js"
+    },
+    "./provider": {
+      "types": "./dist/provider/index.d.ts",
+      "import": "./dist/provider/index.js",
+      "require": "./dist/provider/index.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks/index.d.ts",
+      "import": "./dist/hooks/index.js",
+      "require": "./dist/hooks/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js",
+      "require": "./dist/ui/index.js"
+    },
+    "./ui.css": "./dist/ui.css"
   },
   "files": [
     "dist",
@@ -23,12 +44,14 @@
     "README.md",
     "LICENSE"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "**/*.css"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsup && node scripts/bundle-css.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -44,11 +67,35 @@
     "access": "public"
   },
   "license": "UNLICENSED",
+  "peerDependencies": {
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
   "optionalDependencies": {
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.4",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.13",
-    "better-sqlite3": "^12.11.1"
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@uiw/react-codemirror": "^4.23.10",
+    "better-sqlite3": "^12.11.1",
+    "jsdom": "^29.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tsup": "^8.4.0"
   }
 }

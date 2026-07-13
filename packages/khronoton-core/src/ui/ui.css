@@ -1,0 +1,35 @@
+/* ============================================================
+   @ancientpantheon/khronoton-core/ui.css — the themeable token base.
+   Every Khronoton UI component styles ONLY via var(--khr-*). To reskin,
+   a consumer overrides any --khr-* on `body .khronoton-ui` (specificity
+   (0,1,1) beats this (0,1,0) block regardless of stylesheet load order);
+   overriding a subset leaves the rest inherited.  Base palette = the
+   AncientHoldings Hub codex-cronoton palette.
+   ============================================================ */
+:root,
+.khronoton-ui {
+  --khr-bg: #0a0a0f;
+  --khr-panel: #0a0a0a;
+  --khr-inset: #111111;
+  --khr-border: #262626;
+  --khr-text: #e5e7eb;
+  --khr-text-dim: #8a8f98;
+  --khr-text-dim2: #6b7280;
+  --khr-mono: #d2d3d4;
+  --khr-accent: #f0a500;
+  --khr-accent-tint: #1a1500;
+  --khr-blue: #60a5fa;
+  --khr-blue-bg: #1e3a5f;
+  --khr-amber: #fbbf24;
+  --khr-amber-bg: #422006;
+  --khr-success: #4ade80;
+  --khr-success-bg: rgba(20, 83, 45, 0.4);
+  --khr-error: #f87171;
+  --khr-error-bg: rgba(127, 29, 29, 0.4);
+  --khr-nothing: #fdba74;
+  --khr-nothing-bg: rgba(124, 45, 18, 0.4);
+  --khr-radius: 8px;
+  --khr-radius-lg: 14px;
+  --khr-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --khr-mono-font: ui-monospace, "SFMono-Regular", "Geist Mono", Menlo, Consolas, monospace;
+}

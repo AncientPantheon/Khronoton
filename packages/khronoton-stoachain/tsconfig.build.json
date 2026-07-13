@@ -8,13 +8,5 @@
     "paths": {}
   },
   "include": ["src/**/*.ts"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "src/**/*.test.ts",
-    "tests/**",
-    "src/provider",
-    "src/hooks",
-    "src/ui"
-  ]
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "tests/**"]
 }

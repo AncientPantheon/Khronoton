@@ -1,0 +1,58 @@
+{
+  "name": "@ancientpantheon/khronoton-stoachain",
+  "version": "0.1.0",
+  "description": "StoaChain adapter for @ancientpantheon/khronoton-core: wraps @stoachain/* once and exposes an async factory returning the core ChainRuntime seam.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "clean": "rimraf dist"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AncientPantheon/Khronoton.git",
+    "directory": "packages/khronoton-stoachain"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@ancientpantheon/khronoton-core": ">=0.2.0"
+  },
+  "peerDependencies": {
+    "@stoachain/kadena-stoic-legacy": "^4.3.6",
+    "@stoachain/stoa-core": "^4.3.6",
+    "@stoachain/ouronet-core": "^4.3.6"
+  },
+  "devDependencies": {
+    "@stoachain/kadena-stoic-legacy": "^4.3.6",
+    "@stoachain/stoa-core": "^4.3.6",
+    "@stoachain/ouronet-core": "^4.3.6",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  }
+}
