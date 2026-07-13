@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, configDefaults } from "vitest/config";
 
 // No `globals: true` — tests import `describe`/`it`/`expect` explicitly from
 // "vitest". The tsconfig chain typechecks tests/** without `vitest/globals`
@@ -19,5 +19,11 @@ export default defineConfig({
       "tests/**/*.test.ts",
       "tests/**/*.test.tsx",
     ],
+    // `*.real.test.ts` are integration tests that load a REAL chain SDK
+    // (`@stoachain/*`) at runtime. They must NOT gate the publish/CI run — a
+    // release can't depend on the external SDK's behaviour in the CI Node/OS
+    // environment. They run via `npm run test:integration`
+    // (vitest.integration.config.ts) as a local/dev regression guard.
+    exclude: [...configDefaults.exclude, "**/*.real.test.ts"],
   },
 });

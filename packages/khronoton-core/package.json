@@ -59,6 +59,7 @@
     "build": "tsc -p tsconfig.build.json && tsup && node scripts/bundle-css.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
     "clean": "rimraf dist"
   },
