@@ -4,6 +4,15 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.4.0 — 2026-07-13
+
+Made khronoton **chain-polyglot**: the package now ships the chain adapters it needs to talk to each supported chain, as a `/blockchain/<chain>` subpath family — rather than a separate npm package per chain. This keeps khronoton a single drop-in for every automaton while it speaks each chain's language natively. Root `.`/`/server`/`/handlers` outputs are unchanged.
+
+- **`/blockchain/stoachain`** — `createStoachainRuntime(config?) → Promise<ChainRuntime>` wraps the `@stoachain/*` runtime (client, signing, gas, constants) into the core `ChainRuntime` seam, so a StoaChain automaton (Mnemosyne, Caduceus, Aletheia, …) injects one object instead of reaching for `@stoachain/*` directly. Loads the SDK via SEQUENTIAL `await import()` (concurrent `Promise.all` crashes Node 24 with `ERR_INTERNAL_ASSERTION`); an optional `nodeBaseUrl` routes `getPactUrl`. Future chains land as sibling `/blockchain/<chain>` subpaths.
+- **Optional-peer model.** Each chain's SDK is an **optional peer dependency** (`@stoachain/*@^4.3.6` for `/blockchain/stoachain`) and is imported LAZILY inside the factory. So `npm install @ancientpantheon/khronoton-core` pulls zero chain SDKs, importing the subpath costs nothing, and only calling the factory needs the SDK — a consumer carries only the chain(s) it actually uses. `react` remains an optional peer for the `/provider`/`/hooks`/`/ui` subpaths.
+- **Consolidation.** This folds in the previously-separate `@ancientpantheon/khronoton-stoachain` package (built + tested but never published to npm); that package is removed. Its 10 tests (8 mocked + 2 real-`@stoachain` integration, the latter guarded to skip if the optional SDK is absent) move into core under `src/blockchain/`.
+- **Packaging.** `/blockchain/stoachain` carries dual `{ types, import, require }` conditions and is dist-smoked under both; it builds via tsup with `@stoachain/*` external, so the byte-stable `tsc` core (`.`/`/server`/`/handlers`) is untouched.
+
 ## 0.3.0 — 2026-07-13
 
 Added the complete drop-in **codex-cronoton experience layer** — the UI, API handlers, and React data layer a consumer needs to reproduce the AncientHoldings Hub's cronoton UX end to end. The root `.` schedule engine and the `/server` automaton engine are **byte-unchanged** from 0.2.0 (verified by SHA-256 over the `dist/index.*` + `dist/server/**` outputs); this release is purely additive on new subpaths.

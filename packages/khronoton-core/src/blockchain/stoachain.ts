@@ -1,4 +1,19 @@
-import type { ChainRuntime } from "@ancientpantheon/khronoton-core/server";
+import type { ChainRuntime } from "../server/index.js";
+
+/**
+ * `@ancientpantheon/khronoton-core/blockchain/stoachain` — the StoaChain edge.
+ *
+ * khronoton is chain-POLYGLOT, not chain-agnostic: the root `.` schedule engine
+ * and the `/server` tick/store engine orchestrate, and each `/blockchain/<chain>`
+ * subpath teaches them to speak one chain's language. This one wraps the
+ * `@stoachain/*` runtime into the core {@link ChainRuntime} seam so a StoaChain
+ * automaton injects one object instead of reaching for `@stoachain/*` directly.
+ *
+ * The `@stoachain/*` packages are OPTIONAL PEER DEPENDENCIES: importing this
+ * subpath costs nothing (the SDK imports are lazy, inside the factory), so a
+ * consumer who never talks StoaChain never installs them. Only calling
+ * `createStoachainRuntime()` pulls the SDK — and a StoaChain automaton has it.
+ */
 
 /**
  * Consumer-facing knobs for {@link createStoachainRuntime}. Every field is

@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,7 +36,12 @@
       "import": "./dist/ui/index.js",
       "require": "./dist/ui/index.js"
     },
-    "./ui.css": "./dist/ui.css"
+    "./ui.css": "./dist/ui.css",
+    "./blockchain/stoachain": {
+      "types": "./dist/blockchain/stoachain.d.ts",
+      "import": "./dist/blockchain/stoachain.js",
+      "require": "./dist/blockchain/stoachain.js"
+    }
   },
   "files": [
     "dist",
@@ -69,13 +74,25 @@
   "license": "UNLICENSED",
   "peerDependencies": {
     "react": "^18 || ^19",
-    "react-dom": "^18 || ^19"
+    "react-dom": "^18 || ^19",
+    "@stoachain/kadena-stoic-legacy": "^4.3.6",
+    "@stoachain/stoa-core": "^4.3.6",
+    "@stoachain/ouronet-core": "^4.3.6"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "react-dom": {
+      "optional": true
+    },
+    "@stoachain/kadena-stoic-legacy": {
+      "optional": true
+    },
+    "@stoachain/stoa-core": {
+      "optional": true
+    },
+    "@stoachain/ouronet-core": {
       "optional": true
     }
   },
@@ -84,6 +101,9 @@
   },
   "devDependencies": {
     "@codemirror/state": "^6.5.2",
+    "@stoachain/kadena-stoic-legacy": "^4.3.6",
+    "@stoachain/ouronet-core": "^4.3.6",
+    "@stoachain/stoa-core": "^4.3.6",
     "@codemirror/view": "^6.36.4",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",

@@ -15,6 +15,7 @@
     "tests/**",
     "src/provider",
     "src/hooks",
-    "src/ui"
+    "src/ui",
+    "src/blockchain"
   ]
 }

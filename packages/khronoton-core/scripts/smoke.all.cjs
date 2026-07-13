@@ -17,6 +17,9 @@ const EXPECT = {
   "/provider": ["KhronotonProvider", "createFetchAdapter", "createMemoryAdapter", "runGated", "assertAdapter"],
   "/hooks": ["useCronotons", "useCronoton", "useCronotonActions", "useExecuteNow", "useCronotonFires"],
   "/ui": ["KhronotonUiRoot", "List", "Detail", "Builder", "Public", "RelativeTime", "CronotonStatusBadge"],
+  // The chain adapter is lazy — importing the subpath resolves the factory export
+  // without loading `@stoachain/*` (those load only when the factory is called).
+  "/blockchain/stoachain": ["createStoachainRuntime"],
 };
 
 const failures = [];
@@ -45,5 +48,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(
-  "[smoke.all.cjs] CJS require OK — all 6 JS subpaths + ui.css resolved via the exports map (require(esm)).",
+  "[smoke.all.cjs] CJS require OK — all 7 JS subpaths + ui.css resolved via the exports map (require(esm)).",
 );

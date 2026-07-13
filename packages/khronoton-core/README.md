@@ -6,13 +6,17 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
-**`0.3.0` on public npmjs** — the complete drop-in codex-cronoton experience, matching the AncientHoldings Hub. On top of the byte-unchanged root `.` schedule engine and `/server` automaton engine (both from 0.2.0), 0.3.0 adds the whole experience layer as new subpaths so a consumer wires the Hub's cronoton UX end to end without re-implementing it:
+**`0.4.0` on public npmjs** — the complete drop-in codex-cronoton experience, matching the AncientHoldings Hub, now **chain-polyglot**. On top of the byte-unchanged root `.` schedule engine and `/server` automaton engine (both from 0.2.0), the package ships the whole experience layer as subpaths so a consumer wires the Hub's cronoton UX end to end without re-implementing it:
 
 - **`/handlers`** — framework-agnostic HTTP route handlers over the `/server` store + executor (list/get/fires/signers/commit/edit/pause/resume/delete/simulate/execute-now/trigger/batch/recover), driven by a tiny `HandlerRequest`/`HandlerResponse` seam so any router (Next.js, Express, …) can mount them.
 - **`/provider` + `/hooks`** — the React data layer: `<KhronotonProvider adapter={…}>`, the 16-method `KhronotonAdapter` seam with two reference adapters (`createFetchAdapter` over HTTP, `createMemoryAdapter` over in-process handlers), the shared `runGated` confirm-retry, and the data + action hooks (`useCronotons`/`useCronoton`/`useCronotonFires`/`useManualBatch` + the lifecycle/execute action hooks).
 - **`/ui` + `/ui.css`** — the React UI at full Hub parity: the four screens **List**, **Detail/Observe** (fire history with 50/page pager, definition-drift flag, result tooltip, pluggable multi-tx renderer, wired recover), **Builder** (two-pane create + edit, Config/Payload/Gas Payer/Signatures/Execute tabs, Simulate→AUTO-gas calibrate), and a **Public** read-only transparency view — themed entirely through `--khr-*` CSS variables inside `<KhronotonUiRoot>`.
 
-Chain specifics stay out of core: the `@stoachain/*` `ChainRuntime` wrap ships as the separate **`@ancientpantheon/khronoton-stoachain`** adapter, so core remains zero-runtime-dependency and chain-agnostic. Every JS subpath resolves under both import conditions (ESM `import` + CJS `require`); React is an optional peer for the `/provider`, `/hooks`, and `/ui` subpaths only. The root `.` and `/server` outputs are byte-identical to 0.2.0.
+Khronoton isn't chain-*agnostic* — it's chain-*polyglot*: the root schedule/tick engine orchestrates, and the **`/blockchain/<chain>`** subpath family teaches it to speak each supported chain's language natively (0.4.0):
+
+- **`/blockchain/stoachain`** — `createStoachainRuntime(config?)` wraps the `@stoachain/*` runtime into the core `ChainRuntime` seam, so a StoaChain automaton injects one object instead of reaching for `@stoachain/*` directly. Future chains land as sibling subpaths (`/blockchain/<chain>`).
+
+Each chain's SDK is an **optional peer dependency** (`@stoachain/*` for `/blockchain/stoachain`), and the adapter imports it lazily — so `npm install @ancientpantheon/khronoton-core` pulls **zero** chain SDKs, and you carry only the SDK(s) for the chain(s) you actually import. It's one package, one version, one drop-in for every automaton. Likewise React is an optional peer for the `/provider`, `/hooks`, and `/ui` subpaths only. Every JS subpath resolves under both import conditions (ESM `import` + CJS `require`); the root `.`, `/server`, and `/handlers` outputs are byte-identical to 0.3.0/0.2.0.
 
 ## Schedule engine
 
@@ -223,6 +227,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.4.0** — Made khronoton **chain-polyglot**: added the `/blockchain/<chain>` subpath family, starting with `/blockchain/stoachain` (`createStoachainRuntime(config?)` → the core `ChainRuntime` seam, wrapping `@stoachain/*`). Each chain's SDK is an **optional peer dependency** imported lazily, so the package stays zero-SDK on install and a consumer carries only the chains it imports — one package, one drop-in for every automaton, rather than a separate npm package per chain. (This folds in the previously-separate `@ancientpantheon/khronoton-stoachain`, which is removed and was never published.) Root `.`/`/server`/`/handlers` outputs unchanged. React and `@stoachain/*` are optional peers for their respective subpaths only.
 
 **v0.3.0** — Added the complete drop-in **experience layer** on new subpaths, byte-preserving the root `.` and `/server` outputs from 0.2.0: `/handlers` (framework-agnostic HTTP route handlers over the store + executor, behind a tiny request/response seam), `/provider` + `/hooks` (the React data layer — `<KhronotonProvider>`, the 16-method `KhronotonAdapter` seam with `createFetchAdapter`/`createMemoryAdapter` reference adapters, the shared `runGated` confirm-retry, and the data + action hooks), and `/ui` + `/ui.css` (the React UI at full Hub parity — the four screens List, Detail/Observe with the 50/page fire-history pager + definition-drift + result tooltip + pluggable multi-tx renderer + wired recover, the two-pane create/edit Builder with Simulate→AUTO-gas calibrate, and a Public read-only view — themed via `--khr-*` inside `<KhronotonUiRoot>`). Chain specifics stay out of core as the separate `@ancientpantheon/khronoton-stoachain` `ChainRuntime` adapter; core stays zero-runtime-dependency with React an optional peer for the three React subpaths. Every JS subpath resolves under both ESM `import` and CJS `require`.
 

@@ -46,7 +46,7 @@ vi.mock("@stoachain/ouronet-core/constants", () => ({
   STOA_AUTONOMIC_OURONETGASSTATION: mockGasStation,
 }));
 
-import { createStoachainRuntime } from "./index";
+import { createStoachainRuntime } from "./stoachain";
 
 describe("createStoachainRuntime", () => {
   it("is an async factory: the call returns a Promise before the runtime resolves", () => {
