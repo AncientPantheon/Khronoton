@@ -6,7 +6,7 @@
 # the version stays installable, it just carries a warning. To UN-deprecate,
 # re-run with an empty message (or `npm deprecate <pkg>@<v> ""`).
 #
-# Auth mirrors publish.yml exactly: the AncientPantheon org secret NPM_TOKEN,
+# Auth mirrors publish.yml exactly: the AncientPantheon org secret NPM_PUBLISHER,
 # written into a root .npmrc, never echoed. Requires the same token that
 # publishes the package.
 name: Deprecate version
@@ -39,14 +39,14 @@ jobs:
       - name: Write .npmrc with auth token
         run: |
           cat > .npmrc <<EOF
-          //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
+          //registry.npmjs.org/:_authToken=${{ secrets.NPM_PUBLISHER }}
           @ancientpantheon:registry=https://registry.npmjs.org
           always-auth=true
           EOF
           echo "--- .npmrc structure (token redacted) ---"
           sed 's|=.*|=***|' .npmrc
 
-      # Fail fast: a missing or expired NPM_TOKEN dies here before touching the registry.
+      # Fail fast: a missing or expired NPM_PUBLISHER dies here before touching the registry.
       - name: Verify auth
         run: npm whoami
 
