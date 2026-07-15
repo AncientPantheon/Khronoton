@@ -1,0 +1,9 @@
+{
+  "name": "khronoton-preview-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local static serving for the Khronoton UI mockup, bound to the LocalHost registry port.",
+  "scripts": {
+    "dev": "node localhost-dev.mjs"
+  }
+}

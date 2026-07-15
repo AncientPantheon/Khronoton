@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Khronoton UI — mockup</title>
+<style>
+/* ============================================================
+   KHRONOTON UI — themeable token layer ("/ui.css" contract).
+   Base palette = the AncientHoldings Hub codex-cronoton palette.
+   Consumers recolor by overriding --khr-* on `body .khronoton-ui`.
+   ============================================================ */
+:root, .khronoton-ui {
+  --khr-bg: #0a0a0f;
+  --khr-panel: #0a0a0a;
+  --khr-inset: #111111;
+  --khr-border: #262626;
+  --khr-text: #e5e7eb;
+  --khr-text-dim: #8a8f98;
+  --khr-text-dim2: #6b7280;
+  --khr-mono: #d2d3d4;
+  --khr-accent: #f0a500;
+  --khr-accent-tint: #1a1500;
+  --khr-blue: #60a5fa;        --khr-blue-bg: #1e3a5f;
+  --khr-amber: #fbbf24;       --khr-amber-bg: #422006;
+  --khr-success: #4ade80;     --khr-success-bg: rgba(20,83,45,.40);
+  --khr-error: #f87171;       --khr-error-bg: rgba(127,29,29,.40);
+  --khr-nothing: #fdba74;     --khr-nothing-bg: rgba(124,45,18,.40);
+  --khr-radius: 8px;
+  --khr-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --khr-mono-font: ui-monospace, "SFMono-Regular", "Geist Mono", Menlo, Consolas, monospace;
+}
+body[data-theme="mnemosyne"] .khronoton-ui { --khr-bg:#0d0a07; --khr-panel:#120f0b; --khr-inset:#1a1612; --khr-border:#2a241c; --khr-accent:#d4a04a; --khr-accent-tint:#241c10; }
+body[data-theme="aletheia"] .khronoton-ui { --khr-bg:#070b12; --khr-panel:#0a111d; --khr-inset:#0e1626; --khr-border:#1c2c44; --khr-accent:#5b9dff; --khr-accent-tint:#0f1f36; }
+body[data-theme="light"] .khronoton-ui { --khr-bg:#f6f7f9; --khr-panel:#ffffff; --khr-inset:#f1f2f4; --khr-border:#e2e5ea; --khr-text:#1a1d21; --khr-text-dim:#5b616b; --khr-mono:#24292f; --khr-accent:#b8860b; --khr-accent-tint:#faf3e0; --khr-success-bg:rgba(20,83,45,.12); --khr-error-bg:rgba(127,29,29,.12); --khr-nothing-bg:rgba(124,45,18,.12); }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--khr-bg); color: var(--khr-text); font-family: var(--khr-font); font-size: 13px; line-height: 1.5; }
+.khronoton-ui { min-height: 100vh; }
+a { color: inherit; }
+.mono { font-family: var(--khr-mono-font); }
+
+/* demo harness (not part of the package) */
+.demobar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:10px 18px; border-bottom:1px solid var(--khr-border); background:var(--khr-inset); position:sticky; top:0; z-index:30; }
+.brand { display:flex; align-items:center; gap:9px; font-weight:600; letter-spacing:.3px; }
+.brand .dot { width:9px; height:9px; border-radius:50%; background:var(--khr-accent); box-shadow:0 0 10px var(--khr-accent); }
+.brand small { color:var(--khr-text-dim); font-weight:400; }
+.navtabs { display:flex; gap:4px; margin-left:8px; }
+.navtabs button { background:transparent; border:1px solid transparent; color:var(--khr-text-dim); padding:6px 12px; border-radius:var(--khr-radius); cursor:pointer; font:inherit; font-size:13px; }
+.navtabs button:hover { color:var(--khr-text); border-color:var(--khr-border); }
+.navtabs button.active { color:var(--khr-accent); border-color:var(--khr-border); background:var(--khr-panel); }
+.demobar .spacer { flex:1; }
+.demobar label { color:var(--khr-text-dim); font-size:12px; }
+.demobar select { background:var(--khr-inset); color:var(--khr-text); border:1px solid var(--khr-border); border-radius:var(--khr-radius); padding:5px 8px; font:inherit; font-size:12px; }
+.demonote { font-size:11px; color:var(--khr-text-dim); }
+
+.wrap { max-width:1160px; margin:0 auto; padding:22px 20px 70px; }
+.view { display:none; } .view.active { display:block; }
+
+/* shared primitives (mirror Hub classes) */
+.eyebrow { color:var(--khr-accent); font-size:11px; text-transform:uppercase; letter-spacing:.12em; margin:0 0 4px; }
+h1 { font-size:22px; font-weight:700; margin:0 0 4px; }
+.desc { color:var(--khr-text-dim); font-size:12px; line-height:1.6; max-width:760px; margin:0 0 20px; }
+.backlink { color:var(--khr-accent); font-size:12px; text-decoration:none; opacity:.85; }
+.label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.09em; color:var(--khr-text-dim); margin-bottom:5px; }
+.sublabel { display:block; font-size:10px; color:var(--khr-text-dim2); margin-bottom:4px; }
+.hint { font-size:10px; color:var(--khr-text-dim2); margin-top:4px; line-height:1.5; }
+.hint code, .desc code { font-family:var(--khr-mono-font); color:var(--khr-mono); background:var(--khr-inset); padding:0 3px; border-radius:3px; }
+.input { width:100%; background:var(--khr-panel); border:1px solid var(--khr-border); color:#fff; font:inherit; font-size:12px; padding:6px 9px; border-radius:6px; outline:none; }
+body[data-theme="light"] .input { color:#1a1d21; }
+.input:focus { border-color:var(--khr-accent); }
+.input.mono, textarea.input { font-family:var(--khr-mono-font); }
+textarea.input { resize:vertical; }
+select.input { appearance:none; }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.field { margin-bottom:14px; }
+.sectitle { color:var(--khr-accent); font-size:11px; text-transform:uppercase; letter-spacing:.09em; margin:0 0 12px; }
+.footer-signed { margin-top:34px; text-align:center; font-size:11px; color:var(--khr-text-dim2); }
+.footer-signed .mono { color:var(--khr-text-dim); }
+
+.btn { border:1px solid var(--khr-border); background:var(--khr-panel); color:var(--khr-text); padding:7px 13px; border-radius:6px; cursor:pointer; font:inherit; font-size:12px; }
+.btn:hover { border-color:var(--khr-accent); }
+.btn.gold { color:var(--khr-accent); }
+.btn.primary { background:var(--khr-accent-tint); color:var(--khr-accent); border-color:var(--khr-accent); font-weight:600; }
+.btn.sm { padding:4px 8px; font-size:11px; }
+.btn.tiny { padding:2px 7px; font-size:10px; }
+.btn:disabled { opacity:.45; cursor:not-allowed; }
+.btn.block { width:100%; text-align:center; padding:9px; }
+.linkbtn { background:none; border:none; color:var(--khr-accent); font:inherit; font-size:10px; cursor:pointer; padding:0; }
+.linkbtn.dim { color:var(--khr-text-dim2); }
+
+.badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+.badge.dot::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.chip { font-size:9px; font-weight:700; padding:1px 6px; border-radius:999px; letter-spacing:.03em; }
+.chip-manual { background:var(--khr-inset); color:var(--khr-text-dim2); border:1px solid var(--khr-border); }
+.chip-auto { background:var(--khr-accent-tint); color:var(--khr-accent); border:1px solid color-mix(in srgb, var(--khr-accent) 45%, transparent); }
+.chip-blue { background:var(--khr-blue-bg); color:var(--khr-blue); }
+.chip-amber { background:var(--khr-amber-bg); color:var(--khr-amber); }
+.st-active{color:var(--khr-accent);background:color-mix(in srgb,var(--khr-accent) 18%,transparent);}
+.st-paused{color:var(--khr-text-dim);background:color-mix(in srgb,var(--khr-text-dim) 16%,transparent);}
+.st-completed,.fr-success{color:var(--khr-success);background:var(--khr-success-bg);}
+.st-error,.fr-failure{color:var(--khr-error);background:var(--khr-error-bg);}
+.fr-running{color:var(--khr-amber);background:var(--khr-amber-bg);animation:pulse 1.6s ease-in-out infinite;}
+.fr-nothing{color:var(--khr-nothing);background:var(--khr-nothing-bg);border-color:color-mix(in srgb,var(--khr-nothing) 40%,transparent);}
+@keyframes pulse{50%{opacity:.55;}}
+.mode{font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 6px;border-radius:4px;border:1px solid;}
+.mode-live{color:var(--khr-success);border-color:color-mix(in srgb,var(--khr-success) 55%,transparent);}
+.mode-test{color:var(--khr-amber);border-color:color-mix(in srgb,var(--khr-amber) 50%,transparent);}
+
+.card{background:var(--khr-panel);border:1px solid var(--khr-border);border-radius:12px;}
+.panel{background:var(--khr-panel);border:1px solid var(--khr-border);border-radius:var(--khr-radius);padding:14px;}
+table{width:100%;border-collapse:collapse;}
+thead th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--khr-text-dim);padding:9px 12px;background:var(--khr-inset);font-weight:600;}
+tbody td{padding:10px 12px;border-top:1px solid var(--khr-border);font-size:12.5px;vertical-align:middle;}
+tbody tr:hover{background:color-mix(in srgb,var(--khr-accent) 4%,transparent);}
+.rk{font-family:var(--khr-mono-font);font-size:11.5px;color:var(--khr-text-dim);}
+.explorer{color:var(--khr-accent);text-decoration:none;font-size:11.5px;white-space:nowrap;}
+.explorer:hover{text-decoration:underline;}
+.name-link{color:var(--khr-text);font-weight:600;text-decoration:none;}
+.name-link:hover{color:var(--khr-accent);}
+.muted{color:var(--khr-text-dim);}.tiny{font-size:11px;color:var(--khr-text-dim);}
+.flex{display:flex;align-items:center;gap:10px;}.between{justify-content:space-between;}.gap6{gap:6px;}.wrapf{flex-wrap:wrap;}
+
+/* builder */
+.builder{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;}
+@media(max-width:960px){.builder{grid-template-columns:1fr;}.navtabs{display:none;}.two{grid-template-columns:1fr;}}
+.editor-box{background:var(--khr-panel);border:1px solid var(--khr-border);border-radius:var(--khr-radius);padding:14px;display:flex;flex-direction:column;gap:12px;}
+.editor-head{display:flex;align-items:center;justify-content:space-between;}
+.editor-head h3{color:var(--khr-accent);font-size:11px;text-transform:uppercase;letter-spacing:.09em;margin:0;}
+.cm{border:1px solid var(--khr-border);border-radius:6px;overflow:hidden;height:460px;display:flex;background:#0a0a0a;}
+body[data-theme="light"] .cm{background:#f1f2f4;}
+.cm .gutter{background:#0d1117;color:#555;font-family:var(--khr-mono-font);font-size:12px;padding:8px 8px 8px 10px;text-align:right;user-select:none;min-width:34px;}
+body[data-theme="light"] .cm .gutter{background:#e7e9ec;color:#9aa0a6;}
+.cm .code{flex:1;padding:8px 10px;font-family:var(--khr-mono-font);font-size:12px;color:#d2d3d4;white-space:pre;overflow:auto;}
+body[data-theme="light"] .cm .code{color:#24292f;}
+.tabbar{display:flex;flex-wrap:wrap;gap:4px;border:1px solid var(--khr-border);border-radius:var(--khr-radius);padding:4px;background:var(--khr-panel);margin-bottom:14px;}
+.tabbar button{flex:1;font-size:11px;padding:7px 4px;border-radius:6px;font-weight:600;border:none;background:transparent;color:var(--khr-text-dim);cursor:pointer;}
+.tabbar button.active{background:var(--khr-accent-tint);color:var(--khr-accent);}
+.tabpane{display:none;}.tabpane.active{display:block;}
+.disp{background:var(--khr-inset);border:1px solid var(--khr-border);border-radius:6px;color:var(--khr-mono);font-size:12px;padding:6px 9px;}
+
+.radio-card{border:1px solid var(--khr-border);border-radius:var(--khr-radius);padding:12px;margin-bottom:8px;}
+.radio-card.on{border-color:var(--khr-accent);}
+.radio-card.off{opacity:.85;}
+.radio-card.disabled{opacity:.5;}
+.rc-head{display:flex;align-items:center;gap:10px;}
+.rdot{width:16px;height:16px;border-radius:50%;border:2px solid #525252;flex:none;display:flex;align-items:center;justify-content:center;}
+.rdot.on{border-color:var(--khr-accent);}
+.rdot.on::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--khr-accent);}
+.rc-title{font-size:12px;font-weight:600;}
+.rc-sub{font-size:11px;color:var(--khr-text-dim2);margin-top:8px;line-height:1.5;}
+.rc-body{margin-top:10px;}
+.picker{max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:4px;}
+.pick-group{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--khr-text-dim2);margin:6px 0 2px;}
+.pick-item{display:flex;align-items:center;gap:8px;background:var(--khr-inset);border:1px solid transparent;border-radius:6px;padding:6px 9px;cursor:pointer;font-size:12px;}
+.pick-item.on{background:var(--khr-accent-tint);}
+.pick-item .pk{margin-left:auto;font-family:var(--khr-mono-font);font-size:10px;color:var(--khr-text-dim2);}
+.warn-inline{display:flex;align-items:center;gap:6px;font-size:10px;color:#f59e0b;margin-top:8px;}
+.chip-line{display:flex;align-items:center;gap:8px;background:var(--khr-inset);border-radius:6px;padding:6px 9px;font-family:var(--khr-mono-font);font-size:11px;color:var(--khr-text-dim);}
+
+.signer{border:1px solid var(--khr-border);border-radius:6px;background:var(--khr-inset);padding:9px;margin-bottom:8px;}
+.signer.system{border-color:color-mix(in srgb,var(--khr-accent) 40%,transparent);}
+.signer-head{display:flex;align-items:center;gap:8px;}
+.signer-head .pk{font-family:var(--khr-mono-font);font-size:12px;color:var(--khr-text);flex:1;overflow:hidden;text-overflow:ellipsis;}
+.note-amber{display:flex;align-items:center;gap:6px;font-size:10px;color:#a3a3a3;background:var(--khr-accent-tint);border:1px solid color-mix(in srgb,var(--khr-accent) 25%,transparent);border-radius:6px;padding:6px 8px;margin-top:8px;}
+.cap-lock{display:flex;align-items:center;gap:8px;border:1px solid var(--khr-accent);background:#0d0d0a;border-radius:6px;padding:6px 8px;margin-top:6px;font-family:var(--khr-mono-font);font-size:12px;color:var(--khr-accent);}
+.seg{display:inline-flex;gap:6px;margin-top:8px;}
+.seg button{font-size:11px;padding:4px 12px;border-radius:6px;border:1px solid var(--khr-border);background:var(--khr-panel);color:var(--khr-text-dim2);cursor:pointer;}
+.seg button.on{background:var(--khr-accent-tint);border-color:var(--khr-accent);color:var(--khr-accent);}
+
+.summary{display:flex;flex-direction:column;gap:5px;border:1px solid var(--khr-border);border-radius:6px;padding:9px;}
+.srow{display:flex;align-items:center;justify-content:space-between;font-size:11px;}
+.srow .k{color:var(--khr-text-dim2);}.srow .v{color:var(--khr-text);font-family:var(--khr-mono-font);}
+.sim-ok{background:#0d1a0d;border:1px solid #1a3a1a;color:#4ade80;}
+.sim-banner{margin-top:8px;border-radius:6px;padding:7px 10px;font-size:11px;}
+.toggle-buttons{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;}
+.tgl{width:36px;height:28px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;border:1px solid var(--khr-border);border-radius:6px;background:var(--khr-inset);color:var(--khr-text);cursor:pointer;}
+.tgl.on{border-color:var(--khr-accent);color:var(--khr-accent);background:#1a1a1a;}
+.nextfire{border-top:1px solid var(--khr-border);padding-top:8px;margin-top:10px;font-size:11px;color:var(--khr-text-dim);}
+.nextfire .mono{color:var(--khr-accent);}
+.blockers{margin:8px 0 0;padding-left:16px;font-size:10px;color:var(--khr-text-dim);}
+.blockers li{margin:2px 0;}
+
+/* detail / fire log */
+.detail-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap;}
+.meta-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:16px;}
+@media(max-width:760px){.meta-grid{grid-template-columns:repeat(2,1fr);}}
+.meta .label{margin-bottom:3px;}.meta .val{font-size:13px;}
+.section-title{font-size:13px;font-weight:600;margin:24px 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-top:1px solid var(--khr-border);flex-wrap:wrap;}
+.pager .pages{display:flex;gap:4px;align-items:center;flex-wrap:wrap;}
+.pager .pages button{min-width:30px;padding:4px 8px;font-size:11px;border:1px solid var(--khr-border);background:var(--khr-panel);color:var(--khr-text-dim);border-radius:6px;cursor:pointer;}
+.pager .pages button.on{border-color:var(--khr-accent);color:var(--khr-accent);background:var(--khr-accent-tint);}
+.pager .pages button:disabled{opacity:.4;cursor:not-allowed;}
+.publicbar{background:color-mix(in srgb,var(--khr-accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--khr-accent) 30%,transparent);border-radius:6px;padding:9px 14px;font-size:12px;margin-bottom:16px;display:flex;gap:8px;align-items:center;}
+.batch{display:flex;align-items:center;gap:12px;padding:14px 16px;}
+.progress{flex:1;height:7px;background:var(--khr-inset);border-radius:999px;overflow:hidden;border:1px solid var(--khr-border);}
+.progress>span{display:block;height:100%;background:var(--khr-accent);}
+.footer-note{margin-top:26px;padding-top:14px;border-top:1px solid var(--khr-border);font-size:12px;color:var(--khr-text-dim);}
+.mt0{margin-top:0;}
+</style>
+</head>
+<body data-theme="default">
+<div class="khronoton-ui">
+
+  <div class="demobar">
+    <div class="brand"><span class="dot"></span> Khronoton <small>/ui · mockup</small></div>
+    <div class="navtabs">
+      <button data-view="list" class="active">Cronotons</button>
+      <button data-view="create">Create</button>
+      <button data-view="observe">Observe</button>
+      <button data-view="public">Public view</button>
+    </div>
+    <span class="spacer"></span>
+    <label>consumer theme</label>
+    <select id="theme">
+      <option value="default">Khronoton (Hub base)</option>
+      <option value="mnemosyne">Mnemosyne recolor</option>
+      <option value="aletheia">Aletheia recolor</option>
+      <option value="light">Light</option>
+    </select>
+    <span class="demonote">↑ same components, tokens overridden</span>
+  </div>
+
+  <div class="wrap">
+
+    <!-- ==================== LIST ==================== -->
+    <section class="view active" data-view="list">
+      <div class="flex between wrapf">
+        <div><h1>Codex Cronotons</h1><p class="desc" style="margin-bottom:0">Scheduled, codex-signed on-chain transactions. Public-readable transparency list.</p></div>
+        <button class="btn primary" onclick="go('create')">+ New Codex Cronoton</button>
+      </div>
+      <div class="card" style="margin-top:18px">
+        <table>
+          <thead><tr><th>Name</th><th>Operation / Schedule</th><th>Next fire</th><th>Last fire</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="list-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================== CREATE ==================== -->
+    <section class="view" data-view="create">
+      <a class="backlink" href="#" onclick="go('list');return false">← Codex Cronotons</a>
+      <p class="eyebrow" style="margin-top:14px">Codex-signed scheduled transaction</p>
+      <h1>New Codex Cronoton</h1>
+      <p class="desc">Write a Pact transaction and configure gas, payload, gas payer, signers and a schedule. Run Simulate as a pre-flight (it calibrates the AUTO gas limit); Commit signs and schedules the job server-side using the hub's codex keys. The browser never holds key material.</p>
+
+      <!-- Row A -->
+      <div class="two">
+        <div class="field"><span class="label">Name</span><input class="input" placeholder="Daily payout" /></div>
+        <div class="field"><span class="label">Description (optional)</span><input class="input" placeholder="What this codex cronoton does" /></div>
+      </div>
+      <!-- Row B -->
+      <div class="two">
+        <div class="field">
+          <span class="label">Server resolver</span>
+          <select class="input" id="resolver-sel" onchange="document.getElementById('resolver-note').style.display=this.value?'block':'none'">
+            <option value="">None (ordinary cronoton)</option>
+            <option value="stoicism-mint">Stoicism mint (fills stoicism-values/targets + settles)</option>
+          </select>
+        </div>
+        <div class="field"><p id="resolver-note" class="hint" style="display:none;color:var(--khr-accent)">⟳ Fills <code>stoicism-values</code> / <code>stoicism-targets</code> at fire time and settles balances on success. Your Pact code must read both via <code>(read-msg "…")</code>. Keep AUTO gas on — it calibrates at fire time once the data is resolved.</p></div>
+      </div>
+      <!-- Row C (create-only) -->
+      <div class="two">
+        <div class="field"><label class="flex gap6" style="font-size:11px;color:var(--khr-text-dim);cursor:pointer"><input type="checkbox" style="accent-color:var(--khr-accent)" /> Externally fireable (allow the external HMAC trigger endpoint to fire this)</label></div>
+        <div class="field">
+          <span class="label">Runtime arg keys (optional)</span>
+          <input class="input" placeholder="comma or newline separated, e.g. amount, recipient" />
+          <p class="hint">env-data keys a trigger supplies at fire time (read via <code>read-string</code>). Declaring any key makes this cronoton trigger-only — the scheduler will not auto-fire it. Leave empty for an ordinary fixed cronoton.</p>
+        </div>
+      </div>
+
+      <!-- Two pane -->
+      <div class="builder" style="margin-top:6px">
+        <div class="editor-box">
+          <div class="editor-head"><h3>PACT Code Editor</h3><button class="linkbtn dim">Clear</button></div>
+          <div class="cm"><div class="gutter">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8</div><div class="code">(coin.transfer
+  "k:treasury-hot-wallet"
+  "k:treasury-cold-vault"
+  (read-decimal "amount"))</div></div>
+        </div>
+        <div>
+          <div class="tabbar">
+            <button class="active" data-tab="config">Config</button>
+            <button data-tab="payload">Payload</button>
+            <button data-tab="gas">Gas Payer</button>
+            <button data-tab="sig">Signatures</button>
+            <button data-tab="exec">Execute</button>
+          </div>
+
+          <div class="tabpane active" data-tab="config"><div class="panel">
+            <p class="sectitle">Transaction Configuration</p>
+            <div class="field"><span class="label">Chain ID</span><input class="input mono" value="0" /><p class="hint">Single chain per job (Stoa Network).</p></div>
+            <div class="field"><span class="label">Gas Price (ANU)</span><input class="input" type="number" value="10000" /><p class="hint">Minimum 10,000 ANU (protocol floor).</p></div>
+            <div class="field">
+              <div class="flex between"><span class="label" style="margin:0">Gas Limit <span class="chip chip-manual" id="gas-badge">MANUAL</span></span><button class="linkbtn" id="gas-toggle" onclick="toggleGas()">Switch to auto</button></div>
+              <input class="input" type="number" value="1500" id="gas-input" style="margin-top:5px" />
+              <p class="hint" id="gas-hint" style="display:none">Run Simulate to calibrate the auto gas limit.</p>
+            </div>
+            <div class="field"><span class="label">Max Tx Fee (ANU)</span><div class="disp">15,000,000 ANU <span class="muted">(gas price x gas limit)</span></div></div>
+            <div class="field"><span class="label">Time To Live (seconds)</span><input class="input" type="number" value="600" /><p class="hint">Range: 60s (1 min) to 86,400s (24 hours).</p></div>
+          </div></div>
+
+          <div class="tabpane" data-tab="payload"><div class="panel">
+            <div class="flex between"><p class="sectitle" style="margin:0">Payload (env-data)</p><button class="linkbtn">Switch to raw JSON</button></div>
+            <div style="margin-top:12px">
+              <div class="flex gap6" style="align-items:flex-end;margin-bottom:8px">
+                <div style="flex:1"><span class="sublabel">Key</span><input class="input mono" value="amount" placeholder="amount" /></div>
+                <div style="width:96px"><span class="sublabel">Type</span><select class="input"><option>string</option><option>number</option><option selected>json</option><option>boolean</option></select></div>
+                <div style="flex:1"><span class="sublabel">Value</span><input class="input mono" value="1500.0" /></div>
+                <button class="btn tiny" style="color:var(--khr-text-dim)">Remove</button>
+              </div>
+              <button class="btn sm gold">+ Add data entry</button>
+            </div>
+            <div style="border-top:1px solid var(--khr-border);margin-top:14px;padding-top:12px">
+              <p class="sectitle">Keysets</p>
+              <div style="border:1px solid var(--khr-border);border-radius:6px;padding:9px;margin-bottom:8px">
+                <div class="flex gap6" style="align-items:flex-end;margin-bottom:8px">
+                  <div style="flex:1"><span class="sublabel">Name</span><input class="input mono" value="treasury-guard" placeholder="ks" /></div>
+                  <div style="width:128px"><span class="sublabel">Predicate</span><select class="input"><option>keys-all</option><option>keys-any</option><option>keys-2</option></select></div>
+                  <button class="btn tiny" style="color:var(--khr-text-dim)">Remove</button>
+                </div>
+                <span class="sublabel">Keys (one 64-hex public key per line)</span>
+                <textarea class="input mono" rows="2">k:cold-vault-key-1
+k:cold-vault-key-2</textarea>
+              </div>
+              <button class="btn sm gold">+ Add keyset</button>
+            </div>
+          </div></div>
+
+          <div class="tabpane" data-tab="gas"><div class="panel">
+            <p class="sectitle">Gas Payer</p>
+            <div class="radio-card off" onclick="pickGas(this,0)"><div class="rc-head"><span class="rdot"></span>🔑 <span class="rc-title">Pay with Codex Key</span></div></div>
+            <div class="radio-card disabled"><div class="rc-head"><span class="rdot"></span>🗝️ <span class="rc-title" style="color:var(--khr-text-dim2)">Pay with Foreign Key</span><span class="chip" style="margin-left:auto;background:var(--khr-border);color:var(--khr-text-dim2)">Unavailable</span></div><p class="rc-sub">Foreign-key gas payment isn't available for scheduled codex transactions — the Hub signs only from the sealed codex.</p></div>
+            <div class="radio-card on" onclick="pickGas(this,2)"><div class="rc-head"><span class="rdot on"></span>⛽ <span class="rc-title">Ouronet Gas Station</span></div>
+              <div class="rc-body">
+                <div class="chip-line">⛽ Ouronet Gas Station (STOA_AUTONOMIC_OURONETGASSTATION)</div>
+                <p class="rc-sub">The Ouronet Gas Station pays gas on the job's behalf. Pick the codex key that signs the DALOS.GAS_PAYER capability.</p>
+                <p class="pick-group">Signing Key (DALOS.GAS_PAYER capability)</p>
+                <div class="picker">
+                  <div class="pick-item on">✓ Gas signer (seed #1)<span class="pk">k:9f3a…c21b</span></div>
+                  <div class="pick-item">Operator key<span class="pk">k:71de…88af</span></div>
+                </div>
+              </div>
+            </div>
+          </div></div>
+
+          <div class="tabpane" data-tab="sig"><div class="panel">
+            <p class="sectitle">Signers (2)</p>
+            <div class="signer system">
+              <div class="signer-head">🔒 <span class="pk">k:9f3a4d…c21b</span><span class="chip chip-amber">Gas Payer</span></div>
+              <div class="note-amber">⚠ Auto-added from the gas payer — its capability is managed for you.</div>
+              <div class="cap-lock">🔒 (ouronet-ns.DALOS.GAS_PAYER "" 0 0.0)</div>
+            </div>
+            <div class="signer">
+              <div class="signer-head"><span class="pk">k:treasury-hot-wallet</span><span class="chip chip-blue">derived</span><button class="linkbtn" style="color:var(--khr-error);margin-left:auto">x</button></div>
+              <div class="seg"><button>pure</button><button class="on">scoped</button></div>
+              <div style="margin-top:8px"><span class="sublabel">Capabilities (one per line, e.g. (coin.GAS))</span><textarea class="input mono" rows="2" placeholder="(coin.GAS)">(coin.TRANSFER "k:treasury-hot-wallet" "k:treasury-cold-vault" 1500.0)</textarea></div>
+            </div>
+            <div style="border-top:1px solid var(--khr-border);margin-top:12px;padding-top:12px">
+              <p class="pick-group">Add Signer (Codex Keys)</p>
+              <div class="picker">
+                <div class="pick-item">Operator key <span class="chip chip-blue" style="margin-left:8px">Codex Keys</span><button class="linkbtn" style="margin-left:auto">+ Add</button></div>
+                <div class="pick-item">Gas signer (seed #1) <span class="chip chip-amber" style="margin-left:8px">Gas Payer</span></div>
+              </div>
+            </div>
+          </div></div>
+
+          <div class="tabpane" data-tab="exec"><div class="panel">
+            <p class="sectitle">Transaction Summary</p>
+            <div class="summary">
+              <div class="srow"><span class="k">Chain</span><span class="v">0</span></div>
+              <div class="srow"><span class="k">Gas</span><span class="v">1,500 @ 10000 ANU</span></div>
+              <div class="srow"><span class="k">TTL</span><span class="v">600s</span></div>
+              <div class="srow"><span class="k">Payload keys</span><span class="v">1</span></div>
+              <div class="srow"><span class="k">Gas payer</span><span class="v">Ouronet Gas Station</span></div>
+              <div class="srow"><span class="k">Signers</span><span class="v">2 (1 caps)</span></div>
+              <div class="srow"><span class="k">Schedule</span><span class="v">Every 1440 min</span></div>
+            </div>
+            <button class="btn block gold" style="margin-top:12px">Simulate</button>
+            <div class="sim-banner sim-ok">Simulate OK. Calibrated gas: 1,400. Gas used: 700.</div>
+
+            <div style="margin-top:14px"><div class="panel" style="padding:12px">
+              <p class="sectitle">Schedule</p>
+              <div class="field"><span class="label">Mode</span>
+                <select class="input" id="sched-mode" onchange="renderSched(this.value)">
+                  <option value="daily-at-utc">Daily at UTC</option>
+                  <option value="every-n-minutes" selected>Every N minutes</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="cron-expression">Cron expression</option>
+                  <option value="one-time">One-time</option>
+                  <option value="several-times-per-day">Several times per day</option>
+                </select>
+              </div>
+              <div id="sched-form"></div>
+              <div class="nextfire">Next fire: <span class="mono" id="nextfire">2026-07-14T00:00:00.000Z</span></div>
+            </div></div>
+
+            <button class="btn block primary" style="margin-top:14px">Commit Codex Cronoton</button>
+          </div></div>
+        </div>
+      </div>
+      <p class="footer-signed">Signed in as <span class="mono">ancient@ancientholdings.eu</span>.</p>
+    </section>
+
+    <!-- ==================== OBSERVE ==================== -->
+    <section class="view" data-view="observe"></section>
+    <!-- ==================== PUBLIC ==================== -->
+    <section class="view" data-view="public"></section>
+  </div>
+</div>
+
+<script>
+const EXPLORER="https://explorer.stoachain.com/transactions";
+const CRONOTONS=[
+  {name:"Daily treasury sweep",desc:"Move idle STOA hot→cold nightly",op:"coin.transfer · every 1440m",sched:"Every 1440 min",status:"active",next:"in 6h",last:{ok:true},resolver:false},
+  {name:"Stoicism mint (hourly)",desc:"Server-resolved mint run",op:"stoicism.mint · hourly",sched:"cron 0 * * * *",status:"active",next:"in 12m",last:{ok:true},resolver:true},
+  {name:"Genesis airdrop",desc:"One-shot distribution",op:"airdrop.claim · one-time",sched:"one-time",status:"completed",next:"—",last:{ok:true},resolver:false},
+  {name:"Oracle price push",desc:"Paused pending review",op:"oracle.push · every 5m",sched:"Every 5 min",status:"paused",next:"—",last:{ok:false},resolver:false},
+];
+const esc=s=>(s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const rkChar="ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz0123456789";
+function fakeRk(seed){let s="";for(let i=0;i<43;i++)s+=rkChar[(seed*7+i*13)%rkChar.length];return s;}
+function statusBadge(s){return `<span class="badge dot st-${s}">${s}</span>`;}
+function fireBadge(s){const l={success:"success",failure:"failure",running:"running…",nothing:"nothing"}[s];return `<span class="badge dot fr-${s}">${l}</span>`;}
+
+// list
+document.getElementById("list-body").innerHTML=CRONOTONS.map(c=>`
+  <tr><td><a class="name-link" href="#" onclick="go('observe');return false">${esc(c.name)}</a>
+      <div class="tiny">${esc(c.desc)}${c.resolver?' · <span class="chip chip-amber">updates server state</span>':''}</div></td>
+    <td><div class="mono tiny">${esc(c.op)}</div><div class="tiny muted">${esc(c.sched)}</div></td>
+    <td class="tiny">${c.next}</td>
+    <td>${c.status==="paused"?'<span class="tiny muted">—</span>':`<span class="badge dot fr-${c.last.ok?'success':'failure'}">${c.last.ok?'ok':'failed'}</span>`}</td>
+    <td>${statusBadge(c.status)}</td>
+    <td><div class="flex gap6"><button class="btn sm" onclick="go('observe')">View</button><button class="btn sm">Edit</button><button class="btn sm">${c.status==='paused'?'Resume':'Pause'}</button></div></td></tr>`).join("");
+
+// schedule sub-forms
+function hourToggles(sel){let h="";for(let i=0;i<24;i++){const v=String(i).padStart(2,"0");h+=`<span class="tgl${sel.includes(i)?' on':''}">${v}</span>`;}return h;}
+function dowToggles(sel){return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d,i)=>`<span class="tgl${sel.includes(i)?' on':''}" style="width:auto;padding:0 8px">${d}</span>`).join("");}
+function domToggles(sel){let h="";for(let i=1;i<=31;i++)h+=`<span class="tgl${sel.includes(i)?' on':''}">${i}</span>`;return h;}
+const SCHED={
+  "daily-at-utc":()=>`<div class="field"><span class="label">Hours of day (UTC)</span><div class="toggle-buttons">${hourToggles([12])}</div></div><div class="field" style="max-width:160px"><span class="label">Minute</span><input class="input" type="number" value="0"></div>`,
+  "every-n-minutes":()=>`<div class="field"><span class="label">Start date (UTC ISO 8601)</span><input class="input mono" value="2026-07-13T00:00:00.000Z" placeholder="2026-05-24T00:00:00.000Z"></div><div class="field" style="max-width:200px"><span class="label">Interval (minutes)</span><input class="input" type="number" value="1440"></div>`,
+  "weekly":()=>`<div class="field"><span class="label">Days of week (UTC)</span><div class="toggle-buttons">${dowToggles([1])}</div></div><div class="two"><div class="field"><span class="label">Hour</span><input class="input" type="number" value="12"></div><div class="field"><span class="label">Minute</span><input class="input" type="number" value="0"></div></div>`,
+  "monthly":()=>`<div class="field"><span class="label">Days of month (UTC)</span><div class="toggle-buttons">${domToggles([1])}</div></div><div class="two"><div class="field"><span class="label">Hour</span><input class="input" type="number" value="0"></div><div class="field"><span class="label">Minute</span><input class="input" type="number" value="0"></div></div>`,
+  "cron-expression":()=>`<div class="field"><span class="label">Cron expression (5-field UTC)</span><input class="input mono" value="0 12 * * *" placeholder="0 12 * * 1-5"><p class="hint">Format: minute hour dayOfMonth month dayOfWeek. UTC.</p></div>`,
+  "one-time":()=>`<div class="field"><span class="label">Fire at (UTC)</span><input class="input" type="datetime-local" value="2026-07-14T00:00"></div>`,
+  "several-times-per-day":()=>`<div class="field"><span class="label">Times of day (UTC)</span><div class="flex gap6" style="align-items:flex-end;margin-bottom:8px"><div><span class="sublabel">Hour</span><input class="input" type="number" value="9" style="width:80px"></div><div><span class="sublabel">Minute</span><input class="input" type="number" value="0" style="width:80px"></div><button class="btn tiny" style="color:var(--khr-text-dim)" disabled>Remove</button></div><button class="btn sm gold">+ Add time</button></div>`,
+};
+function renderSched(m){document.getElementById("sched-form").innerHTML=SCHED[m]();}
+function toggleGas(){const b=document.getElementById("gas-badge"),i=document.getElementById("gas-input"),t=document.getElementById("gas-toggle"),h=document.getElementById("gas-hint");const auto=b.textContent==="MANUAL";b.textContent=auto?"AUTO":"MANUAL";b.className="chip "+(auto?"chip-auto":"chip-manual");t.textContent=auto?"Switch to manual":"Switch to auto";i.readOnly=auto;i.style.opacity=auto?.7:1;h.style.display=auto?"block":"none";}
+function pickGas(el,i){document.querySelectorAll('[data-tab="gas"] .radio-card').forEach(c=>{c.classList.remove('on');if(!c.classList.contains('disabled'))c.classList.add('off');c.querySelector('.rdot').classList.remove('on');c.querySelectorAll('.rc-body').forEach(b=>b.remove&&(b.style.display='none'));});el.classList.add('on');el.classList.remove('off');el.querySelector('.rdot').classList.add('on');const body=el.querySelector('.rc-body');if(body)body.style.display='block';}
+
+// fire history — 137 mock fires, 50/page
+const STATES=["success","success","success","success","success","nothing","failure","running"];
+const FIRES=Array.from({length:137},(_,i)=>{const st=i===0?"running":STATES[(i*3)%STATES.length];const d=new Date(Date.UTC(2026,6,13,0,0,2)-i*86400000);return{at:d.toISOString().slice(0,19).replace("T"," "),mode:i%9===4?"test":"live",status:st,rk:(st==="success")?fakeRk(i+1):null,err:st==="failure"?"gas station under-funded (504)":st==="nothing"?"no rows to sweep — skipped":null,chain:"0",drift:i%17===3};});
+const PAGE=50; const pageState={observe:0,public:0};
+function fireRows(list){return list.map(f=>`<tr>
+  <td class="tiny mono">${f.at}</td>
+  <td><span class="mode mode-${f.mode}">${f.mode.toUpperCase()}</span></td>
+  <td>${fireBadge(f.status)}</td>
+  <td>${f.rk&&f.status!=="failure"?`<span class="rk">${esc(f.rk.slice(0,22))}…</span>`:`<span class="tiny" style="color:var(--khr-error)">${esc(f.err||(f.status==="running"?"pending…":"—"))}</span>`}</td>
+  <td class="tiny mono">${f.chain}</td>
+  <td class="tiny ${f.drift?'':'muted'}" ${f.drift?'style="color:var(--khr-amber)"':''}>${f.drift?'⚠ hash':'·'}</td>
+  <td>${f.rk&&f.status==="success"?`<a class="explorer" href="${EXPLORER}/${encodeURIComponent(f.rk)}" target="_blank" rel="noopener">explorer ↗</a>`:'<span class="tiny muted">—</span>'}</td></tr>`).join("");}
+function pager(view){const total=FIRES.length,pages=Math.ceil(total/PAGE),p=pageState[view],from=p*PAGE+1,to=Math.min(total,(p+1)*PAGE);
+  let nums="";for(let i=0;i<pages;i++)nums+=`<button class="${i===p?'on':''}" onclick="gotoPage('${view}',${i})">${i+1}</button>`;
+  return `<div class="pager"><span class="tiny">Showing <strong>${from}–${to}</strong> of ${total} fires · 50 per page</span>
+    <div class="pages"><button ${p===0?'disabled':''} onclick="gotoPage('${view}',0)">« First</button><button ${p===0?'disabled':''} onclick="gotoPage('${view}',${p-1})">‹ Prev</button>${nums}<button ${p>=pages-1?'disabled':''} onclick="gotoPage('${view}',${p+1})">Next ›</button><button ${p>=pages-1?'disabled':''} onclick="gotoPage('${view}',${pages-1})">Last »</button></div></div>`;}
+function fireTableFor(view){const p=pageState[view];const slice=FIRES.slice(p*PAGE,(p+1)*PAGE);
+  return `<div class="card"><table><thead><tr><th>Fired</th><th>Mode</th><th>Status</th><th>Request key / error</th><th>Chain</th><th>Def</th><th>Verify</th></tr></thead><tbody>${fireRows(slice)}</tbody></table>${pager(view)}</div>`;}
+function gotoPage(view,p){const pages=Math.ceil(FIRES.length/PAGE);pageState[view]=Math.max(0,Math.min(pages-1,p));renderView(view);}
+function metaPanel(){return `<div class="card"><div class="meta-grid">
+  <div class="meta"><span class="label">Schedule</span><span class="val">Every 1440 min</span></div>
+  <div class="meta"><span class="label">Status</span><span class="val">${statusBadge('active')}</span></div>
+  <div class="meta"><span class="label">Next fire</span><span class="val">2026-07-14 00:00 <span class="tiny muted">(in 6h)</span></span></div>
+  <div class="meta"><span class="label">Last fire</span><span class="val">2026-07-13 00:00 <span class="badge dot fr-success">ok</span></span></div>
+  <div class="meta"><span class="label">Operation</span><span class="val mono tiny">coin.transfer</span></div>
+  <div class="meta"><span class="label">Chain</span><span class="val">0</span></div>
+  <div class="meta"><span class="label">Created by</span><span class="val tiny">ancient@ancientholdings.eu</span></div>
+  <div class="meta"><span class="label">Fire mode</span><span class="val"><span class="mode mode-live">LIVE</span></span></div></div></div>`;}
+function renderView(view){
+  if(view==="observe")document.querySelector('[data-view="observe"]').innerHTML=`
+    <a class="backlink" href="#" onclick="go('list');return false">← Codex Cronotons</a>
+    <div class="detail-head" style="margin-top:14px"><div><h1>Daily treasury sweep</h1><p class="desc" style="margin-bottom:0">cron_a1 · Move idle STOA hot→cold nightly</p></div>
+      <div class="flex gap6 wrapf"><button class="btn">Edit</button><button class="btn">Pause</button><button class="btn">Execute now</button><button class="btn">Delete</button></div></div>
+    ${metaPanel()}
+    <div class="section-title">Execute multiple times</div>
+    <div class="card"><div class="batch"><span class="tiny">Batch 3 / 10</span><div class="progress"><span style="width:30%"></span></div><span class="tiny muted">next in 44s</span><button class="btn sm">Cancel batch</button></div></div>
+    <div class="section-title">Fire history <span class="tiny">· auto-refreshing (5s) while running · 50 per page</span></div>
+    ${fireTableFor("observe")}`;
+  if(view==="public")document.querySelector('[data-view="public"]').innerHTML=`
+    <div class="publicbar">🌐 <strong>Public view</strong> — read-only transparency. Anyone can verify each fire on-chain. Controls hidden; mutations stay server-guarded.</div>
+    <div class="detail-head"><div><h1>Daily treasury sweep</h1><p class="desc" style="margin-bottom:0">Public schedule &amp; fire history</p></div></div>
+    ${metaPanel()}
+    <div class="section-title">Fire history <span class="tiny">· verify each on the explorer · 50 per page</span></div>
+    ${fireTableFor("public")}
+    <div class="footer-note">Public view — read only. Sign in as an admin to manage. Powered by @ancientpantheon/khronoton-core.</div>`;
+}
+
+// nav / tabs / theme
+function go(v){document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.dataset.view===v));document.querySelectorAll('.navtabs button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));if(v==="observe"||v==="public")renderView(v);window.scrollTo(0,0);}
+document.querySelectorAll('.navtabs button').forEach(b=>b.onclick=()=>go(b.dataset.view));
+document.querySelectorAll('.tabbar button').forEach(b=>b.onclick=()=>{const box=b.closest('.builder');box.querySelectorAll('.tabbar button').forEach(x=>x.classList.toggle('active',x===b));box.querySelectorAll('.tabpane').forEach(p=>p.classList.toggle('active',p.dataset.tab===b.dataset.tab));});
+document.getElementById('theme').onchange=e=>document.body.dataset.theme=e.target.value;
+renderSched("every-n-minutes"); renderView("observe"); renderView("public");
+</script>
+</body>
+</html>
