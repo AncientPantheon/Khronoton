@@ -41,7 +41,7 @@ vi.mock("@stoachain/stoa-core/constants", () => ({
   KADENA_NETWORK: mockNetwork,
   getPactUrl: mockGetPactUrl,
 }));
-vi.mock("@stoachain/ouronet-core/constants", () => ({
+vi.mock("@ouronet/ouronet-core/constants", () => ({
   KADENA_NAMESPACE: mockNamespace,
   STOA_AUTONOMIC_OURONETGASSTATION: mockGasStation,
 }));

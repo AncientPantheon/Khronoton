@@ -74,11 +74,11 @@
   },
   "license": "UNLICENSED",
   "peerDependencies": {
-    "react": "^18 || ^19",
-    "react-dom": "^18 || ^19",
+    "@ouronet/ouronet-core": "^4.3.6",
     "@stoachain/kadena-stoic-legacy": "^4.3.6",
     "@stoachain/stoa-core": "^4.3.6",
-    "@stoachain/ouronet-core": "^4.3.6"
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
   },
   "peerDependenciesMeta": {
     "react": {
@@ -102,10 +102,10 @@
   },
   "devDependencies": {
     "@codemirror/state": "^6.5.2",
-    "@stoachain/kadena-stoic-legacy": "^4.3.6",
-    "@stoachain/ouronet-core": "^4.3.6",
-    "@stoachain/stoa-core": "^4.3.6",
     "@codemirror/view": "^6.36.4",
+    "@ouronet/ouronet-core": "^4.3.6",
+    "@stoachain/kadena-stoic-legacy": "^4.3.6",
+    "@stoachain/stoa-core": "^4.3.6",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.13",

@@ -52,7 +52,7 @@ export async function createStoachainRuntime(
   const signing = await import("@stoachain/stoa-core/signing");
   const gas = await import("@stoachain/stoa-core/gas");
   const constants = await import("@stoachain/stoa-core/constants");
-  const ouronetConstants = await import("@stoachain/ouronet-core/constants");
+  const ouronetConstants = await import("@ouronet/ouronet-core/constants");
 
   const networkId = config?.networkId ?? constants.KADENA_NETWORK;
   const namespace = config?.namespace ?? ouronetConstants.KADENA_NAMESPACE;
