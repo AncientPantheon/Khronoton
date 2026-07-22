@@ -4,6 +4,19 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.4.2 — 2026-07-22
+
+**PATCH — fix a dangling peerDependenciesMeta key.**
+
+0.4.1 renamed the Ouronet peer dependency to `@ouronet/ouronet-core` in
+`peerDependencies` but left the matching `peerDependenciesMeta` entry under the
+old `@stoachain/ouronet-core` name. The result was a meta entry marking a peer
+that no longer exists as optional, while the real `@ouronet/ouronet-core` peer
+carried no `optional: true` flag — so a consumer without it installed would see
+a spurious unmet-peer warning. This aligns the meta key with the peer.
+
+No code change; **799 specs pass**.
+
 ## 0.4.1 — 2026-07-22
 
 **PATCH — dependency rename, no code change.**

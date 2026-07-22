@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -93,7 +93,7 @@
     "@stoachain/stoa-core": {
       "optional": true
     },
-    "@stoachain/ouronet-core": {
+    "@ouronet/ouronet-core": {
       "optional": true
     }
   },
