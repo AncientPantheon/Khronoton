@@ -6,6 +6,8 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
+**`0.4.1` on public npmjs** — **PATCH (dependency rename, no code change).** Released 2026-07-22. `@stoachain/ouronet-core` → `@ouronet/ouronet-core` — same code, new scope, following the Phase-4 split into OuroborosNetwork/ouronet-libs. **799 specs pass.**
+
 **`0.4.0` on public npmjs** — the complete drop-in codex-cronoton experience, matching the AncientHoldings Hub, now **chain-polyglot**. On top of the byte-unchanged root `.` schedule engine and `/server` automaton engine (both from 0.2.0), the package ships the whole experience layer as subpaths so a consumer wires the Hub's cronoton UX end to end without re-implementing it:
 
 - **`/handlers`** — framework-agnostic HTTP route handlers over the `/server` store + executor (list/get/fires/signers/commit/edit/pause/resume/delete/simulate/execute-now/trigger/batch/recover), driven by a tiny `HandlerRequest`/`HandlerResponse` seam so any router (Next.js, Express, …) can mount them.
@@ -227,6 +229,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.4.1** — dependency rename, no code change. Released 2026-07-22. `@stoachain/ouronet-core` → `@ouronet/ouronet-core`. **799 specs pass.**
 
 **v0.4.0** — Made khronoton **chain-polyglot**: added the `/blockchain/<chain>` subpath family, starting with `/blockchain/stoachain` (`createStoachainRuntime(config?)` → the core `ChainRuntime` seam, wrapping `@stoachain/*`). Each chain's SDK is an **optional peer dependency** imported lazily, so the package stays zero-SDK on install and a consumer carries only the chains it imports — one package, one drop-in for every automaton, rather than a separate npm package per chain. (This folds in the previously-separate `@ancientpantheon/khronoton-stoachain`, which is removed and was never published.) Root `.`/`/server`/`/handlers` outputs unchanged. React and `@stoachain/*` are optional peers for their respective subpaths only.
 

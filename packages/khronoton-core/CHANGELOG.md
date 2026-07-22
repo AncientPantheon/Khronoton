@@ -4,6 +4,16 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.4.1 — 2026-07-22
+
+**PATCH — dependency rename, no code change.**
+
+The Ouronet protocol dependency moved scope: `@stoachain/ouronet-core` → **`@ouronet/ouronet-core`**. Same code and version line; the package was split out of `StoaChain/stoa-js` into [`OuroborosNetwork/ouronet-libs`](https://github.com/OuroborosNetwork/ouronet-libs) in the Phase-4 reorganisation so that published identity matches org ownership. The old name is deprecated on npm.
+
+This needs a release rather than a local edit: the published `0.4.0` peer-depends on the old name, and a consumer that also depends on the new one ends up demanding two different chain versions at once — `@ouronet/ouronet-core` pins `@stoachain/kadena-stoic-legacy` exactly, so the two cannot coexist. Anyone consuming this package alongside the renamed stack should move to 0.4.1.
+
+**799 specs pass.**
+
 ## 0.4.0 — 2026-07-13
 
 Made khronoton **chain-polyglot**: the package now ships the chain adapters it needs to talk to each supported chain, as a `/blockchain/<chain>` subpath family — rather than a separate npm package per chain. This keeps khronoton a single drop-in for every automaton while it speaks each chain's language natively. Root `.`/`/server`/`/handlers` outputs are unchanged.
