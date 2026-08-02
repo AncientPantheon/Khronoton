@@ -6,6 +6,8 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
+**`0.6.1` on public npmjs** — **PATCH.** Released 2026-08-02. Fixes a crash that white-screened the Khronoton admin list whenever it held ≥1 cronoton: `listCodexCronotons` returned a camelCase 9-field projection while `CronotonList` renders full snake_case rows, so `pact_code` was `undefined` and crashed `pactPreview`. The list now returns full `CodexCronotonRow`s (`SELECT *`, like `getCodexCronoton`) and `pactPreview` guards a missing `pact_code`. **850 specs pass.**
+
 **`0.6.0` on public npmjs** — **MINOR.** Released 2026-08-02. Server resolvers can now declare themselves **event-driven** (`ServerResolverOption.eventDriven`): selecting one in the Builder commits the cronoton scheduler-off (`next_fire_at = NULL`, never auto-fired) and swaps the schedule editor for an event-driven notice — the host fires it in-process via the existing `executeNow` (not the HMAC endpoint). Ordinary scheduled resolvers are unchanged. **848 specs pass.**
 
 **`0.5.0` on public npmjs** — **MINOR.** Released 2026-08-02. The Builder screen's Pact-code editor is now syntax-highlighted (via the package's `--khr-*` theme tokens, five new ones added), moved to a full-width top strip (~7 lines, internal scroll) with the header/tabs/tab content full-width below it, and gained a live tx-size/gas metering strip. `@uiw/react-codemirror` + the CodeMirror/Lezer packages it now depends on for highlighting are real optional `peerDependencies`. **832 specs pass.**
@@ -235,6 +237,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.6.1** — Fix a CronotonList white-screen crash on any non-empty list. `listCodexCronotons` returned a camelCase 9-field projection while the read handler declares `CodexCronotonRow[]` and `CronotonList` renders full snake_case fields — so `pact_code`/`schedule_mode`/`schedule_config_json`/`next_fire_at`/`last_fire_at`/`runtime_arg_keys`/`description`/`server_resolver` were all `undefined` and `pactPreview(row.pact_code).replace(...)` crashed. The list now returns full `CodexCronotonRow`s via `SELECT *` (matching the declared type and what the UI reads), and `pactPreview` guards a missing/non-string `pact_code` → `"(empty)"`. `CodexCronotonListItem` is now a deprecated alias of `CodexCronotonRow`. Released 2026-08-02. **850 specs pass.**
 
 **v0.6.0** — Event-driven server resolvers. `ServerResolverOption` gains an optional `eventDriven` flag; a cronoton on an event-driven resolver commits scheduler-off (`next_fire_at = NULL`, excluded from the tick due-query) and the Builder shows an "Event-driven (host-fired)" notice instead of a schedule editor. The host fires it via the existing `executeNow` primitive, in-process — event-driven is a dedicated commit-envelope flag, deliberately NOT `externalFireable`, so it never exposes the public HMAC trigger endpoint. `server_resolver` + event-driven is allowed; `server_resolver` + `runtime_arg_keys` stays forbidden. No new DB column (the `next_fire_at = NULL` state carries it; edit and pause/resume keep it NULL). Ordinary scheduled resolvers unchanged; a non-event-driven commit body is byte-identical to 0.5.0. Released 2026-08-02. **848 specs pass.**
 

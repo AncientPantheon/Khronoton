@@ -4,6 +4,18 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.6.1 — 2026-08-02
+
+**PATCH — fix a CronotonList crash (white-screen) on any non-empty list.**
+
+Opening the Khronoton admin list with ≥1 cronoton threw `TypeError: Cannot read properties of undefined (reading 'replace')` and white-screened the page — hitting every consumer the moment they had a cronoton.
+
+- **Root cause:** `listCodexCronotons` returned a hand-picked **camelCase 9-field projection**, but the read handler declares the response as `CodexCronotonRow[]` and `CronotonList` renders full **snake_case** row fields. Only `id`/`name`/`status` (identical in both casings) actually worked; `schedule_mode`, `schedule_config_json`, `next_fire_at`, `last_fire_at`, `runtime_arg_keys`, `description`, and `server_resolver` were all silently `undefined`, and `pact_code` additionally **crashed** the unguarded `pactPreview(row.pact_code).replace(...)`. Latent since 0.3.0; surfaced once consumers had cronotons and opened the list.
+- **Fix:** `listCodexCronotons` now returns full snake_case rows via `SELECT *` (mirroring `getCodexCronoton`), matching the handler's declared type and exactly what the UI reads — so the whole list renders correctly (pact preview, schedule line, last-fire badge, trigger-only detection, description, server-resolver pill), not just the crash. Plus a defensive guard so `pactPreview` treats a missing/non-string `pact_code` as `"(empty)"` and can never white-screen the page.
+- `CodexCronotonListItem` is now a deprecated alias of `CodexCronotonRow` (kept so any importer still resolves). Consumers reading the list response as `CodexCronotonRow[]` (the declared type) need no change.
+
+**850 specs pass.**
+
 ## 0.6.0 — 2026-08-02
 
 **MINOR — event-driven server resolvers (scheduler-off, host-fired).**

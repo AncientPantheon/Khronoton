@@ -239,6 +239,40 @@ describe("listCodexCronotons", () => {
     pauseCodexCronoton(a.id, { db });
     expect(listCodexCronotons({ status: "paused" }, { db }).map((r) => r.id)).toEqual([a.id]);
   });
+
+  // Regression (0.6.1): the list projection must return the FULL row fields that
+  // CronotonList renders — `pact_code` (its preview), `schedule_config_json`/
+  // `schedule_mode` (schedule line), `description`, `server_resolver`,
+  // `runtime_arg_keys`, `next_fire_at`/`last_fire_at`. The old 9-field camelCase
+  // projection returned NONE of these under the snake_case names the UI reads,
+  // white-screening the admin page on the unguarded `pactPreview(row.pact_code)`.
+  it("returns full snake_case rows carrying the fields CronotonList renders (not a camelCase projection)", () => {
+    const { id } = commitCodexCronoton(
+      validInput({
+        name: "n",
+        description: "the description",
+        pactCode: '(coin.transfer "hot" "cold" 1.0)',
+        serverResolver: "r",
+        scheduleMode: "every-n-minutes",
+        scheduleConfig: EVERY_HOUR,
+      }),
+      { now: new Date("2026-06-08T12:00:00.000Z"), db },
+    );
+    const row = listCodexCronotons({}, { db }).find((r) => r.id === id)!;
+    // The exact field the crash was on — present and a string, not undefined.
+    expect(typeof row.pact_code).toBe("string");
+    expect(row.pact_code).toBe('(coin.transfer "hot" "cold" 1.0)');
+    // The other snake_case fields the list renders are present too.
+    expect(row.description).toBe("the description");
+    expect(row.server_resolver).toBe("r");
+    expect(row.schedule_mode).toBe("every-n-minutes");
+    expect(typeof row.schedule_config_json).toBe("string");
+    expect(row).toHaveProperty("next_fire_at");
+    expect(row).toHaveProperty("last_fire_at");
+    // And NOT the old camelCase projection keys.
+    expect(row).not.toHaveProperty("scheduleMode");
+    expect(row).not.toHaveProperty("nextFireAt");
+  });
 });
 
 describe("editCodexCronoton", () => {

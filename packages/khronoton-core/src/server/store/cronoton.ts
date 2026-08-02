@@ -26,7 +26,6 @@ import {
 import { runtimeArgKeysCollide } from "../pure/runtime-args.js";
 import type { DbDep } from "../seams.js";
 import type {
-  CodexCronotonListItem,
   CodexCronotonRow,
   CodexTxConfig,
   CodexTxDefinition,
@@ -204,51 +203,34 @@ export function findCodexCronotonIdByServerResolver(
 export function listCodexCronotons(
   params: { limit?: number; offset?: number; status?: CodexCronotonRow["status"] },
   dep: DbDep,
-): CodexCronotonListItem[] {
+): CodexCronotonRow[] {
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
   const offset = Math.max(params.offset ?? 0, 0);
   const db = dep.db;
-  const rows = (
+  // Return FULL snake_case rows (`SELECT *`, mirroring `getCodexCronoton`), NOT a
+  // hand-picked projection. The read handler types this as `CodexCronotonRow[]`
+  // and `CronotonList.tsx` renders full-row fields — `pact_code` (the preview),
+  // `schedule_config_json`/`schedule_mode` (the schedule line), `runtime_arg_keys`
+  // (trigger-only), `description`, `server_resolver`, `last_fire_at`. The old
+  // 9-field camelCase projection returned NONE of those under the names the UI
+  // reads, so the list silently rendered blank columns and crashed on the one
+  // unguarded string access (`pactPreview(row.pact_code)`). The ≤200-row admin
+  // list over-fetching four JSON columns is negligible and buys type-honesty.
+  return (
     params.status
       ? db
           .prepare(
-            `SELECT id, name, schedule_mode, status, next_fire_at, last_fire_at,
-                    created_at, modified_at, created_by
-               FROM codex_cronotons WHERE status = ?
+            `SELECT * FROM codex_cronotons WHERE status = ?
                ORDER BY created_at DESC LIMIT ? OFFSET ?`,
           )
           .all(params.status, limit, offset)
       : db
           .prepare(
-            `SELECT id, name, schedule_mode, status, next_fire_at, last_fire_at,
-                    created_at, modified_at, created_by
-               FROM codex_cronotons
+            `SELECT * FROM codex_cronotons
                ORDER BY created_at DESC LIMIT ? OFFSET ?`,
           )
           .all(limit, offset)
-  ) as Array<{
-    id: string;
-    name: string;
-    schedule_mode: ScheduleMode;
-    status: CodexCronotonRow["status"];
-    next_fire_at: string | null;
-    last_fire_at: string | null;
-    created_at: string;
-    modified_at: string;
-    created_by: string;
-  }>;
-
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    scheduleMode: r.schedule_mode,
-    status: r.status,
-    nextFireAt: r.next_fire_at,
-    lastFireAt: r.last_fire_at,
-    createdAt: r.created_at,
-    modifiedAt: r.modified_at,
-    createdBy: r.created_by,
-  }));
+  ) as CodexCronotonRow[];
 }
 
 export interface EditCodexCronotonPatch {

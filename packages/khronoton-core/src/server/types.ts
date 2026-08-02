@@ -159,18 +159,16 @@ export interface CodexCronotonRow {
   created_by: string;
 }
 
-/** The list/limbo projection the route attaches `scheduleSummary` to. */
-export interface CodexCronotonListItem {
-  id: string;
-  name: string;
-  scheduleMode: ScheduleMode;
-  status: CodexCronotonRow["status"];
-  nextFireAt: string | null;
-  lastFireAt: string | null;
-  createdAt: string;
-  modifiedAt: string;
-  createdBy: string;
-}
+/**
+ * @deprecated `listCodexCronotons` now returns full {@link CodexCronotonRow}s
+ * (snake_case, `SELECT *`) so the list projection matches the read-handler's
+ * declared `CodexCronotonRow[]` response and the fields `CronotonList` actually
+ * renders (`pact_code`, `schedule_config_json`, `description`, `server_resolver`,
+ * …). This 9-field camelCase projection was the source of the CronotonList crash
+ * (0.6.0 and earlier); kept as an alias only so any external importer still
+ * resolves. Prefer {@link CodexCronotonRow}.
+ */
+export type CodexCronotonListItem = CodexCronotonRow;
 
 /**
  * Launch-state provenance of a fire — 'test' pre-lock, 'live' once the

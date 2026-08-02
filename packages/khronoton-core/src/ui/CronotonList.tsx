@@ -81,9 +81,15 @@ const EM_DASH = <span style={DIM}>—</span>;
 
 const PACT_PREVIEW_MAX = 60;
 
-/** First-glance pact preview: whitespace-collapsed, capped at 60 chars, or "(empty)". */
-function pactPreview(pactCode: string): string {
-  const collapsed = pactCode.replace(/\s+/g, " ").trim();
+/**
+ * First-glance pact preview: whitespace-collapsed, capped at 60 chars, or
+ * "(empty)". Defends against a missing/non-string `pact_code` — a list-render
+ * helper must never be able to white-screen the page over an absent optional
+ * field (the crash 0.6.1 fixes), independent of the store now returning it.
+ */
+function pactPreview(pactCode: string | null | undefined): string {
+  const collapsed =
+    typeof pactCode === "string" ? pactCode.replace(/\s+/g, " ").trim() : "";
   if (collapsed === "") return "(empty)";
   return collapsed.length > PACT_PREVIEW_MAX
     ? `${collapsed.slice(0, PACT_PREVIEW_MAX)}…`

@@ -146,6 +146,22 @@ describe("CronotonList — columns", () => {
     const dashes = Array.from(container.querySelectorAll("td")).filter((td) => td.textContent === "—");
     expect(dashes.length).toBe(2);
   });
+
+  // Regression (0.6.1): before the fix the list projection returned rows with NO
+  // `pact_code`, and `pactPreview(undefined).replace(...)` white-screened the whole
+  // admin page for any consumer with ≥1 cronoton. The render helper must survive a
+  // missing `pact_code` and show "(empty)", never throw.
+  it("does not crash and shows '(empty)' when a row is missing pact_code entirely", async () => {
+    // Delete the field to reproduce the real pre-fix runtime shape (the projection
+    // omitted it), not merely an empty string.
+    const rowWithoutPactCode = makeRow();
+    delete (rowWithoutPactCode as { pact_code?: string }).pact_code;
+    const adapter = makeAdapter([rowWithoutPactCode]);
+
+    expect(() => mountList(adapter, ADMIN)).not.toThrow();
+    await screen.findByText("Daily treasury sweep");
+    expect(screen.getByText("(empty)")).toBeTruthy();
+  });
 });
 
 describe("CronotonList — three access tiers", () => {
