@@ -95,6 +95,87 @@ describe("commitCodexCronoton — envelope adapter + confirm gate", () => {
   });
 });
 
+describe("commitCodexCronoton — event-driven envelope threading", () => {
+  it("threads envelope.eventDriven → the row commits scheduler-off (persisted next_fire_at NULL)", async () => {
+    h = buildTestCtx();
+    // An event-driven server-resolver row: host-fired via executeNow, never on a
+    // timer. If toCommitInput drops eventDriven, the store computes a real
+    // next_fire_at off the schedule and the tick loop would auto-fire it.
+    const body = validCommitBody({
+      envelope: {
+        ...validCommitBody().envelope,
+        serverResolver: "dual-link-activate",
+        eventDriven: true,
+      },
+    });
+    const res = await commitCodexCronoton(h.ctx, req({ confirmed: true, body }));
+
+    expect(res.status).toBe(201);
+    const { codexCronotonId, nextFireAt } = res.body as {
+      codexCronotonId: string;
+      nextFireAt: string | null;
+    };
+    expect(nextFireAt).toBeNull();
+    expect(getCodexCronoton(codexCronotonId, { db: h.db })?.next_fire_at).toBeNull();
+  });
+
+  it("leaves a body without eventDriven scheduled (next_fire_at keeps its computed value)", async () => {
+    h = buildTestCtx();
+    // Guards against eventDriven defaulting truthy — an ordinary body must still
+    // carry a real next_fire_at, byte-identical to today.
+    const res = await commitCodexCronoton(h.ctx, req({ confirmed: true, body: validCommitBody() }));
+
+    const { codexCronotonId } = res.body as { codexCronotonId: string };
+    expect(getCodexCronoton(codexCronotonId, { db: h.db })?.next_fire_at).toBe(
+      "2099-01-01T00:00:00.000Z",
+    );
+  });
+});
+
+describe("editCodexCronoton — event-driven patch threading", () => {
+  it("threads envelope.eventDriven → an edit forces a scheduled row scheduler-off (next_fire_at NULL)", async () => {
+    h = buildTestCtx();
+    const { id, nextFireAt } = seedCronoton(h.db);
+    // Precondition: the seeded row is a real scheduled row.
+    expect(nextFireAt).not.toBeNull();
+
+    const res = await editCodexCronoton(
+      h.ctx,
+      req({
+        confirmed: true,
+        params: { id },
+        body: {
+          envelope: { serverResolver: "dual-link-activate", eventDriven: true },
+          schedule: { mode: "one-time", config: { mode: "one-time", fireAt: "2099-06-01T00:00:00.000Z" } },
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    // Without toEditPatch mapping eventDriven, the store's schedule patch would
+    // resurrect a real next_fire_at, turning the scheduler back on.
+    expect(getCodexCronoton(id, { db: h.db })?.next_fire_at).toBeNull();
+  });
+
+  it("leaves an edit without eventDriven scheduled (next_fire_at recomputes non-null)", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+
+    await editCodexCronoton(
+      h.ctx,
+      req({
+        confirmed: true,
+        params: { id },
+        body: {
+          schedule: { mode: "one-time", config: { mode: "one-time", fireAt: "2099-06-01T00:00:00.000Z" } },
+        },
+      }),
+    );
+
+    expect(getCodexCronoton(id, { db: h.db })?.next_fire_at).toBe("2099-06-01T00:00:00.000Z");
+  });
+});
+
 describe("editCodexCronoton — patch adapter + not-found", () => {
   it("applies a name patch and returns 200 with the (recomputed) nextFireAt", async () => {
     h = buildTestCtx();

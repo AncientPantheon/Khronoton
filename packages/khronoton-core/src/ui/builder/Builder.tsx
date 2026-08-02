@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
 import { useCronotonActions, useSimulate } from "../../hooks/index.js";
-import { useKhronotonAdapter } from "../../provider/context.js";
+import { useKhronotonAdapter, useKhronotonConfig } from "../../provider/context.js";
 import type { CodexSignerDescriptor } from "../../handlers/index.js";
 import type { CodexCronotonRow } from "../../server/index.js";
 import type { Access } from "../access.js";
@@ -119,6 +119,7 @@ export function Builder({
   robots = DEFAULT_BUILDER_ROBOTS,
 }: BuilderProps): ReactNode {
   const adapter = useKhronotonAdapter();
+  const config = useKhronotonConfig();
   const actions = useCronotonActions(editId);
   const sim = useSimulate();
 
@@ -138,6 +139,15 @@ export function Builder({
   // pre-seeded empty form is never editable (and never committable) against a row
   // that hasn't arrived — and a user edit can't be clobbered by a late rehydrate.
   const editReady = !editId || loadedEditId === editId;
+
+  // Event-driven-ness is re-derived at render time: look the selected resolver up
+  // in the same options BuilderHeader uses and read its `eventDriven` flag. An
+  // event-driven resolver commits scheduler-off and swaps the schedule UI for a
+  // notice (see ExecuteTab). Non-event-driven rows compute `false` → unchanged.
+  const eventDrivenResolver = Boolean(
+    state.serverResolver &&
+      config.serverResolverOptions.find((o) => o.value === state.serverResolver)?.eventDriven,
+  );
 
   // Fetch the signer descriptors ONCE (the pickers on Gas Payer + Signatures read
   // them); a failure just leaves the pickers empty rather than blocking the form.
@@ -184,7 +194,7 @@ export function Builder({
   const handleCommit = useCallback(async () => {
     setCommitting(true);
     try {
-      const body = builderToCommit(state);
+      const body = builderToCommit(state, { eventDriven: eventDrivenResolver });
       if (isEdit && editId) {
         const res = await actions.edit.run(body);
         if (res.ok) onDone?.(editId);
@@ -197,7 +207,7 @@ export function Builder({
     } finally {
       setCommitting(false);
     }
-  }, [state, isEdit, editId, actions, onDone]);
+  }, [state, isEdit, editId, actions, onDone, eventDrivenResolver]);
 
   // Cosmetic: surface the calibrated gas limit under AUTO (ExecuteTab writes it back
   // into `config.gasLimit` + `autoGasLimit` after a successful Simulate).
@@ -278,6 +288,7 @@ export function Builder({
                 onChange={setState}
                 onCommit={handleCommit}
                 committing={committing}
+                eventDrivenResolver={eventDrivenResolver}
                 sim={sim}
               />
             )}

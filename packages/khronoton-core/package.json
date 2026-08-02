@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",

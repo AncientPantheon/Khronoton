@@ -10,9 +10,10 @@
  * Schedule math is imported, never reimplemented (REQ-16): {@link computeNextFire}
  * runs at commit/edit/resume time through {@link computeNextOrReject}, which maps
  * an {@link InvalidScheduleConfigError} to a typed {@link CodexCronotonValidationError}
- * and treats a null next-fire as a "no future fires" reject. A TRIGGER-ONLY row
- * (externally fireable OR declaring runtime args) carries NO schedule at all — its
- * `next_fire_at` stays NULL and the schedule engine is never consulted for it.
+ * and treats a null next-fire as a "no future fires" reject. A SCHEDULER-OFF row
+ * (externally fireable, OR declaring runtime args, OR event-driven — a
+ * server-resolver the host fires via `executeNow`) carries NO schedule at all —
+ * its `next_fire_at` stays NULL and the schedule engine is never consulted for it.
  */
 import crypto from "node:crypto";
 
@@ -57,6 +58,9 @@ export interface CommitCodexCronotonInput {
   /** env-data keys supplied by a trigger at fire time (default none). Must be
    *  DISJOINT from the fixed payload keys — a runtime arg must never override a keyset. */
   runtimeArgKeys?: string[];
+  /** When true, the row is host-fired on an event (via executeNow) rather than on a
+   *  timer — a THIRD trigger-only reason: it commits scheduler-off (next_fire_at NULL). */
+  eventDriven?: boolean;
 }
 
 interface CommitOpts extends DbDep {
@@ -123,11 +127,15 @@ export function commitCodexCronoton(
   }
 
   const now = opts.now ?? new Date();
-  // A TRIGGER-ONLY cronoton (externally fireable OR declaring runtime args) fires
-  // on demand — never on a timer — so it carries NO schedule: skip the next-fire
+  // A SCHEDULER-OFF cronoton (externally fireable, OR declaring runtime args, OR
+  // event-driven — a server-resolver the host fires via `executeNow`) fires on
+  // demand, never on a timer — so it carries NO schedule: skip the next-fire
   // computation and store next_fire_at = NULL. The scheduler's
   // `next_fire_at IS NOT NULL` gate then skips it.
-  const triggerOnly = input.externalFireable === true || runtimeArgKeys.length > 0;
+  const triggerOnly =
+    input.externalFireable === true ||
+    runtimeArgKeys.length > 0 ||
+    input.eventDriven === true;
   const nextFireAt = triggerOnly
     ? null
     : computeNextOrReject(input.scheduleMode, input.scheduleConfig, now).toISOString();
@@ -255,6 +263,10 @@ export interface EditCodexCronotonPatch {
   scheduleConfig?: ScheduleConfig;
   /** Set/clear the fire-time server resolver. `null` clears it. */
   serverResolver?: string | null;
+  /** When true, force the row scheduler-off (next_fire_at NULL) — an event-driven
+   *  edit or a scheduled→event-driven conversion. There is no persisted column, so
+   *  the edit path relies on this patch signal (the persisted row can't reveal it). */
+  eventDriven?: boolean;
 }
 
 /**
@@ -345,7 +357,18 @@ export function editCodexCronoton(
   // for it, even if a schedule patch slips through. Keep next_fire_at as-is (NULL).
   const rowTriggerOnly =
     rowExternalFireable(row) || rowRuntimeArgKeys(row).length > 0;
-  if (scheduleChanged && !rowTriggerOnly) {
+  // An event-driven edit forces the row scheduler-off (next_fire_at NULL). There is
+  // no persisted event_driven column, so `rowTriggerOnly` can't see it — this patch
+  // signal takes precedence and covers BOTH an event-driven→event-driven edit (keep
+  // NULL) and a scheduled→event-driven conversion (clear the row's stale non-null
+  // next_fire_at). Marking "schedule" ensures the UPDATE runs even when the clear is
+  // the only change (a pure conversion), so the early-out below doesn't skip the write.
+  if (patch.eventDriven === true) {
+    if (nextFireAt !== null && !changedFields.includes("schedule")) {
+      changedFields.push("schedule");
+    }
+    nextFireAt = null;
+  } else if (scheduleChanged && !rowTriggerOnly) {
     const next = computeNextOrReject(
       nextScheduleMode,
       JSON.parse(nextScheduleConfigJson) as ScheduleConfig,
@@ -418,11 +441,17 @@ export function resumeCodexCronoton(
   assertNotTerminal(row);
 
   const now = opts.now ?? new Date();
-  // A trigger-only row (externally fireable OR runtime-arg) has no schedule — resume
-  // it to 'active' but keep next_fire_at NULL so the scheduler still never picks it up.
-  const rowTriggerOnly =
-    rowExternalFireable(row) || rowRuntimeArgKeys(row).length > 0;
-  const nextFireAt = rowTriggerOnly
+  // A scheduler-off row has no schedule — resume it to 'active' but keep
+  // next_fire_at NULL so the scheduler still never picks it up. Every scheduler-off
+  // row (externally fireable, runtime-arg, OR event-driven — a server-resolver the
+  // host fires via executeNow) is committed with next_fire_at NULL, pause preserves
+  // it, and every genuinely-scheduled active row carries a NON-null next_fire_at —
+  // so the row's own current next_fire_at is the reliable, column-free marker here.
+  // (Event-driven persists no distinguishing column; this is what keeps resume from
+  // resurrecting a schedule for it. The edit path keys off the incoming patch signal
+  // instead, because an edit may be CONVERTING a row to or from a schedule.)
+  const rowSchedulerOff = row.next_fire_at === null;
+  const nextFireAt = rowSchedulerOff
     ? null
     : computeNextOrReject(
         row.schedule_mode,

@@ -68,7 +68,7 @@ interface MountResult {
 /** Mount the tab in a stateful harness over a provider so onChange edits re-render. */
 function mount(
   start: BuilderState,
-  opts: { adapter?: KhronotonAdapter; committing?: boolean } = {},
+  opts: { adapter?: KhronotonAdapter; committing?: boolean; eventDrivenResolver?: boolean } = {},
 ): MountResult {
   const adapter = opts.adapter ?? makeAdapter();
   const onChange = vi.fn<(next: BuilderState) => void>();
@@ -88,6 +88,7 @@ function mount(
         }}
         onCommit={onCommit}
         committing={opts.committing}
+        eventDrivenResolver={opts.eventDrivenResolver}
         sim={sim}
       />
     );
@@ -168,6 +169,26 @@ describe("ExecuteTab — embedded schedule", () => {
     mount(validState({ runtimeArgKeysText: "amount, recipient" }));
     expect(screen.queryByLabelText("Mode")).toBeNull();
     expect(screen.getByText(/never runs on a timer/i)).toBeTruthy();
+  });
+});
+
+describe("ExecuteTab — event-driven resolver", () => {
+  it("swaps the schedule editor for the event-driven notice and labels the summary host-fired", () => {
+    // Selecting an event-driven resolver makes the cronoton scheduler-off: showing a
+    // schedule editor (or a real schedule summary) would misrepresent a host-fired job.
+    mount(validState({ serverResolver: "dual-link-activate" }), { eventDrivenResolver: true });
+    expect(screen.queryByLabelText("Mode")).toBeNull();
+    expect(screen.getByText(/the host application fires this when its trigger condition is met/i))
+      .toBeTruthy();
+    expect(screen.getByTestId("summary-schedule").textContent).toContain("Event-driven (host-fired)");
+  });
+
+  it("keeps the schedule editor and summary for a non-event-driven resolver (flag absent/false)", () => {
+    // A false/absent flag must leave an ordinary scheduled resolver's ScheduleStep intact,
+    // so pyth-flush-style cronotons keep their timer UI.
+    mount(validState({ serverResolver: "pyth-flush" }), { eventDrivenResolver: false });
+    expect(screen.getByLabelText("Mode")).toBeTruthy();
+    expect(screen.getByTestId("summary-schedule").textContent).toContain("Daily at 12:00 UTC");
   });
 });
 

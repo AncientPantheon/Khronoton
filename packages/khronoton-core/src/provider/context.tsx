@@ -29,6 +29,13 @@ export interface ServerResolverOption {
   label: string;
   /** Optional gold side-note shown in the builder when this resolver is selected. */
   note?: string;
+  /**
+   * When true, a cronoton using this resolver is EVENT-DRIVEN — the scheduler never
+   * auto-fires it (persisted scheduler-off); the host application fires it on its own
+   * trigger via `executeNow`. Selecting such a resolver in the Builder replaces the
+   * schedule UI with an event-driven notice. Omit/false = ordinary scheduled cronoton.
+   */
+  eventDriven?: boolean;
 }
 
 /** A pluggable multi-tx breakdown renderer (the Hub's pool-payout is one impl). */

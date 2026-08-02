@@ -241,6 +241,25 @@ describe("builderToCommit — schedule + trigger-only + resolver", () => {
   });
 });
 
+describe("builderToCommit — eventDriven opt", () => {
+  it("sets envelope.eventDriven=true only when opts.eventDriven is truthy", () => {
+    // Selecting an event-driven resolver must commit the scheduler-off signal so
+    // the store persists next_fire_at NULL — a dropped flag would resurrect a schedule.
+    const s = committableState();
+    expect(builderToCommit(s, { eventDriven: true }).envelope.eventDriven).toBe(true);
+  });
+
+  it("omits envelope.eventDriven and stays byte-identical to no-opts for a false/absent flag", () => {
+    // Every existing builderToCommit(state) call site must produce an unchanged body
+    // for a non-event-driven row: a leaked `eventDriven: undefined` key or any diff
+    // would break the create/edit round-trip parity assertions across the suite.
+    const s = committableState();
+    expect(builderToCommit(s, { eventDriven: false }).envelope.eventDriven).toBeUndefined();
+    expect(builderToCommit(s).envelope.eventDriven).toBeUndefined();
+    expect(builderToCommit(s, { eventDriven: false })).toEqual(builderToCommit(s));
+  });
+});
+
 describe("parseRuntimeArgKeysText / isTriggerOnly", () => {
   it("splits comma-or-newline separated keys and drops blanks", () => {
     expect(parseRuntimeArgKeysText("amount, recipient\n\n note ")).toEqual([

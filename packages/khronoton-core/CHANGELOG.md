@@ -4,6 +4,21 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.6.0 — 2026-08-02
+
+**MINOR — event-driven server resolvers (scheduler-off, host-fired).**
+
+Some server-resolver cronotons are conceptually event-driven, not time-based (they fire when an external condition becomes ready, on no meaningful clock). Previously such a resolver had to masquerade as a scheduled cronoton that polls every tick, and the Builder misleadingly showed a schedule editor for it.
+
+- **`ServerResolverOption` gains an optional `eventDriven?: boolean`.** A consumer tags a resolver option event-driven; selecting it in the Builder commits the cronoton **scheduler-off** (`next_fire_at = NULL`, so the tick loop never auto-fires it) and replaces the schedule editor with an honest "Event-driven — the host application fires this when its trigger condition is met; there is no schedule." notice, with the schedule summary reading "Event-driven (host-fired)".
+- **The host fires such a cronoton via the existing `executeNow` primitive** — no new firing primitive, no change to `executeNow`. Event-driven is threaded as its own dedicated `eventDriven` flag on the commit envelope (NOT by reusing `externalFireable`, which would wrongly expose the public HMAC trigger endpoint) — an event-driven cronoton is fired in-process by the host, never over HMAC. No new DB column: `next_fire_at = NULL` already carries the scheduler-off state, and the edit/resume paths keep it NULL correctly.
+- **`server_resolver` + event-driven is allowed** (the whole feature); `server_resolver` + `runtime_arg_keys` stays forbidden.
+- Also fixed in the same pass: pausing then resuming an event-driven cronoton no longer resurrects a schedule (resume now recognizes a scheduler-off row by its `next_fire_at = NULL`); and the Builder's trigger-only notice no longer wrongly claims an externally-fireable-only cronoton "declares runtime arguments".
+
+Ordinary scheduled resolver cronotons (e.g. `pyth-flush`) are unchanged — same schedule, same UI. A non-event-driven commit body is byte-identical to 0.5.0.
+
+**848 specs pass.**
+
 ## 0.5.0 — 2026-08-02
 
 **MINOR — Builder screen: syntax-highlighted Pact editor, top/bottom layout, live tx-size/gas meter.**

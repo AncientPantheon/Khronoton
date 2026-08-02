@@ -44,6 +44,13 @@ export interface ExecuteTabProps {
   /** True while the assembly's commit call is in flight — disables Commit. */
   committing?: boolean;
   /**
+   * True when the selected server resolver declares itself event-driven. Derived
+   * in `Builder.tsx` from the resolver options; makes the cronoton scheduler-off,
+   * so this tab swaps the ScheduleStep for an event-driven notice and labels the
+   * schedule summary "Event-driven (host-fired)".
+   */
+  eventDrivenResolver?: boolean;
+  /**
    * The shared `useSimulate()` result, hoisted to `Builder.tsx` so its last
    * result can also drive the Builder-level Gas meter (see
    * `docs/work/khronoton-builder-pact-editor/design.md`, Change 3 — "State
@@ -133,6 +140,10 @@ const REASONS_STYLE: CSSProperties = {
 };
 
 const TRIGGER_ONLY_SCHEDULE = "Trigger-only (external / manual)";
+const EVENT_DRIVEN_SCHEDULE = "Event-driven (host-fired)";
+const EVENT_DRIVEN_NOTICE =
+  "Event-driven — the host application fires this when its trigger condition is met; " +
+  "there is no schedule.";
 
 /** The gas summary line: grouped limit @ raw price, with an AUTO suffix. */
 function gasLine(state: BuilderState): string {
@@ -162,11 +173,15 @@ function signersLine(state: BuilderState): string {
   return `${effectiveSignerCount(state)} (${scopedCapLineCount(state)} caps)`;
 }
 
-/** The schedule summary, or the external/manual label for a trigger-only job. */
-function scheduleLine(state: BuilderState): string {
-  return isTriggerOnly(state)
-    ? TRIGGER_ONLY_SCHEDULE
-    : summariseSchedule(state.schedule.mode, state.schedule.config);
+/**
+ * The schedule summary: the host-fired label for an event-driven resolver, the
+ * external/manual label for a trigger-only / external-fireable job, else the human
+ * schedule line.
+ */
+function scheduleLine(state: BuilderState, eventDrivenResolver?: boolean): string {
+  if (eventDrivenResolver) return EVENT_DRIVEN_SCHEDULE;
+  if (isTriggerOnly(state) || state.externalFireable) return TRIGGER_ONLY_SCHEDULE;
+  return summariseSchedule(state.schedule.mode, state.schedule.config);
 }
 
 function SummaryRow({
@@ -191,6 +206,7 @@ export function ExecuteTab({
   onChange,
   onCommit,
   committing,
+  eventDrivenResolver,
   sim,
 }: ExecuteTabProps): ReactNode {
   const [banner, setBanner] = useState<ReactNode>(null);
@@ -206,6 +222,9 @@ export function ExecuteTab({
   const gate = canCommit(state, { simulateCalibrated });
 
   const triggerOnly = isTriggerOnly(state);
+  // The scheduler is off — and the ScheduleStep swapped for a notice — for a
+  // trigger-only job, an externally-fireable one, or an event-driven resolver.
+  const schedulerOff = triggerOnly || state.externalFireable || Boolean(eventDrivenResolver);
 
   const onSimulate = async (): Promise<void> => {
     const view = await sim.run(commit.envelope as unknown as Record<string, unknown>);
@@ -261,7 +280,7 @@ export function ExecuteTab({
         <SummaryRow label="Payload keys" value={String(payloadKeyCount)} testId="summary-payload" />
         <SummaryRow label="Gas payer" value={gasPayerLabel(state.gasPayer)} testId="summary-gaspayer" />
         <SummaryRow label="Signers" value={signersLine(state)} testId="summary-signers" />
-        <SummaryRow label="Schedule" value={scheduleLine(state)} testId="summary-schedule" />
+        <SummaryRow label="Schedule" value={scheduleLine(state, eventDrivenResolver)} testId="summary-schedule" />
       </Panel>
 
       <div style={{ marginBottom: "16px" }}>
@@ -277,11 +296,15 @@ export function ExecuteTab({
       </div>
 
       <div style={{ marginBottom: "16px" }}>
-        {triggerOnly ? (
-          <div style={TRIGGER_BOX_STYLE}>
-            Trigger-only. This cronoton declares runtime arguments and never runs on a timer — it
-            fires only via the external trigger endpoint or a manual run.
-          </div>
+        {schedulerOff ? (
+          eventDrivenResolver ? (
+            <div style={TRIGGER_BOX_STYLE}>{EVENT_DRIVEN_NOTICE}</div>
+          ) : (
+            <div style={TRIGGER_BOX_STYLE}>
+              Trigger-only. This cronoton never runs on a timer — it fires only via the external
+              trigger endpoint or a manual run.
+            </div>
+          )
         ) : (
           <ScheduleStep state={state} onChange={onChange} />
         )}

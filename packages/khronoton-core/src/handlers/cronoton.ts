@@ -58,6 +58,7 @@ export interface CommitEnvelope {
   serverResolver?: string;
   externalFireable?: boolean;
   runtimeArgKeys?: string[];
+  eventDriven?: boolean;
 }
 
 /** The schedule half of a {@link CommitBody}: mode + its config. */
@@ -111,6 +112,7 @@ function toCommitInput(body: unknown, createdBy: string): CommitCodexCronotonInp
     serverResolver: envelope.serverResolver,
     externalFireable: envelope.externalFireable,
     runtimeArgKeys: envelope.runtimeArgKeys,
+    eventDriven: envelope.eventDriven,
   };
 }
 
@@ -131,6 +133,7 @@ function toEditPatch(body: unknown): EditCodexCronotonPatch {
     if (e.gasPayer !== undefined) patch.gasPayer = e.gasPayer;
     if (e.signers !== undefined) patch.signers = e.signers;
     if (e.serverResolver !== undefined) patch.serverResolver = e.serverResolver;
+    if (e.eventDriven !== undefined) patch.eventDriven = e.eventDriven;
   }
 
   const sched = b.schedule;

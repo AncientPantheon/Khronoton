@@ -21,6 +21,7 @@ import {
   resumeCodexCronoton,
   type CommitCodexCronotonInput,
 } from "./cronoton.js";
+import { fetchDueCodexCronotons } from "./claim.js";
 import {
   AutoGasGateError,
   CodexCronotonValidationError,
@@ -359,5 +360,142 @@ describe("deleteCodexCronoton", () => {
       .prepare(`SELECT id FROM codex_cronoton_fires WHERE id = ?`)
       .get("fire-1");
     expect(fire).toBeUndefined();
+  });
+});
+
+describe("event-driven server resolvers (scheduler-off via eventDriven)", () => {
+  // (a) An event-driven server-resolver create must persist scheduler-off
+  // (next_fire_at NULL) so the tick loop's due-query never auto-fires it — even
+  // when `now` is past the schedule the Builder still sends. Without threading
+  // eventDriven into triggerOnly, a real next_fire_at would be computed and the
+  // row would fire on a timer instead of on the host's event.
+  it("event-driven create persists next_fire_at NULL and is excluded from fetchDueCodexCronotons", () => {
+    const now = new Date("2026-06-08T12:00:00.000Z");
+    const { id, nextFireAt } = commitCodexCronoton(
+      validInput({
+        serverResolver: "r",
+        eventDriven: true,
+        scheduleMode: "every-n-minutes",
+        scheduleConfig: EVERY_HOUR,
+      }),
+      { now, db },
+    );
+    expect(nextFireAt).toBeNull();
+    expect(getRow(id).next_fire_at).toBeNull();
+    // Positive control: a genuinely-scheduled row committed at the same `now`
+    // with a due next_fire_at MUST be returned by the same query — so the
+    // event-driven exclusion below is the scheduler-off NULL, not a vacuous
+    // "fetchDue returned nothing" pass.
+    const { id: scheduledId } = commitCodexCronoton(
+      validInput({ scheduleMode: "every-n-minutes", scheduleConfig: EVERY_HOUR }),
+      { now, db },
+    );
+    const due = fetchDueCodexCronotons(new Date("2026-06-08T13:30:00.000Z"), 100, { db });
+    const dueIds = due.map((r) => r.id);
+    expect(dueIds).toContain(scheduledId);
+    expect(dueIds).not.toContain(id);
+  });
+
+  // (b) server_resolver + eventDriven must stay ALLOWED (the whole feature), while
+  // server_resolver + runtime_arg_keys stays FORBIDDEN — the mutual-exclusion throw
+  // must not be broadened to reject event-driven.
+  it("server-resolver + eventDriven is allowed; server-resolver + runtimeArgKeys still throws", () => {
+    expect(() =>
+      commitCodexCronoton(validInput({ serverResolver: "r", eventDriven: true }), {
+        now: new Date(),
+        db,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      commitCodexCronoton(validInput({ serverResolver: "r", runtimeArgKeys: ["x"] }), {
+        now: new Date(),
+        db,
+      }),
+    ).toThrow(/server-resolver/);
+  });
+
+  // (c) Steady state: editing an already event-driven row (the Builder always resends
+  // a schedule block, so scheduleChanged is true) must NOT resurrect a next_fire_at.
+  it("editing an event-driven row (eventDriven + schedule patch) keeps next_fire_at NULL", () => {
+    const now = new Date("2026-06-08T12:00:00.000Z");
+    const { id } = commitCodexCronoton(
+      validInput({ serverResolver: "r", eventDriven: true }),
+      { now, db },
+    );
+    editCodexCronoton(
+      id,
+      { eventDriven: true, scheduleMode: "every-n-minutes", scheduleConfig: EVERY_HOUR },
+      { now, db },
+    );
+    expect(getRow(id).next_fire_at).toBeNull();
+  });
+
+  // (d) Conversion scheduled→event-driven: the row starts with a real next_fire_at;
+  // the edit must CLEAR it to NULL so the tick loop stops firing it.
+  it("converting a scheduled row to eventDriven (+ schedule patch) clears next_fire_at to NULL", () => {
+    const now = new Date("2026-06-08T12:00:00.000Z");
+    const { id, nextFireAt } = commitCodexCronoton(
+      validInput({ scheduleMode: "every-n-minutes", scheduleConfig: EVERY_HOUR }),
+      { now, db },
+    );
+    expect(nextFireAt).not.toBeNull();
+    editCodexCronoton(
+      id,
+      {
+        serverResolver: "r",
+        eventDriven: true,
+        scheduleMode: "every-n-minutes",
+        scheduleConfig: EVERY_HOUR,
+      },
+      { now, db },
+    );
+    expect(getRow(id).next_fire_at).toBeNull();
+  });
+
+  // (e) Conversion event-driven→scheduled: the edit patch omits eventDriven (the new
+  // resolver is time-based), so the existing scheduleChanged recompute must run and
+  // restore a real next_fire_at.
+  it("converting an event-driven row to a scheduled resolver (no eventDriven) recomputes a real next_fire_at", () => {
+    const now = new Date("2026-06-08T12:00:00.000Z");
+    const { id } = commitCodexCronoton(
+      validInput({ serverResolver: "r", eventDriven: true }),
+      { now, db },
+    );
+    expect(getRow(id).next_fire_at).toBeNull();
+    const res = editCodexCronoton(
+      id,
+      { serverResolver: "r2", scheduleMode: "every-n-minutes", scheduleConfig: EVERY_HOUR },
+      { now, db },
+    );
+    const expected = computeNextFire("every-n-minutes", EVERY_HOUR, now)!.toISOString();
+    expect(res.nextFireAt).toBe(expected);
+    expect(getRow(id).next_fire_at).toBe(expected);
+  });
+
+  // (f) Pause→resume of an event-driven cronoton must NOT resurrect a schedule.
+  // Pause-to-disable is the sanctioned way to disable a server-resolver cronoton
+  // (delete is refused for them), so this is a normal operation. Event-driven
+  // persists no distinguishing column — resume must read the row's own
+  // next_fire_at NULL as "scheduler-off" and keep it NULL, or the tick loop would
+  // silently start auto-firing a host-fired cronoton on a timer it never had.
+  it("resume of an event-driven row keeps next_fire_at NULL (does not re-arm the scheduler)", () => {
+    const now = new Date("2026-06-08T12:00:00.000Z");
+    const { id } = commitCodexCronoton(
+      validInput({
+        serverResolver: "r",
+        eventDriven: true,
+        scheduleMode: "every-n-minutes",
+        scheduleConfig: EVERY_HOUR,
+      }),
+      { now, db },
+    );
+    expect(getRow(id).next_fire_at).toBeNull();
+    pauseCodexCronoton(id, { db });
+    const res = resumeCodexCronoton(id, { now: new Date("2026-06-09T09:30:00.000Z"), db });
+    expect(res.nextFireAt).toBeNull();
+    expect(getRow(id).next_fire_at).toBeNull();
+    // And it stays excluded from the due-query after the resume.
+    const due = fetchDueCodexCronotons(new Date("2026-06-10T00:00:00.000Z"), 100, { db });
+    expect(due.map((r) => r.id)).not.toContain(id);
   });
 });

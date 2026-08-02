@@ -170,6 +170,33 @@ describe("executeNow", () => {
     expect(count.c).toBe(0);
   });
 
+  it("fires an event-driven (scheduler-off, next_fire_at NULL) server-resolver row on demand", async () => {
+    h = buildTestCtx();
+    // An event-driven server-resolver cronoton commits scheduler-off: the store
+    // stores next_fire_at = NULL so the tick loop's due-query never selects it.
+    const { id, nextFireAt } = seedCronoton(h.db, {
+      serverResolver: "exec-test-single",
+      eventDriven: true,
+      gasPayer: CODEX_GAS_PAYER,
+    });
+    // Precondition: the row really is scheduler-off — if this were non-null the
+    // test wouldn't be exercising the event-driven path at all.
+    expect(nextFireAt).toBeNull();
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    // A host-initiated executeNow fires it regardless of the NULL schedule: the
+    // regression this guards is executeNow/fireByServerResolver gaining a
+    // next_fire_at gate that would silently drop event-driven rows.
+    expect(res.status).toBe(200);
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+    const fires = h.db
+      .prepare("SELECT status FROM codex_cronoton_fires WHERE codex_cronoton_id = ?")
+      .all(id) as Array<{ status: string }>;
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe("success");
+  });
+
   it("returns 404 for an unknown cronoton id", async () => {
     h = buildTestCtx();
     const res = await executeNow(h.ctx, req({ confirmed: true, params: { id: "does-not-exist" } }));

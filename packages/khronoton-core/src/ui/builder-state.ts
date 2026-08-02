@@ -263,7 +263,10 @@ function toSigner(row: SignerRow): CodexSigner {
 // ── Serialization: state → CommitBody ─────────────────────────────────────────
 
 /** Serialize the local form state losslessly into the wire `CommitBody`. */
-export function builderToCommit(state: BuilderState): CommitBody {
+export function builderToCommit(
+  state: BuilderState,
+  opts?: { eventDriven?: boolean },
+): CommitBody {
   const config: CodexTxConfig = {
     chainId: state.config.chainId,
     gasPrice: state.config.gasPriceAnu,
@@ -289,6 +292,7 @@ export function builderToCommit(state: BuilderState): CommitBody {
   if (state.description.trim().length > 0) body.description = state.description;
   if (state.serverResolver) body.envelope.serverResolver = state.serverResolver;
   if (state.externalFireable) body.envelope.externalFireable = true;
+  if (opts?.eventDriven) body.envelope.eventDriven = true;
   if (runtimeArgKeys.length > 0) body.envelope.runtimeArgKeys = runtimeArgKeys;
 
   return body;

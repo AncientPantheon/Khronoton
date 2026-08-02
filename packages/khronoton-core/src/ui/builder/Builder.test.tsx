@@ -146,6 +146,63 @@ describe("Builder — create round-trip", () => {
   });
 });
 
+describe("Builder — event-driven resolver seam (options → derivation → commit + UI swap)", () => {
+  it("selecting an event-driven resolver commits envelope.eventDriven=true AND swaps the schedule editor for the event-driven notice", async () => {
+    const commit = vi.fn(async (_body: unknown) => ({
+      ok: true as const,
+      codexCronotonId: "cr_ev",
+      nextFireAt: null,
+    }));
+    const adapter = makeAdapter({ commit: commit as unknown as KhronotonAdapter["commit"] });
+    // The provider carries an event-driven resolver option — the SAME source
+    // BuilderHeader's dropdown and Builder's derivation both read (config
+    // serverResolverOptions), so this exercises the real options→eventDrivenResolver
+    // →{ExecuteTab prop, builderToCommit opts} seam, not either half in isolation.
+    render(
+      <KhronotonProvider
+        adapter={adapter}
+        serverResolverOptions={[
+          { value: "dual-link-activate", label: "Dual-Link Activate", eventDriven: true },
+        ]}
+      >
+        <KhronotonUiRoot>
+          <Builder access={ADMIN} />
+        </KhronotonUiRoot>
+      </KhronotonProvider>,
+    );
+
+    await screen.findByRole("option", { name: "k:alice" }).catch(() => null);
+
+    // Name + gas-station signing key clear the commit gate (as in the create test).
+    fireEvent.change(screen.getByPlaceholderText("Daily payout"), { target: { value: "Ev" } });
+    // Select the event-driven resolver in the header dropdown.
+    fireEvent.change(screen.getByLabelText("Server resolver"), {
+      target: { value: "dual-link-activate" },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Gas Payer" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: "k:alice" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Signing Key (DALOS.GAS_PAYER capability)"), {
+      target: { value: "k:alice" },
+    });
+
+    // Execute tab: the ScheduleStep is swapped for the event-driven notice, and the
+    // schedule summary reflects host-fired — proving the UI half of the seam.
+    fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
+    expect(screen.getByText(/Event-driven — the host application fires this/i)).toBeTruthy();
+    expect(screen.queryByLabelText("Mode")).toBeNull(); // ScheduleStep absent
+    expect(screen.getByTestId("summary-schedule").textContent).toContain("Event-driven (host-fired)");
+
+    // Commit: the wire body carries envelope.eventDriven === true — proving the
+    // commit half of the seam (derivation → builderToCommit opts), the exact bridge
+    // that would silently regress to a real next_fire_at if it were dropped.
+    fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    const body = commit.mock.calls[0][0] as { envelope: { eventDriven?: boolean; serverResolver?: string } };
+    expect(body.envelope.eventDriven).toBe(true);
+    expect(body.envelope.serverResolver).toBe("dual-link-activate");
+  });
+});
+
 describe("Builder — edit rehydration + patch", () => {
   it("rehydrates the seeded row (payload forced raw, Row C hidden, schedule preserved) and PATCHes on save", async () => {
     const row = seedRow();

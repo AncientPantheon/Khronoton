@@ -6,6 +6,8 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
+**`0.6.0` on public npmjs** — **MINOR.** Released 2026-08-02. Server resolvers can now declare themselves **event-driven** (`ServerResolverOption.eventDriven`): selecting one in the Builder commits the cronoton scheduler-off (`next_fire_at = NULL`, never auto-fired) and swaps the schedule editor for an event-driven notice — the host fires it in-process via the existing `executeNow` (not the HMAC endpoint). Ordinary scheduled resolvers are unchanged. **848 specs pass.**
+
 **`0.5.0` on public npmjs** — **MINOR.** Released 2026-08-02. The Builder screen's Pact-code editor is now syntax-highlighted (via the package's `--khr-*` theme tokens, five new ones added), moved to a full-width top strip (~7 lines, internal scroll) with the header/tabs/tab content full-width below it, and gained a live tx-size/gas metering strip. `@uiw/react-codemirror` + the CodeMirror/Lezer packages it now depends on for highlighting are real optional `peerDependencies`. **832 specs pass.**
 
 **`0.4.2` on public npmjs** — **PATCH.** Released 2026-07-22. Aligns the `peerDependenciesMeta` key with the `@ouronet/ouronet-core` peer renamed in 0.4.1 (the meta entry still named the old `@stoachain` peer). No code change. **799 specs pass.**
@@ -233,6 +235,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.6.0** — Event-driven server resolvers. `ServerResolverOption` gains an optional `eventDriven` flag; a cronoton on an event-driven resolver commits scheduler-off (`next_fire_at = NULL`, excluded from the tick due-query) and the Builder shows an "Event-driven (host-fired)" notice instead of a schedule editor. The host fires it via the existing `executeNow` primitive, in-process — event-driven is a dedicated commit-envelope flag, deliberately NOT `externalFireable`, so it never exposes the public HMAC trigger endpoint. `server_resolver` + event-driven is allowed; `server_resolver` + `runtime_arg_keys` stays forbidden. No new DB column (the `next_fire_at = NULL` state carries it; edit and pause/resume keep it NULL). Ordinary scheduled resolvers unchanged; a non-event-driven commit body is byte-identical to 0.5.0. Released 2026-08-02. **848 specs pass.**
 
 **v0.5.0** — Builder screen upgrade: the Pact-code editor is syntax-highlighted (keywords, definitions, types, strings, numbers, booleans, comments, `@doc`/`@model` annotations, parens/atoms — colored via new `--khr-syntax-*`/`--khr-selection` tokens, not hardcoded), moved to a full-width top strip (~7 lines, internal scroll) with the header/tab bar/tab content full-width below it as the one standard layout, and gained a live tx-size/gas metering strip (local byte estimate against StoaChain's 2 MB ceiling; gas-used-vs-limit once Simulate runs). `@uiw/react-codemirror`, `@codemirror/state`, `@codemirror/view`, `@codemirror/language`, `@lezer/highlight` are now real optional `peerDependencies` instead of silently relied upon via hoisting. Released 2026-08-02. **832 specs pass.**
 
