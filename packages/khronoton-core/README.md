@@ -6,6 +6,8 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
+**`0.5.0` on public npmjs** — **MINOR.** Released 2026-08-02. The Builder screen's Pact-code editor is now syntax-highlighted (via the package's `--khr-*` theme tokens, five new ones added), moved to a full-width top strip (~7 lines, internal scroll) with the header/tabs/tab content full-width below it, and gained a live tx-size/gas metering strip. `@uiw/react-codemirror` + the CodeMirror/Lezer packages it now depends on for highlighting are real optional `peerDependencies`. **832 specs pass.**
+
 **`0.4.2` on public npmjs** — **PATCH.** Released 2026-07-22. Aligns the `peerDependenciesMeta` key with the `@ouronet/ouronet-core` peer renamed in 0.4.1 (the meta entry still named the old `@stoachain` peer). No code change. **799 specs pass.**
 
 **`0.4.1` on public npmjs** — **PATCH (dependency rename, no code change).** Released 2026-07-22. `@stoachain/ouronet-core` → `@ouronet/ouronet-core` — same code, new scope, following the Phase-4 split into OuroborosNetwork/ouronet-libs. **799 specs pass.**
@@ -14,7 +16,7 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 - **`/handlers`** — framework-agnostic HTTP route handlers over the `/server` store + executor (list/get/fires/signers/commit/edit/pause/resume/delete/simulate/execute-now/trigger/batch/recover), driven by a tiny `HandlerRequest`/`HandlerResponse` seam so any router (Next.js, Express, …) can mount them.
 - **`/provider` + `/hooks`** — the React data layer: `<KhronotonProvider adapter={…}>`, the 16-method `KhronotonAdapter` seam with two reference adapters (`createFetchAdapter` over HTTP, `createMemoryAdapter` over in-process handlers), the shared `runGated` confirm-retry, and the data + action hooks (`useCronotons`/`useCronoton`/`useCronotonFires`/`useManualBatch` + the lifecycle/execute action hooks).
-- **`/ui` + `/ui.css`** — the React UI at full Hub parity: the four screens **List**, **Detail/Observe** (fire history with 50/page pager, definition-drift flag, result tooltip, pluggable multi-tx renderer, wired recover), **Builder** (two-pane create + edit, Config/Payload/Gas Payer/Signatures/Execute tabs, Simulate→AUTO-gas calibrate), and a **Public** read-only transparency view — themed entirely through `--khr-*` CSS variables inside `<KhronotonUiRoot>`.
+- **`/ui` + `/ui.css`** — the React UI at full Hub parity: the four screens **List**, **Detail/Observe** (fire history with 50/page pager, definition-drift flag, result tooltip, pluggable multi-tx renderer, wired recover), **Builder** (syntax-highlighted Pact-code editor full-width on top, Config/Payload/Gas Payer/Signatures/Execute tabs full-width below, Simulate→AUTO-gas calibrate, a live tx-size/gas metering strip), and a **Public** read-only transparency view — themed entirely through `--khr-*` CSS variables inside `<KhronotonUiRoot>`.
 
 Khronoton isn't chain-*agnostic* — it's chain-*polyglot*: the root schedule/tick engine orchestrates, and the **`/blockchain/<chain>`** subpath family teaches it to speak each supported chain's language natively (0.4.0):
 
@@ -231,6 +233,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.5.0** — Builder screen upgrade: the Pact-code editor is syntax-highlighted (keywords, definitions, types, strings, numbers, booleans, comments, `@doc`/`@model` annotations, parens/atoms — colored via new `--khr-syntax-*`/`--khr-selection` tokens, not hardcoded), moved to a full-width top strip (~7 lines, internal scroll) with the header/tab bar/tab content full-width below it as the one standard layout, and gained a live tx-size/gas metering strip (local byte estimate against StoaChain's 2 MB ceiling; gas-used-vs-limit once Simulate runs). `@uiw/react-codemirror`, `@codemirror/state`, `@codemirror/view`, `@codemirror/language`, `@lezer/highlight` are now real optional `peerDependencies` instead of silently relied upon via hoisting. Released 2026-08-02. **832 specs pass.**
 
 **v0.4.2** — fix dangling `peerDependenciesMeta` key (was still `@stoachain/ouronet-core`). Released 2026-07-22. **799 specs pass.**
 
