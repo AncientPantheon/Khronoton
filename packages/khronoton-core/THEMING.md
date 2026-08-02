@@ -28,4 +28,4 @@ body .khronoton-ui {
 
 ## Tokens
 
-Surfaces `--khr-bg` `--khr-panel` `--khr-inset` `--khr-border` · text `--khr-text` `--khr-text-dim` `--khr-text-dim2` `--khr-mono` · accent `--khr-accent` `--khr-accent-tint` · status pairs `--khr-{blue,amber,success,error,nothing}` + their `-bg` · `--khr-radius` `--khr-radius-lg` · `--khr-font` `--khr-mono-font`.
+Surfaces `--khr-bg` `--khr-panel` `--khr-inset` `--khr-border` · text `--khr-text` `--khr-text-dim` `--khr-text-dim2` `--khr-mono` · accent `--khr-accent` `--khr-accent-tint` · status pairs `--khr-{blue,amber,success,error,nothing}` + their `-bg` · `--khr-radius` `--khr-radius-lg` · `--khr-font` `--khr-mono-font` · Pact-code syntax highlighting `--khr-syntax-{keyword,type,string,number,atom}` (definitionKeyword/bool/lineComment/variableName/operator/paren/squareBracket/brace/meta reuse `--khr-accent`/`--khr-blue`/`--khr-text-dim2`/`--khr-mono`/`--khr-text-dim` above, not new tokens) · editor text-selection background `--khr-selection`.

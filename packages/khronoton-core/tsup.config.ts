@@ -26,6 +26,16 @@ export default defineConfig({
     "react-dom",
     /^@codemirror/,
     "@uiw/react-codemirror",
+    /^@lezer/,
     /^@stoachain/,
+    // Pre-existing gap (predates this change — `git log` shows this pattern
+    // was never present): `/blockchain/stoachain`'s own `createStoachainRuntime`
+    // lazily imports `@ouronet/ouronet-core/constants` too, and it's declared
+    // as an optional peer in package.json, but was missing from this array —
+    // meaning esbuild would bundle a build-time-frozen copy into
+    // `dist/blockchain/stoachain.js` instead of leaving it external, silently
+    // reintroducing the exact version-pinning conflict the 0.4.1 release
+    // (see CHANGELOG.md) existed to fix.
+    /^@ouronet/,
   ],
 });

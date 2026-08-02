@@ -20,7 +20,8 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
 
 import { summariseSchedule } from "../../index.js";
-import { useSimulate } from "../../hooks/index.js";
+import type { UseExecuteActionResult } from "../../hooks/index.js";
+import type { SimulateEnvelope, SimulateView } from "../../provider/index.js";
 import {
   builderToCommit,
   canCommit,
@@ -31,6 +32,7 @@ import {
 } from "../builder-state.js";
 import { Panel, Title } from "../primitives.js";
 import { ScheduleStep } from "./ScheduleStep.js";
+import { formatThousands } from "./format.js";
 
 export interface ExecuteTabProps {
   /** The whole builder form state (read-only here, save the calibrate write-back). */
@@ -41,6 +43,13 @@ export interface ExecuteTabProps {
   onCommit?: () => void;
   /** True while the assembly's commit call is in flight — disables Commit. */
   committing?: boolean;
+  /**
+   * The shared `useSimulate()` result, hoisted to `Builder.tsx` so its last
+   * result can also drive the Builder-level Gas meter (see
+   * `docs/work/khronoton-builder-pact-editor/design.md`, Change 3 — "State
+   * hoisting required"). This tab no longer calls `useSimulate()` itself.
+   */
+  sim: UseExecuteActionResult<[envelope: SimulateEnvelope], SimulateView>;
 }
 
 const ROW_STYLE: CSSProperties = {
@@ -125,11 +134,6 @@ const REASONS_STYLE: CSSProperties = {
 
 const TRIGGER_ONLY_SCHEDULE = "Trigger-only (external / manual)";
 
-/** Thousands-grouped integer, e.g. 42000 → "42,000" (locale-pinned to en-US). */
-function formatThousands(n: number): string {
-  return n.toLocaleString("en-US");
-}
-
 /** The gas summary line: grouped limit @ raw price, with an AUTO suffix. */
 function gasLine(state: BuilderState): string {
   const c = state.config;
@@ -182,8 +186,13 @@ function SummaryRow({
   );
 }
 
-export function ExecuteTab({ state, onChange, onCommit, committing }: ExecuteTabProps): ReactNode {
-  const sim = useSimulate();
+export function ExecuteTab({
+  state,
+  onChange,
+  onCommit,
+  committing,
+  sim,
+}: ExecuteTabProps): ReactNode {
   const [banner, setBanner] = useState<ReactNode>(null);
 
   const commit = builderToCommit(state);

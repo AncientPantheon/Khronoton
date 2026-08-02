@@ -1,5 +1,7 @@
 /**
- * Builder assembly — the two-pane create/edit form (REQ-B01/B02/B11).
+ * Builder assembly — the top/bottom create/edit form (REQ-B01/B02/B11): the
+ * Pact-code editor renders full-width at the top (with the shared tx-size/gas
+ * meter strip), and the header + five-tab bar render full-width below it.
  *
  * This is the single owner of the shared {@link BuilderState}: it hosts the
  * already-built controlled tabs (Config, Payload, Gas Payer, Signatures, Execute)
@@ -21,7 +23,7 @@
  */
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
-import { useCronotonActions } from "../../hooks/index.js";
+import { useCronotonActions, useSimulate } from "../../hooks/index.js";
 import { useKhronotonAdapter } from "../../provider/context.js";
 import type { CodexSignerDescriptor } from "../../handlers/index.js";
 import type { CodexCronotonRow } from "../../server/index.js";
@@ -39,6 +41,7 @@ import { PayloadTab } from "./PayloadTab.js";
 import { GasPayerTab } from "./GasPayerTab.js";
 import { SignaturesTab } from "./SignaturesTab.js";
 import { ExecuteTab } from "./ExecuteTab.js";
+import { TxMeters } from "./TxMeters.js";
 
 /** Default `<meta name="robots">` for the builder route (host-overridable). */
 export const DEFAULT_BUILDER_ROBOTS = "noindex,nofollow";
@@ -65,10 +68,9 @@ const TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
 ];
 
 const PANE_WRAP: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+  display: "flex",
+  flexDirection: "column",
   gap: "1rem",
-  alignItems: "start",
 };
 
 const TABLIST: CSSProperties = {
@@ -105,9 +107,10 @@ const EDIT_BANNER: CSSProperties = {
 };
 
 /**
- * The two-pane codex-cronoton builder. Owns `BuilderState`; renders the Pact editor
- * on the left and the header + five-tab bar on the right, feeding every tab the
- * shared state and folding its `onChange` back in.
+ * The top/bottom codex-cronoton builder. Owns `BuilderState`; renders the Pact
+ * editor full-width at the top (with the shared tx-size/gas meter strip) and the
+ * header + five-tab bar full-width below it, feeding every tab the shared state
+ * and folding its `onChange` back in.
  */
 export function Builder({
   editId,
@@ -117,6 +120,7 @@ export function Builder({
 }: BuilderProps): ReactNode {
   const adapter = useKhronotonAdapter();
   const actions = useCronotonActions(editId);
+  const sim = useSimulate();
 
   const [state, setState] = useState<BuilderState>(() => makeEmptyBuilderState());
   const [signers, setSigners] = useState<CodexSignerDescriptor[]>([]);
@@ -199,6 +203,15 @@ export function Builder({
   // into `config.gasLimit` + `autoGasLimit` after a successful Simulate).
   const calibratedGasLimit = state.config.autoGasLimit ? state.config.gasLimit : null;
 
+  // Stable identity (the functional `setState` form needs no dep beyond the
+  // setter, which React guarantees is stable) — `@uiw/react-codemirror`'s
+  // reconfigure effect watches `onChange` by reference, so a fresh closure
+  // here on every render would force a full CodeMirror reconfigure on every
+  // OTHER Builder state change too, not just an actual Pact-code edit.
+  const handlePactCodeChange = useCallback((pactCode: string) => {
+    setState((s) => ({ ...s, pactCode }));
+  }, []);
+
   return (
     <div className="khronoton-ui">
       <meta name="robots" content={robots} />
@@ -219,53 +232,56 @@ export function Builder({
 
       {editReady ? (
         <div style={PANE_WRAP}>
-        {/* Left pane — the Pact code editor bound to the shared state. */}
-        <PactCodeEditor
-          value={state.pactCode}
-          onChange={(pactCode) => setState((s) => ({ ...s, pactCode }))}
-          onClear={() => setState((s) => ({ ...s, pactCode: "" }))}
-        />
+          {/* Top — the Pact code editor bound to the shared state, full width. */}
+          <PactCodeEditor
+            value={state.pactCode}
+            onChange={handlePactCodeChange}
+            onClear={() => setState((s) => ({ ...s, pactCode: "" }))}
+            height={126}
+            subBar={<TxMeters state={state} sim={sim} />}
+          />
 
-        {/* Right pane — header above the five-tab bar. */}
-        <div>
-          <BuilderHeader state={state} onChange={setState} isEdit={isEdit} />
+          {/* Bottom — header above the five-tab bar, full width. */}
+          <div>
+            <BuilderHeader state={state} onChange={setState} isEdit={isEdit} />
 
-          <div role="tablist" style={TABLIST}>
-            {TABS.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                aria-selected={activeTab === t.key}
-                onClick={() => setActiveTab(t.key)}
-                style={{ ...TAB_BASE, ...(activeTab === t.key ? TAB_ACTIVE : {}) }}
-              >
-                {t.label}
-              </button>
-            ))}
+            <div role="tablist" style={TABLIST}>
+              {TABS.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === t.key}
+                  onClick={() => setActiveTab(t.key)}
+                  style={{ ...TAB_BASE, ...(activeTab === t.key ? TAB_ACTIVE : {}) }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {activeTab === "config" && (
+              <ConfigTab state={state} onChange={setState} calibratedGasLimit={calibratedGasLimit} />
+            )}
+            {activeTab === "payload" && (
+              <PayloadTab state={state} onChange={(payload) => setState((s) => ({ ...s, payload }))} />
+            )}
+            {activeTab === "gas-payer" && (
+              <GasPayerTab state={state} onChange={setState} signers={signers} />
+            )}
+            {activeTab === "signatures" && (
+              <SignaturesTab state={state} onChange={setState} signers={signers} />
+            )}
+            {activeTab === "execute" && (
+              <ExecuteTab
+                state={state}
+                onChange={setState}
+                onCommit={handleCommit}
+                committing={committing}
+                sim={sim}
+              />
+            )}
           </div>
-
-          {activeTab === "config" && (
-            <ConfigTab state={state} onChange={setState} calibratedGasLimit={calibratedGasLimit} />
-          )}
-          {activeTab === "payload" && (
-            <PayloadTab state={state} onChange={(payload) => setState((s) => ({ ...s, payload }))} />
-          )}
-          {activeTab === "gas-payer" && (
-            <GasPayerTab state={state} onChange={setState} signers={signers} />
-          )}
-          {activeTab === "signatures" && (
-            <SignaturesTab state={state} onChange={setState} signers={signers} />
-          )}
-          {activeTab === "execute" && (
-            <ExecuteTab
-              state={state}
-              onChange={setState}
-              onCommit={handleCommit}
-              committing={committing}
-            />
-          )}
-        </div>
         </div>
       ) : (
         <p style={{ color: "var(--khr-text-dim)", padding: "1rem 0" }}>Loading cronoton…</p>

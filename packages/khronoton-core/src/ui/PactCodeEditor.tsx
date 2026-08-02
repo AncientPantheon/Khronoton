@@ -2,9 +2,11 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 /**
- * The builder's left pane: a "PACT Code Editor" header (gold eyebrow) with an
- * optional "Clear" control, over a CodeMirror source editor themed to match the
- * Hub codex builder (dark panel, gold caret, line numbers, ~460px).
+ * The Pact-code editor rendered full-width at the top of the Builder: a
+ * "PACT Code Editor" header (gold eyebrow) with an optional "Clear" control
+ * and an optional `subBar` strip (e.g. the tx-size/gas meter), over a
+ * CodeMirror source editor themed to match the Hub codex builder (dark
+ * panel, gold caret, line numbers, clamped to ~7 lines with internal scroll).
  *
  * SSR / jsdom safety — the phase's top-flagged risk. `@uiw/react-codemirror`
  * touches `window`/DOM as its view initialises, so it is NEVER statically
@@ -36,6 +38,11 @@ export interface PactCodeEditorProps {
    * documented SSR/test seam — CodeMirror cannot measure DOM under jsdom.
    */
   forceFallback?: boolean;
+  /**
+   * Optional content rendered as a full-width strip between the header and
+   * the editor body, e.g. a tx-size/gas meter.
+   */
+  subBar?: ReactNode;
 }
 
 const panelStyle: CSSProperties = {
@@ -73,12 +80,18 @@ const clearButtonStyle: CSSProperties = {
   cursor: "pointer",
 };
 
+const subBarWrapStyle: CSSProperties = {
+  padding: "0 12px 10px",
+  borderBottom: "1px solid var(--khr-border)",
+};
+
 export function PactCodeEditor({
   value,
   onChange,
   onClear,
   height = 460,
   forceFallback = false,
+  subBar,
 }: PactCodeEditorProps): ReactNode {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -122,6 +135,11 @@ export function PactCodeEditor({
           </button>
         ) : null}
       </div>
+      {subBar ? (
+        <div data-testid="pact-editor-subbar" style={subBarWrapStyle}>
+          {subBar}
+        </div>
+      ) : null}
       <div style={{ height }}>
         {useCodeMirror ? (
           <Suspense fallback={fallback}>

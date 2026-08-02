@@ -286,3 +286,54 @@ describe("Builder — switching editId on a mounted instance", () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_9"));
   });
 });
+
+describe("Builder — top/bottom layout", () => {
+  it("renders the Pact editor header before the tab bar in DOM order (top, not side-by-side)", () => {
+    mount(makeAdapter());
+
+    const editorHeader = screen.getByText("PACT Code Editor");
+    const tablist = screen.getByRole("tablist");
+
+    // DOCUMENT_POSITION_FOLLOWING (4) on the tablist means editorHeader precedes it.
+    // eslint-disable-next-line no-bitwise
+    expect(editorHeader.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("stacks the editor and the header+tabs pane in a single flex column, not a 2-column grid", () => {
+    mount(makeAdapter());
+
+    const tablist = screen.getByRole("tablist");
+    // tablist -> "Bottom" pane div -> PANE_WRAP wrapper.
+    const paneWrap = tablist.parentElement?.parentElement;
+
+    expect(paneWrap?.style.flexDirection).toBe("column");
+    expect(paneWrap?.style.display).not.toBe("grid");
+  });
+});
+
+describe("Builder — shared Simulate result feeds the top meter", () => {
+  it("shows Run Simulate before any simulate call, then reflects the SAME simulate result the Execute tab used", async () => {
+    const simulate = vi.fn(async () => ({ ok: true as const, gasUsed: 900 }));
+    const adapter = makeAdapter({
+      simulate: simulate as unknown as KhronotonAdapter["simulate"],
+    });
+    mount(adapter);
+
+    // Before any simulate call, the Gas meter row (above the tab bar) shows the
+    // "no result yet" state. `makeEmptyBuilderState()`'s default gas limit is 1500.
+    expect(screen.getByText("Run Simulate")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
+    fireEvent.click(screen.getByRole("button", { name: "Simulate" }));
+
+    await waitFor(() => expect(simulate).toHaveBeenCalledTimes(1));
+
+    // The top meter (still mounted — it lives above the tab bar, not inside it)
+    // updates from the SAME sim result ExecuteTab's own summary used: one shared
+    // `useSimulate()` call, not two independent instances.
+    await waitFor(() => expect(screen.getByText("900 / 1,500")).toBeTruthy());
+    expect(simulate).toHaveBeenCalledTimes(1);
+  });
+});

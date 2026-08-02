@@ -32,4 +32,10 @@
   --khr-radius-lg: 14px;
   --khr-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --khr-mono-font: ui-monospace, "SFMono-Regular", "Geist Mono", Menlo, Consolas, monospace;
+  --khr-syntax-keyword: #c586c0;
+  --khr-syntax-type: #4ec9b0;
+  --khr-syntax-string: #ce9178;
+  --khr-syntax-number: #b5cea8;
+  --khr-syntax-atom: #d7ba7d;
+  --khr-selection: #1e3a5f;
 }

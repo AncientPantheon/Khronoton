@@ -4,6 +4,38 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.5.0 — 2026-08-02
+
+**MINOR — Builder screen: syntax-highlighted Pact editor, top/bottom layout, live tx-size/gas meter.**
+
+- **Syntax highlighting on the Pact-code editor.** Keywords, definitions (`defun`/`defcap`/`defschema`/…),
+  types, strings, numbers, booleans, `;;` comments, `@doc`/`@model` annotations, symbols, and
+  parens/brackets/braces are now colored distinctly instead of one flat color. Colors are driven entirely
+  by the package's existing `--khr-*` theme-token convention (extended with five new tokens, below), so a
+  consumer's existing `body .khronoton-ui { --khr-*: ... }` override pattern applies unchanged.
+- **New `--khr-*` tokens:** `--khr-syntax-keyword`, `--khr-syntax-type`, `--khr-syntax-string`,
+  `--khr-syntax-number`, `--khr-syntax-atom` (Pact-code syntax coloring — see `THEMING.md`), and
+  `--khr-selection` (the Pact editor's text-selection background — previously reused `--khr-accent-tint`,
+  which read as nearly invisible against the editor's own background; now its own token, defaulting to a
+  visible `#1e3a5f`).
+- **Builder layout: top/bottom, not left/right.** The Pact-code editor now renders full-width at the top of
+  the Builder screen, clamped to ~7 visible lines with internal scroll, with the header/tab bar/tab content
+  full-width below it — the one standard layout for every cronoton, not a per-consumer option.
+- **Live Tx Size + Gas metering strip**, between the editor's header and its code body: a byte-size bar
+  against StoaChain's fixed 2 MB Chainweb ceiling (live, recomputed as you type/configure — a local
+  estimate only, never signed or submitted), and a gas-used-vs-gas-limit bar once a Simulate result exists.
+- **Dependency fix:** `@uiw/react-codemirror`, `@codemirror/state`, `@codemirror/view`,
+  `@codemirror/language`, `@lezer/highlight` are now real (optional) `peerDependencies` instead of
+  `devDependencies` silently relied on via hoisting from an unrelated dependency — a consumer without them
+  now sees an honest unmet-peer warning instead of a silent fallback to the plain-textarea editor.
+- **Build fix (pre-existing, found in the same pass):** `tsup.config.ts`'s `external` list was missing
+  `@ouronet/ouronet-core` — `/blockchain/stoachain`'s lazy `@ouronet/ouronet-core/constants` import was
+  being bundled into `dist/blockchain/stoachain.js` instead of resolving from the consumer's own install,
+  reintroducing the version-pinning conflict 0.4.1 existed to fix. No behavior change for anyone not using
+  `/blockchain/stoachain`.
+
+**832 specs pass.**
+
 ## 0.4.2 — 2026-07-22
 
 **PATCH — fix a dangling peerDependenciesMeta key.**

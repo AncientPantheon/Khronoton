@@ -15,6 +15,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import { Badge, Field, Title } from "../primitives.js";
 import { maxTxFee, type BuilderConfig, type BuilderState } from "../builder-state.js";
+import { formatThousands } from "./format.js";
 
 export interface ConfigTabProps {
   /** The whole form state; the tab reads/writes only its `config` slice. */
@@ -109,11 +110,6 @@ const GAS_LABEL_STYLE: CSSProperties = {
 
 function Hint({ children }: { children: ReactNode }): ReactNode {
   return <p style={HINT_STYLE}>{children}</p>;
-}
-
-/** Thousands-grouped integer, e.g. 15000000 → "15,000,000" (locale-pinned). */
-function formatThousands(n: number): string {
-  return n.toLocaleString("en-US");
 }
 
 export function ConfigTab({ state, onChange, calibratedGasLimit }: ConfigTabProps): ReactNode {

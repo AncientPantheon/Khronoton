@@ -29,7 +29,7 @@ function renderEditor(props: Partial<PactCodeEditorProps> = {}) {
 }
 
 describe("PactCodeEditor", () => {
-  it("renders the 'PACT Code Editor' header so the builder's left pane is labelled", () => {
+  it("renders the 'PACT Code Editor' header so the top editor strip is labelled", () => {
     renderEditor();
     expect(screen.getByText("PACT Code Editor")).toBeTruthy();
   });
@@ -89,5 +89,20 @@ describe("PactCodeEditor", () => {
     // The lazy CodeMirror is still resolving, so the Suspense fallback textarea
     // is what a synchronous render observes — the header is always present.
     expect(screen.getByText("PACT Code Editor")).toBeTruthy();
+  });
+
+  it("renders the subBar slot content when supplied, e.g. a tx-size/gas meter", () => {
+    renderEditor({ subBar: <span>METER</span> });
+    expect(screen.getByText("METER")).toBeTruthy();
+    expect(screen.getByTestId("pact-editor-subbar")).toBeTruthy();
+  });
+
+  it("renders no subBar wrapper at all when subBar is omitted", () => {
+    // Asserting on DOM structure (the wrapper's own testid), not on text
+    // that was never supplied in this render — a version that renders the
+    // wrapper div unconditionally (even with nothing inside it) would still
+    // pass a text-only assertion here, but fails this one correctly.
+    renderEditor();
+    expect(screen.queryByTestId("pact-editor-subbar")).toBeNull();
   });
 });

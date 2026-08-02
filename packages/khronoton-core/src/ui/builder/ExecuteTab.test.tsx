@@ -14,6 +14,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 
 import { KhronotonProvider } from "../../provider/KhronotonProvider.js";
 import type { KhronotonAdapter } from "../../provider/adapter.js";
+import { useSimulate } from "../../hooks/index.js";
 import { ExecuteTab } from "./ExecuteTab.js";
 import { makeEmptyBuilderState } from "../builder-state.js";
 import type { BuilderState, SignerRow } from "../builder-state.js";
@@ -76,6 +77,7 @@ function mount(
 
   function Harness() {
     const [state, setState] = React.useState<BuilderState>(start);
+    const sim = useSimulate();
     latest = state;
     return (
       <ExecuteTab
@@ -86,6 +88,7 @@ function mount(
         }}
         onCommit={onCommit}
         committing={opts.committing}
+        sim={sim}
       />
     );
   }
