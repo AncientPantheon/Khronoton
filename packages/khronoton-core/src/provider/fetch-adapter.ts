@@ -32,6 +32,7 @@ import type {
   ListCronotonsQuery,
   ListCronotonsView,
   RecoverView,
+  ResolversView,
   SignersView,
   SimulateEnvelope,
   SimulateView,
@@ -160,6 +161,9 @@ export function createFetchAdapter(
     },
     signers() {
       return request<SignersView>("GET", "/signers");
+    },
+    resolvers() {
+      return request<ResolversView>("GET", "/resolvers");
     },
 
     // Lifecycle tier (confirm-gated)

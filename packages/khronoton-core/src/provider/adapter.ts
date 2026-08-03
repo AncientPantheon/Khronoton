@@ -32,6 +32,7 @@ import type {
   CodexCronotonFireRow,
   ManualBatchView,
   RuntimeArgs,
+  ServerResolver,
 } from "../server/index.js";
 import type { CommitBody, CodexSignerDescriptor } from "../handlers/index.js";
 
@@ -106,6 +107,12 @@ export interface FiresView {
 export interface SignersView {
   ok: true;
   signers: CodexSignerDescriptor[];
+}
+
+/** `GET /resolvers` body — the registered server resolvers + their `evented` flag. */
+export interface ResolversView {
+  ok: true;
+  resolvers: { name: string; kind: ServerResolver["kind"]; evented: boolean }[];
 }
 
 /** `POST /` body — the new id + its first scheduled fire. */
@@ -202,6 +209,13 @@ export interface KhronotonAdapter {
   get(id: string): Promise<GetCronotonView>;
   fires(query: FiresQuery): Promise<FiresView>;
   signers(): Promise<SignersView>;
+  /**
+   * `GET /resolvers` — OPTIONAL. Added in 0.7.0; an adapter predating it (or one
+   * whose backend can't serve it) simply omits it, and the provider degrades
+   * gracefully. Deliberately NOT in `REQUIRED_METHODS` — requiring it would be a
+   * breaking change for every existing consumer/fake adapter on upgrade.
+   */
+  resolvers?(): Promise<ResolversView>;
 
   // Lifecycle tier (confirm-gated)
   commit(body: CommitBody, opts?: ConfirmOpts): Promise<CommitView>;

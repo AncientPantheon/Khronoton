@@ -22,6 +22,7 @@ import {
   fireWithServerResolver,
   fireByServerResolver,
   dispatchMultiTxResolver,
+  listServerResolvers,
 } from "./resolvers.js";
 import type { ChainRuntime, KeyResolver } from "./seams.js";
 import type { CodexTxDefinition, FireResult, SimulateResult } from "./types.js";
@@ -396,6 +397,53 @@ describe("fireByServerResolver: kind-routing fire dispatcher", () => {
     expect(getKeyPairByPublicKey).toHaveBeenCalledWith(pub);
     expect(submit).toHaveBeenCalledTimes(1);
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("listServerResolvers: registry enumerator", () => {
+  it("lists each registered resolver with its kind and evented flag (true only when set)", () => {
+    // WHY: the /resolvers read handler + the Builder rely on this enumerator to
+    // learn which resolver names are event-driven. If evented leaked to true for
+    // an unflagged resolver, the Builder would wrongly hide the schedule editor;
+    // if it were dropped for a flagged one, a scheduleless resolver would show a
+    // live schedule. Both must round-trip per-name.
+    const resolve = vi.fn(() => ({ plan: [], payload: {} }));
+    const settle = vi.fn();
+    registerServerResolver("list-evented-yes", {
+      kind: "single-tx",
+      evented: true,
+      resolve,
+      settle,
+    });
+    registerServerResolver("list-evented-no", {
+      kind: "single-tx",
+      resolve,
+      settle,
+    });
+
+    const listed = listServerResolvers();
+
+    const yes = listed.find((r) => r.name === "list-evented-yes");
+    const no = listed.find((r) => r.name === "list-evented-no");
+    expect(yes).toEqual({ name: "list-evented-yes", kind: "single-tx", evented: true });
+    // an unflagged resolver reports evented:false, never undefined — the flag is
+    // normalized so consumers get a boolean.
+    expect(no).toEqual({ name: "list-evented-no", kind: "single-tx", evented: false });
+  });
+
+  it("returns entries sorted by name for deterministic output", () => {
+    // WHY: the handler serializes this list into an HTTP response; a stable order
+    // keeps responses (and any test snapshots downstream) deterministic.
+    registerServerResolver("list-sort-zeta", {
+      kind: "single-tx",
+      resolve: () => ({ plan: [], payload: {} }),
+      settle: vi.fn(),
+    });
+    registerServerResolver("list-sort-alpha", { kind: "multi-tx", run: vi.fn() });
+
+    const names = listServerResolvers().map((r) => r.name);
+    const sorted = [...names].sort();
+    expect(names).toEqual(sorted);
   });
 });
 

@@ -96,8 +96,12 @@ function pactPreview(pactCode: string | null | undefined): string {
     : collapsed;
 }
 
-/** Trigger-only ⇒ the scheduler never auto-fires: it declares ≥1 runtime-arg key. */
+/**
+ * Trigger-only ⇒ the scheduler never auto-fires: the row is external-fireable
+ * (evented / HMAC-triggered) or it declares ≥1 runtime-arg key.
+ */
 function isTriggerOnly(row: CodexCronotonRow): boolean {
+  if (row.external_fireable === 1) return true;
   const raw = row.runtime_arg_keys;
   if (!raw) return false;
   try {
@@ -211,7 +215,15 @@ function CronotonListRowView({
         </div>
       </Cell>
 
-      <Cell>{row.next_fire_at ? <RelativeTime iso={row.next_fire_at} /> : EM_DASH}</Cell>
+      <Cell>
+        {isTriggerOnly(row) ? (
+          <span style={DIM}>Evented</span>
+        ) : row.next_fire_at ? (
+          <RelativeTime iso={row.next_fire_at} />
+        ) : (
+          EM_DASH
+        )}
+      </Cell>
 
       <Cell>{lastFireCell(row)}</Cell>
 

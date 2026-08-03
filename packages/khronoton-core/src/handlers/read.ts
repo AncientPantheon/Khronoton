@@ -24,6 +24,7 @@ import {
   listCodexCronotons,
   getCodexCronoton,
   listFires,
+  listServerResolvers,
   type CodexCronotonRow,
 } from "../server/index.js";
 
@@ -114,6 +115,18 @@ export async function signersHandler(
     const signers = await source.listSignerDescriptors();
     return json(200, { ok: true, signers });
   });
+}
+
+/**
+ * `GET /resolvers` — the server-authoritative resolver registry: every registered
+ * server resolver with its `kind` and `evented` flag. Takes no params/query; the
+ * Builder consumes it to learn which resolver names are event-driven (scheduleless).
+ */
+export async function resolversHandler(
+  ctx: HandlerContext,
+  request: HandlerRequest,
+): Promise<HandlerResponse> {
+  return withRead(ctx, request, async () => json(200, { ok: true, resolvers: listServerResolvers() }));
 }
 
 /**

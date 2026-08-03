@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 
-import { recordFire, type KeyResolver } from "../server/index.js";
+import { recordFire, registerServerResolver, type KeyResolver } from "../server/index.js";
 
 import {
   buildTestCtx,
@@ -19,7 +19,13 @@ import {
   type TestHarness,
 } from "../../tests/handlers/harness.js";
 import type { SignerSource } from "./http.js";
-import { listHandler, getHandler, signersHandler, firesHandler } from "./read.js";
+import {
+  listHandler,
+  getHandler,
+  signersHandler,
+  firesHandler,
+  resolversHandler,
+} from "./read.js";
 
 let h: TestHarness;
 afterEach(() => h?.close());
@@ -200,6 +206,36 @@ describe("signersHandler — secret-free descriptors (REQ-H10)", () => {
   });
 });
 
+describe("resolversHandler — read-tier resolver registry (GET /resolvers)", () => {
+  it("returns 200 with { ok, resolvers } carrying each registered resolver's evented flag", async () => {
+    // Registry persists across tests → use unique names so other suites can't collide.
+    registerServerResolver("t4-evented", {
+      kind: "single-tx",
+      evented: true,
+      resolve: () => ({ plan: [], payload: {} }),
+      settle: () => {},
+    });
+    registerServerResolver("t4-scheduled", {
+      kind: "single-tx",
+      resolve: () => ({ plan: [], payload: {} }),
+      settle: () => {},
+    });
+    h = buildTestCtx();
+
+    const res = await resolversHandler(h.ctx, req());
+
+    expect(res.status).toBe(200);
+    const body = res.body as {
+      ok: boolean;
+      resolvers: Array<{ name: string; kind: string; evented: boolean }>;
+    };
+    expect(body.ok).toBe(true);
+    // The evented flag must survive per-resolver — a shared/constant flag would fail here.
+    expect(body.resolvers).toContainEqual({ name: "t4-evented", kind: "single-tx", evented: true });
+    expect(body.resolvers).toContainEqual({ name: "t4-scheduled", kind: "single-tx", evented: false });
+  });
+});
+
 describe("read gate — every read handler runs through withRead", () => {
   it("short-circuits with the gate response when the read gate denies", async () => {
     h = buildTestCtx({ auth: denyReadAuth });
@@ -209,8 +245,9 @@ describe("read gate — every read handler runs through withRead", () => {
     const get = await getHandler(h.ctx, req({ params: { id } }));
     const signers = await signersHandler(h.ctx, req());
     const fires = await firesHandler(h.ctx, req({ params: { id } }));
+    const resolvers = await resolversHandler(h.ctx, req());
 
-    for (const res of [list, get, signers, fires]) {
+    for (const res of [list, get, signers, fires, resolvers]) {
       expect(res.status).toBe(403);
       expect((res.body as { error: string }).error).toBe("forbidden");
     }

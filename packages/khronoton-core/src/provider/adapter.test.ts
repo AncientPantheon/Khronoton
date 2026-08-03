@@ -66,6 +66,14 @@ describe("assertAdapter", () => {
     expect(() => assertAdapter(adapter)).toThrow(/commit/);
   });
 
+  it("passes an adapter WITHOUT a resolvers method (resolvers is optional, non-breaking)", () => {
+    // resolvers() was added as OPTIONAL — an existing adapter that predates it must
+    // still satisfy the guard, or the addition would be a breaking upgrade.
+    const adapter = completeAdapter();
+    expect(adapter).not.toHaveProperty("resolvers");
+    expect(() => assertAdapter(adapter)).not.toThrow();
+  });
+
   it("rejects a non-object input", () => {
     expect(() => assertAdapter(null)).toThrow();
     expect(() => assertAdapter(undefined)).toThrow();

@@ -54,6 +54,13 @@ export interface SettleOpts {
  */
 export interface SingleTxResolver {
   kind: "single-tx";
+  /**
+   * When true, this resolver is fired by an in-process EVENT, never by a
+   * schedule — a cronoton bound to it is scheduleless (the store forces
+   * `external_fireable = 1` / `next_fire_at = NULL`) and the Builder hides its
+   * schedule controls.
+   */
+  evented?: boolean;
   resolve(dep?: DbDep): ServerResolverResolution;
   settle(plan: unknown[], opts?: SettleOpts): void;
 }
@@ -66,6 +73,13 @@ export interface SingleTxResolver {
  */
 export interface MultiTxResolver {
   kind: "multi-tx";
+  /**
+   * When true, this resolver is fired by an in-process EVENT, never by a
+   * schedule — a cronoton bound to it is scheduleless (the store forces
+   * `external_fireable = 1` / `next_fire_at = NULL`) and the Builder hides its
+   * schedule controls.
+   */
+  evented?: boolean;
   run(opts: unknown): Promise<unknown>;
 }
 
@@ -87,6 +101,23 @@ export function registerServerResolver(name: string, resolver: ServerResolver): 
 /** Read a registered resolver entry (with its `kind`) by name, or `undefined`. */
 export function getServerResolver(name: string): ServerResolver | undefined {
   return SERVER_RESOLVERS[name];
+}
+
+/**
+ * Enumerate the registry as a flat, name-sorted list of `{ name, kind, evented }`
+ * — the server-authoritative source consumed by the `GET /resolvers` read handler
+ * and the Builder (to learn which resolver names are event-driven / scheduleless).
+ * `evented` is normalized to a boolean (`r.evented === true`) so consumers never
+ * see `undefined`. Sorted by `name` for deterministic responses.
+ */
+export function listServerResolvers(): {
+  name: string;
+  kind: ServerResolver["kind"];
+  evented: boolean;
+}[] {
+  return Object.entries(SERVER_RESOLVERS)
+    .map(([name, r]) => ({ name, kind: r.kind, evented: r.evented === true }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /**

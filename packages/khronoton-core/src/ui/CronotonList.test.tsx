@@ -164,6 +164,36 @@ describe("CronotonList — columns", () => {
   });
 });
 
+describe("CronotonList — evented next-fire", () => {
+  it("renders a muted 'Evented' label (not a timestamp) in the next-fire column for an external-fireable row", async () => {
+    // external_fireable === 1 ⇒ the scheduler never auto-fires; even with a real
+    // next_fire_at persisted, the next-fire cell must read "Evented", never a <time>.
+    const adapter = makeAdapter([
+      makeRow({ external_fireable: 1, next_fire_at: "2099-01-01T06:00:00.000Z" }),
+    ]);
+    const { container } = mountList(adapter, ADMIN);
+
+    await screen.findByText("Daily treasury sweep");
+    expect(screen.getByText("Evented")).toBeTruthy();
+    // No RelativeTime <time> renders for the (overridden) next-fire instant.
+    expect(container.querySelector('time[datetime="2099-01-01T06:00:00.000Z"]')).toBeNull();
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  it("still renders the RelativeTime next-fire for a normal scheduled row (label is conditional)", async () => {
+    // A plain scheduled row (external_fireable 0, no runtime args, real next_fire_at)
+    // keeps its live <time> — proving the "Evented" label is gated, not unconditional.
+    const adapter = makeAdapter([
+      makeRow({ external_fireable: 0, runtime_arg_keys: null, next_fire_at: "2099-01-01T06:00:00.000Z" }),
+    ]);
+    const { container } = mountList(adapter, ADMIN);
+
+    await screen.findByText("Daily treasury sweep");
+    expect(container.querySelector('time[datetime="2099-01-01T06:00:00.000Z"]')).toBeTruthy();
+    expect(screen.queryByText("Evented")).toBeNull();
+  });
+});
+
 describe("CronotonList — three access tiers", () => {
   it("admin: '+ New' is an enabled link (fires onNew) and the row actions are enabled", async () => {
     const onNew = vi.fn();

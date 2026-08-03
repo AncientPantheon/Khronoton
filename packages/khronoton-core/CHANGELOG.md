@@ -4,6 +4,24 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.7.0 — 2026-08-03
+
+**MINOR — server-authoritative evented resolvers: scheduleless + external-fireable enforced in the store, `GET /resolvers`, one-resolver-one-cronoton.**
+
+0.6.0 shipped event-driven resolvers behind a **client-side** `eventDriven` flag — the guarantee lived in each consumer's proxy, not the package. 0.7.0 makes the **resolver registry** the source of truth and enforces the scheduleless contract in the **store**, so it holds for every consumer regardless of what the client sends.
+
+- **`evented` on the resolver registry.** `SingleTxResolver` and `MultiTxResolver` gain an optional `evented?: boolean`. `createCodexCronoton`/`editCodexCronoton` derive it via `getServerResolver(name)?.evented` (a safe, acyclic store→resolvers import) and force the persisted row **scheduleless** (`next_fire_at = NULL`, excluded from `fetchDueCodexCronotons`) **and `external_fireable = 1`** — even when the caller sends a real schedule. An evented→non-evented edit correctly re-arms `next_fire_at` from the stored schedule and clears `external_fireable`; a genuine (non-evented) external-fireable row is never clobbered.
+- **`GET /resolvers`.** New `listServerResolvers()` + `resolversHandler` return `{ ok: true, resolvers: [{ name, kind, evented }] }` listing every registered resolver with its flag. Exposed as a new **OPTIONAL** `resolvers()` method on the `KhronotonAdapter` read tier (implemented by both reference adapters) — deliberately **not** added to `REQUIRED_METHODS`, so pre-0.7.0 adapters still pass `assertAdapter` and the Builder degrades gracefully (falls back to the 0.6.0 `serverResolverOptions.eventDriven`) via the new `useServerResolvers` hook.
+- **Builder is server-authoritative.** `eventDrivenResolver` is now `registry.evented(name) || serverResolverOptions.eventDriven` — a resolver the server marks evented hides the schedule editor, shows the event-driven notice, and commits `externalFireable: true` (derived at commit time, so switching to a non-evented resolver never leaves the flag stuck on).
+- **List shows "Evented".** `CronotonList`'s next-fire cell reads **"Evented"** for a trigger-only row (`external_fireable === 1` or runtime-arg keys) instead of a blank/timestamp.
+- **One resolver, one cronoton.** `createCodexCronoton` rejects a second commit reusing an already-bound `server_resolver` with `CodexCronotonValidationError` naming the existing cronoton id (→ HTTP 400).
+
+**Note — deliberate HMAC-exposure reversal.** An evented resolver now forces `external_fireable = 1`, which makes the row HMAC-fireable. This reverses 0.6.0's "don't reuse `externalFireable`" stance and is a conscious choice: it **codifies Pythia's already-shipped production behavior** (v2.7.19/2.7.20 already force this) rather than introducing new exposure, and gives one persisted signal that the store, Builder, and list all read consistently. Manually HMAC-firing an evented resolver just re-runs its idempotent resolve, which no-ops when nothing is ready.
+
+The published 0.6.0 `eventDriven` surface (`ServerResolverOption.eventDriven`, `CommitEnvelope.eventDriven`, the store input/patch fields, `builderToCommit` opts) is kept intact as an additive fallback; no breaking removals. Ordinary scheduled resolvers are unchanged.
+
+**871 specs pass.**
+
 ## 0.6.1 — 2026-08-02
 
 **PATCH — fix a CronotonList crash (white-screen) on any non-empty list.**

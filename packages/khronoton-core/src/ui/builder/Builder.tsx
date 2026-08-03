@@ -23,7 +23,7 @@
  */
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
-import { useCronotonActions, useSimulate } from "../../hooks/index.js";
+import { useCronotonActions, useServerResolvers, useSimulate } from "../../hooks/index.js";
 import { useKhronotonAdapter, useKhronotonConfig } from "../../provider/context.js";
 import type { CodexSignerDescriptor } from "../../handlers/index.js";
 import type { CodexCronotonRow } from "../../server/index.js";
@@ -122,6 +122,10 @@ export function Builder({
   const config = useKhronotonConfig();
   const actions = useCronotonActions(editId);
   const sim = useSimulate();
+  // The registered server resolvers (with their authoritative `evented` flag),
+  // fetched once from `GET /resolvers`. Degrades to `[]` when the adapter predates
+  // the method or the fetch fails — the derivation below falls back to the config.
+  const { resolvers } = useServerResolvers();
 
   const [state, setState] = useState<BuilderState>(() => makeEmptyBuilderState());
   const [signers, setSigners] = useState<CodexSignerDescriptor[]>([]);
@@ -140,14 +144,26 @@ export function Builder({
   // that hasn't arrived — and a user edit can't be clobbered by a late rehydrate.
   const editReady = !editId || loadedEditId === editId;
 
-  // Event-driven-ness is re-derived at render time: look the selected resolver up
-  // in the same options BuilderHeader uses and read its `eventDriven` flag. An
+  // Event-driven-ness is re-derived at render time and is SERVER-AUTHORITATIVE: a
+  // resolver the store's `/resolvers` registry marks `evented` wins even when the
+  // client option omits `eventDriven`. The 0.6.0 `serverResolverOptions.eventDriven`
+  // stays as a fallback (used when the adapter can't serve `/resolvers`). An
   // event-driven resolver commits scheduler-off and swaps the schedule UI for a
   // notice (see ExecuteTab). Non-event-driven rows compute `false` → unchanged.
+  const eventedNames = new Set(resolvers.filter((r) => r.evented).map((r) => r.name));
   const eventDrivenResolver = Boolean(
     state.serverResolver &&
-      config.serverResolverOptions.find((o) => o.value === state.serverResolver)?.eventDriven,
+      (eventedNames.has(state.serverResolver) ||
+        config.serverResolverOptions.find((o) => o.value === state.serverResolver)?.eventDriven),
   );
+
+  // NOTE: the committed body's `externalFireable` is derived from
+  // `eventDrivenResolver` at COMMIT time (see handleCommit), NOT mutated into
+  // `state` here. Mutating state would leave the flag stuck true if the user then
+  // switched to a non-evented resolver — silently persisting a scheduleless
+  // non-evented row. The store forces `external_fireable = 1` for evented rows
+  // regardless, and ExecuteTab's schedule-off notice keys on `eventDrivenResolver`
+  // directly, so no state mutation is needed.
 
   // Fetch the signer descriptors ONCE (the pickers on Gas Payer + Signatures read
   // them); a failure just leaves the pickers empty rather than blocking the form.
@@ -195,6 +211,11 @@ export function Builder({
     setCommitting(true);
     try {
       const body = builderToCommit(state, { eventDriven: eventDrivenResolver });
+      // An event-driven resolver commits external-fireable (mirroring the store's
+      // forced `external_fireable = 1`). Derived here at commit time from the CURRENT
+      // resolver so it's never stuck: switching to a non-evented resolver leaves the
+      // body's externalFireable as the user's own `state.externalFireable`.
+      if (eventDrivenResolver) body.envelope.externalFireable = true;
       if (isEdit && editId) {
         const res = await actions.edit.run(body);
         if (res.ok) onDone?.(editId);

@@ -45,6 +45,10 @@ function makeAdapter(overrides: Partial<KhronotonAdapter> = {}): KhronotonAdapte
     get: inert(),
     fires: inert(),
     signers: vi.fn(async () => ({ ok: true, signers: DESCRIPTORS })),
+    // OPTIONAL adapter method (0.7.0). Default: an empty registry, so every
+    // existing test computes eventDrivenResolver from serverResolverOptions alone
+    // (unchanged). Only the server-authoritative test below overrides it.
+    resolvers: vi.fn(async () => ({ ok: true, resolvers: [] })),
     commit: inert(),
     edit: inert(),
     pause: inert(),
@@ -200,6 +204,134 @@ describe("Builder — event-driven resolver seam (options → derivation → com
     const body = commit.mock.calls[0][0] as { envelope: { eventDriven?: boolean; serverResolver?: string } };
     expect(body.envelope.eventDriven).toBe(true);
     expect(body.envelope.serverResolver).toBe("dual-link-activate");
+  });
+});
+
+describe("Builder — server-authoritative evented resolver (/resolvers → schedule-off + external-fireable auto-set)", () => {
+  it("marks a resolver the SERVER reports evented as event-driven (hides ScheduleStep, shows the notice) even when the client option omits eventDriven, and auto-sets externalFireable + eventDriven on commit", async () => {
+    const commit = vi.fn(async (_body: unknown) => ({
+      ok: true as const,
+      codexCronotonId: "cr_evt",
+      nextFireAt: null,
+    }));
+    const adapter = makeAdapter({
+      commit: commit as unknown as KhronotonAdapter["commit"],
+      // The SERVER registry (/resolvers) marks evt-resolver evented. The client
+      // serverResolverOptions below deliberately does NOT set eventDriven, so this
+      // exercises the NEW server-authoritative path — not the 0.6.0 client flag.
+      resolvers: vi.fn(async () => ({
+        ok: true as const,
+        resolvers: [{ name: "evt-resolver", kind: "single-tx", evented: true }],
+      })) as unknown as KhronotonAdapter["resolvers"],
+    });
+    render(
+      <KhronotonProvider
+        adapter={adapter}
+        serverResolverOptions={[{ value: "evt-resolver", label: "Evt Resolver" }]}
+      >
+        <KhronotonUiRoot>
+          <Builder access={ADMIN} />
+        </KhronotonUiRoot>
+      </KhronotonProvider>,
+    );
+
+    await screen.findByRole("option", { name: "k:alice" }).catch(() => null);
+
+    // Name + gas-station signing key clear the commit gate (as in the create test).
+    fireEvent.change(screen.getByPlaceholderText("Daily payout"), { target: { value: "Evt" } });
+    fireEvent.change(screen.getByLabelText("Server resolver"), {
+      target: { value: "evt-resolver" },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Gas Payer" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: "k:alice" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Signing Key (DALOS.GAS_PAYER capability)"), {
+      target: { value: "k:alice" },
+    });
+
+    // Execute tab: the /resolvers fetch made evt-resolver event-driven, so the
+    // ScheduleStep is swapped for the event-driven notice (server-authoritative).
+    fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
+    await waitFor(() =>
+      expect(screen.getByText(/Event-driven — the host application fires this/i)).toBeTruthy(),
+    );
+    expect(screen.queryByLabelText("Mode")).toBeNull(); // ScheduleStep absent
+
+    // Commit: the auto-set flipped externalFireable on (matching the store's forced
+    // external_fireable = 1), and the derivation carried eventDriven through.
+    fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    const body = commit.mock.calls[0][0] as {
+      envelope: { externalFireable?: boolean; eventDriven?: boolean; serverResolver?: string };
+    };
+    expect(body.envelope.externalFireable).toBe(true);
+    expect(body.envelope.eventDriven).toBe(true);
+    expect(body.envelope.serverResolver).toBe("evt-resolver");
+  });
+
+  it("does NOT leave externalFireable stuck true after previewing an evented resolver then switching to a non-evented one (commit-time derivation, not sticky state)", async () => {
+    const commit = vi.fn(async (_body: unknown) => ({
+      ok: true as const,
+      codexCronotonId: "cr_plain",
+      nextFireAt: "2026-09-01T00:00:00.000Z",
+    }));
+    const adapter = makeAdapter({
+      commit: commit as unknown as KhronotonAdapter["commit"],
+      // Registry marks ONLY evt-resolver evented; plain-resolver is a normal
+      // scheduled server resolver.
+      resolvers: vi.fn(async () => ({
+        ok: true as const,
+        resolvers: [{ name: "evt-resolver", kind: "single-tx", evented: true }],
+      })) as unknown as KhronotonAdapter["resolvers"],
+    });
+    render(
+      <KhronotonProvider
+        adapter={adapter}
+        serverResolverOptions={[
+          { value: "evt-resolver", label: "Evt Resolver" },
+          { value: "plain-resolver", label: "Plain Resolver" },
+        ]}
+      >
+        <KhronotonUiRoot>
+          <Builder access={ADMIN} />
+        </KhronotonUiRoot>
+      </KhronotonProvider>,
+    );
+
+    await screen.findByRole("option", { name: "k:alice" }).catch(() => null);
+
+    fireEvent.change(screen.getByPlaceholderText("Daily payout"), { target: { value: "Switch" } });
+    // Preview the evented resolver first (the old sticky useEffect would flip
+    // state.externalFireable true here and never reset it).
+    fireEvent.change(screen.getByLabelText("Server resolver"), {
+      target: { value: "evt-resolver" },
+    });
+    // Then switch to the non-evented resolver before committing.
+    fireEvent.change(screen.getByLabelText("Server resolver"), {
+      target: { value: "plain-resolver" },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Gas Payer" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: "k:alice" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Signing Key (DALOS.GAS_PAYER capability)"), {
+      target: { value: "k:alice" },
+    });
+
+    // Execute tab: with the non-evented resolver the ScheduleStep is restored
+    // (not the event-driven notice) — proving the switch-away reverted the UI too.
+    fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
+    expect(screen.queryByText(/Event-driven — the host application fires this/i)).toBeNull();
+    expect(screen.getByLabelText("Mode")).toBeTruthy(); // ScheduleStep restored
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    const body = commit.mock.calls[0][0] as {
+      envelope: { externalFireable?: boolean; eventDriven?: boolean; serverResolver?: string };
+    };
+    // The committed body reflects the CURRENT (non-evented) resolver: no forced
+    // external-fireable, no event-driven flag — proving the flag is derived at
+    // commit time, not left stuck by an earlier evented preview.
+    expect(body.envelope.serverResolver).toBe("plain-resolver");
+    expect(body.envelope.externalFireable).not.toBe(true);
+    expect(body.envelope.eventDriven).not.toBe(true);
   });
 });
 

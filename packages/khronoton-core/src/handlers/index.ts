@@ -3,7 +3,7 @@
  * framework-agnostic route surface over the `/server` store + executor. A
  * consumer adapts its framework's request/response into {@link HandlerRequest} /
  * {@link HandlerResponse}, injects a {@link HandlerContext} (db + runtime +
- * resolver + an {@link AuthSeam}), and calls the sixteen handlers below.
+ * resolver + an {@link AuthSeam}), and calls the seventeen handlers below.
  *
  * The read handlers keep their contract names here (aliasing their module's
  * `*Handler` implementations), so the barrel exposes the exact route contract
@@ -20,6 +20,7 @@ export {
   getHandler as getCodexCronoton,
   signersHandler as fetchSigners,
   firesHandler as fetchFires,
+  resolversHandler as listResolvers,
 } from "./read.js";
 
 // ── Cronoton-lifecycle handlers (TC.3) ────────────────────────────────────────

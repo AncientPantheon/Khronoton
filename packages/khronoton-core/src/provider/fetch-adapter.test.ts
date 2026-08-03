@@ -82,6 +82,13 @@ describe("createFetchAdapter — routing", () => {
     expect(f.last().url).toBe(`${BASE}/signers`);
   });
 
+  it("resolvers() GETs the resolvers route", async () => {
+    const f = fakeFetch(response(200, { ok: true, resolvers: [] }));
+    await createFetchAdapter(BASE, { fetch: f.fn }).resolvers!();
+    expect(f.last().method).toBe("GET");
+    expect(f.last().url).toBe(`${BASE}/resolvers`);
+  });
+
   it("commit() POSTs the CommitBody directly to the base", async () => {
     const f = fakeFetch(response(200, { ok: true, codexCronotonId: "c9", nextFireAt: null }));
     const body = { name: "x", envelope: {}, schedule: {} } as never;

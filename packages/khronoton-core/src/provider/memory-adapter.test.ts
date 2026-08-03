@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { assertAdapter, NeedsConfirmError, type KhronotonAdapter } from "./adapter.js";
 import { createMemoryAdapter } from "./memory-adapter.js";
 import type { CommitBody } from "../handlers/index.js";
-import type { Database } from "../server/index.js";
+import { registerServerResolver, type Database } from "../server/index.js";
 
 /** A future one-time cronoton — parks with a next fire but no manual batch. */
 function oneTimeBody(name = "Memory cronoton"): CommitBody {
@@ -121,6 +121,24 @@ describe("createMemoryAdapter — manual-batch start/observe/stop", () => {
 
     const afterCancel = await adapter.getBatch(codexCronotonId);
     expect(afterCancel.batch).toBeNull();
+  });
+});
+
+describe("createMemoryAdapter — resolvers() drives the registry handler", () => {
+  it("returns a registered evented resolver from the real listResolvers handler", async () => {
+    // A unique name — the resolver registry is process-global and persists
+    // across tests, so a fixed name could collide with another suite.
+    const name = `memory-adapter-evented-${Date.now()}`;
+    registerServerResolver(name, {
+      kind: "single-tx",
+      evented: true,
+      resolve: () => ({ plan: [], payload: {} }),
+      settle: () => {},
+    });
+
+    const view = await adapter.resolvers!();
+    expect(view.ok).toBe(true);
+    expect(view.resolvers).toContainEqual({ name, kind: "single-tx", evented: true });
   });
 });
 

@@ -24,6 +24,7 @@ import {
   type ScheduleMode,
 } from "../../schedule.js";
 import { runtimeArgKeysCollide } from "../pure/runtime-args.js";
+import { getServerResolver } from "../resolvers.js";
 import type { DbDep } from "../seams.js";
 import type {
   CodexCronotonRow,
@@ -124,6 +125,19 @@ export function commitCodexCronoton(
       "server-resolver rows cannot declare runtime args",
     );
   }
+  // One-resolver-one-cronoton: a server_resolver may bind AT MOST one cronoton.
+  // The finder returns the newest match, so a duplicate would silently shadow the
+  // first and fire the wrong template — reject it, naming the existing row.
+  if (input.serverResolver) {
+    const existing = findCodexCronotonIdByServerResolver(input.serverResolver, {
+      db: opts.db,
+    });
+    if (existing) {
+      throw new CodexCronotonValidationError(
+        `server resolver "${input.serverResolver}" is already bound to cronoton ${existing} — delete it first`,
+      );
+    }
+  }
 
   const now = opts.now ?? new Date();
   // A SCHEDULER-OFF cronoton (externally fireable, OR declaring runtime args, OR
@@ -131,8 +145,14 @@ export function commitCodexCronoton(
   // demand, never on a timer — so it carries NO schedule: skip the next-fire
   // computation and store next_fire_at = NULL. The scheduler's
   // `next_fire_at IS NOT NULL` gate then skips it.
+  // An EVENTED server resolver (per the registry) is host-fired on an in-process
+  // event, never on a timer — the store is authoritative: it forces the row
+  // external-fireable (external_fireable = 1) and scheduler-off, regardless of what
+  // the client sent, so the guarantee holds for every consumer.
+  const evented = getServerResolver(input.serverResolver ?? "")?.evented === true;
+  const externalFireable = input.externalFireable === true || evented;
   const triggerOnly =
-    input.externalFireable === true ||
+    externalFireable ||
     runtimeArgKeys.length > 0 ||
     input.eventDriven === true;
   const nextFireAt = triggerOnly
@@ -162,7 +182,7 @@ export function commitCodexCronoton(
       input.scheduleMode,
       JSON.stringify(input.scheduleConfig),
       input.serverResolver ?? null,
-      input.externalFireable ? 1 : 0,
+      externalFireable ? 1 : 0,
       runtimeArgKeys.length > 0 ? JSON.stringify(runtimeArgKeys) : null,
       nextFireAt,
       nowIso,
@@ -334,41 +354,64 @@ export function editCodexCronoton(
     changedFields.push("schedule");
   }
 
-  // A trigger-only row (externally fireable OR runtime-arg) has NO schedule (its
-  // next_fire_at is NULL and the scheduler skips it) — never resurrect a next-fire
-  // for it, even if a schedule patch slips through. Keep next_fire_at as-is (NULL).
-  const rowTriggerOnly =
-    rowExternalFireable(row) || rowRuntimeArgKeys(row).length > 0;
+  // Derive EVENTED-ness of both the PATCHED (post-edit) resolver and the row's
+  // CURRENT (pre-edit) resolver from the registry (authoritative). An edit that
+  // repoints onto an evented resolver — even WITHOUT the client eventDriven flag —
+  // must force scheduler-off + external-fireable, mirroring commit; an edit that
+  // repoints AWAY from an evented resolver must shed the evented-forced
+  // external_fireable and re-arm a real schedule.
+  const resolverName =
+    patch.serverResolver !== undefined ? patch.serverResolver : row.server_resolver;
+  const evented = getServerResolver(resolverName ?? "")?.evented === true;
+  const prevEvented = getServerResolver(row.server_resolver ?? "")?.evented === true;
+  // The row's external_fireable is "genuine" (a user-set HMAC-fire flag to preserve)
+  // ONLY when it was NOT forced by a now-departed evented resolver. This lets a plain
+  // edit of a genuinely external-fireable row keep its flag, while an evented→
+  // non-evented repoint correctly drops the evented-forced flag.
+  const genuineExternalFireable = Boolean(rowExternalFireable(row)) && !prevEvented;
+  const rowSchedulerOff =
+    evented || rowRuntimeArgKeys(row).length > 0 || genuineExternalFireable;
+  // A row that just LEFT an evented resolver must re-arm its schedule even if the
+  // edit carried no explicit schedule patch (else it would sit external_fireable=0 +
+  // next_fire_at=NULL — a dead row that never fires).
+  const eventedDeparted = prevEvented && !evented;
+
   // An event-driven edit forces the row scheduler-off (next_fire_at NULL). There is
-  // no persisted event_driven column, so `rowTriggerOnly` can't see it — this patch
-  // signal takes precedence and covers BOTH an event-driven→event-driven edit (keep
-  // NULL) and a scheduled→event-driven conversion (clear the row's stale non-null
-  // next_fire_at). Marking "schedule" ensures the UPDATE runs even when the clear is
-  // the only change (a pure conversion), so the early-out below doesn't skip the write.
-  if (patch.eventDriven === true) {
+  // no persisted event_driven column, so `rowSchedulerOff` can't see the departed
+  // case via the row alone — the patch/registry signals above drive this. Marking
+  // "schedule" ensures the UPDATE runs even when the next_fire_at change is the only
+  // change, so the early-out below doesn't skip the write.
+  if (patch.eventDriven === true || evented) {
     if (nextFireAt !== null && !changedFields.includes("schedule")) {
       changedFields.push("schedule");
     }
     nextFireAt = null;
-  } else if (scheduleChanged && !rowTriggerOnly) {
+  } else if ((scheduleChanged || eventedDeparted) && !rowSchedulerOff) {
     const next = computeNextOrReject(
       nextScheduleMode,
       JSON.parse(nextScheduleConfigJson) as ScheduleConfig,
       opts.now ?? new Date(),
     );
     nextFireAt = next.toISOString();
+    if (!changedFields.includes("schedule")) changedFields.push("schedule");
   }
 
   if (changedFields.length === 0) {
     return { changedFields, nextFireAt };
   }
 
+  // An evented edit forces external_fireable = 1 (mirroring commit). Otherwise the
+  // edit PRESERVES a GENUINE (user-set) external-fireable flag, but DROPS one that
+  // was only forced by a now-departed evented resolver — so an evented→non-evented
+  // repoint doesn't leave the row permanently external-fireable/scheduler-off.
+  const nextExternalFireable = evented ? 1 : genuineExternalFireable ? 1 : 0;
+
   db.prepare(
     `UPDATE codex_cronotons
         SET name = ?, description = ?, pact_code = ?, config_json = ?,
             payload_json = ?, gas_payer_json = ?, signers_json = ?,
             schedule_mode = ?, schedule_config_json = ?, server_resolver = ?,
-            next_fire_at = ?, modified_at = ?
+            external_fireable = ?, next_fire_at = ?, modified_at = ?
       WHERE id = ?`,
   ).run(
     nextName,
@@ -381,6 +424,7 @@ export function editCodexCronoton(
     nextScheduleMode,
     nextScheduleConfigJson,
     nextServerResolver,
+    nextExternalFireable,
     nextFireAt,
     (opts.now ?? new Date()).toISOString(),
     id,

@@ -31,6 +31,8 @@ export type {
 } from "./useCronotonFires.js";
 export { useManualBatch } from "./useManualBatch.js";
 export type { UseManualBatchResult } from "./useManualBatch.js";
+export { useServerResolvers } from "./useServerResolvers.js";
+export type { UseServerResolversView } from "./useServerResolvers.js";
 
 // ── Lifecycle action hook (create / edit / pause / resume / remove) ───────────
 export { useCronotonActions } from "./useCronotonActions.js";

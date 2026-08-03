@@ -44,6 +44,7 @@ import type {
   ListCronotonsQuery,
   ListCronotonsView,
   RecoverView,
+  ResolversView,
   SignersView,
   SimulateEnvelope,
   SimulateView,
@@ -63,6 +64,7 @@ import {
   getCodexCronoton,
   getExecuteBatch,
   listCodexCronotons,
+  listResolvers,
   pauseCodexCronoton,
   recoverFire,
   resumeCodexCronoton,
@@ -204,6 +206,9 @@ export function createMemoryAdapter(opts: MemoryAdapterOptions): KhronotonAdapte
     },
     signers() {
       return call<SignersView>(fetchSigners, {});
+    },
+    resolvers() {
+      return call<ResolversView>(listResolvers, {});
     },
 
     // Lifecycle tier (confirm-gated)
