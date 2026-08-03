@@ -139,6 +139,35 @@ describe("useCronotonActions — each action fires its adapter method behind the
     expect(del).toHaveBeenCalledWith("c1", { confirmed: true });
   });
 
+  it("remove.run({ force: true }) threads force into the gated delete call", async () => {
+    const del = vi.fn(async () => ({ ok: true }));
+    const adapter = makeAdapter({ delete: del as unknown as KhronotonAdapter["delete"] });
+    const { result } = renderHook(() => useCronotonActions("c1"), { wrapper: makeWrapper(adapter) });
+
+    await act(async () => {
+      await result.current.remove.run({ force: true });
+    });
+
+    // The operator's system-delete warning acceptance rides as `force:true`
+    // alongside the gate's fresh-confirm signal.
+    expect(del).toHaveBeenCalledWith("c1", expect.objectContaining({ confirmed: true, force: true }));
+  });
+
+  it("remove.run() (no arg) leaves force undefined — byte-compatible with the non-system delete", async () => {
+    const del = vi.fn(async () => ({ ok: true }));
+    const adapter = makeAdapter({ delete: del as unknown as KhronotonAdapter["delete"] });
+    const { result } = renderHook(() => useCronotonActions("c1"), { wrapper: makeWrapper(adapter) });
+
+    await act(async () => {
+      await result.current.remove.run();
+    });
+
+    // A plain delete must not force past the system guard — force stays absent.
+    expect(del).toHaveBeenCalledWith("c1", expect.objectContaining({ confirmed: true }));
+    const opts = (del.mock.calls[0] as unknown as [string, { force?: boolean }])[1];
+    expect(opts.force).toBeUndefined();
+  });
+
   it("returns a bound-id error WITHOUT calling the adapter when no id was supplied to an id-scoped action", async () => {
     const pause = vi.fn(async () => ({ ok: true, status: "paused", nextFireAt: null }));
     const adapter = makeAdapter({ pause: pause as unknown as KhronotonAdapter["pause"] });

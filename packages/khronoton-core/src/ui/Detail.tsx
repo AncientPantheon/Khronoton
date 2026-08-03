@@ -28,6 +28,7 @@ import type { CodexCronotonRow } from "../server/types.js";
 import type { ScheduleConfig } from "../schedule.js";
 import { summariseSchedule } from "../schedule.js";
 import { parseRuntimeArgKeys } from "../server/pure/runtime-args.js";
+import { isTriggerOnly } from "./row-derive.js";
 import { CronotonStatusBadge, ExternallyFireablePill, ServerResolverPill } from "./badges.js";
 import { Card, LinkButton, MetaCell, TextButton } from "./primitives.js";
 import {
@@ -41,6 +42,7 @@ import type { Access } from "./access.js";
 import {
   deleteConfirm,
   deletePasswordConfirm,
+  deleteSystemConfirm,
   detailExecuteConfirm,
   pauseResumeConfirm,
   withConfirm,
@@ -199,7 +201,7 @@ function Loaded({
   const name = row.name;
   const terminal = TERMINAL_STATUSES.has(row.status);
   const runtimeArgKeys = parseRuntimeArgKeys(row.runtime_arg_keys);
-  const triggerOnly = runtimeArgKeys.length > 0;
+  const triggerOnly = isTriggerOnly(row);
 
   const working =
     actions.pause.pending || actions.resume.pending || actions.remove.pending || execute.pending;
@@ -217,12 +219,18 @@ function Loaded({
     // The inner (password) step owns the failure alert + the navigate-on-success;
     // the outer confirm must NOT re-inspect that inner result, or a failed delete
     // would surface the SAME alert twice. A no-op alert on the outer silences it.
+    const systemResolver = row.server_resolver;
+    const firstPrompt = systemResolver
+      ? deleteSystemConfirm(name, systemResolver)
+      : deleteConfirm(name);
     void withConfirm(
-      deleteConfirm(name),
+      firstPrompt,
       () =>
-        withConfirm(deletePasswordConfirm(name), () => actions.remove.run(), {
-          onSuccess: onNavigateToList,
-        }),
+        withConfirm(
+          deletePasswordConfirm(name),
+          () => actions.remove.run(systemResolver ? { force: true } : undefined),
+          { onSuccess: onNavigateToList },
+        ),
       { alert: () => {} },
     );
   };
@@ -318,7 +326,7 @@ function Loaded({
       <Card style={{ marginTop: "18px", padding: "16px" }}>
         <div style={GRID_STYLE}>
           <MetaCell label="Schedule">
-            {triggerOnly ? "Trigger-only — no schedule" : scheduleLine(row)}
+            {triggerOnly ? "Evented" : scheduleLine(row)}
           </MetaCell>
           <MetaCell label="Status">
             <CronotonStatusBadge status={row.status} />

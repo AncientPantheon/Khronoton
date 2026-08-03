@@ -243,15 +243,17 @@ describe("CronotonList — three access tiers", () => {
 });
 
 describe("CronotonList — delete-lock precedence", () => {
-  it("admin + server-resolver row: Delete is disabled with the system-cronoton title (announces before the tier)", async () => {
+  it("admin + server-resolver row: Delete is enabled and carries the system-cronoton hover", async () => {
     const adapter = makeAdapter([makeRow({ server_resolver: "stoicism-mint" })]);
     mountList(adapter, ADMIN);
 
     await screen.findByText("Daily treasury sweep");
     const del = screen.getByText("Delete") as HTMLButtonElement;
-    expect(del.disabled).toBe(true);
+    // A system cronoton is no longer hard-blocked for an admin (deleteDisabled now
+    // returns enabled) — the button is clickable and carries an informative hover.
+    expect(del.disabled).toBe(false);
     expect(del.getAttribute("title")).toBe(
-      "System cronoton — cannot be deleted. Pause it to disable instead.",
+      "System cronoton — deleting removes the automaton's template; you'll be warned first.",
     );
   });
 });
@@ -277,6 +279,50 @@ describe("CronotonList — confirm flows + refetch", () => {
     expect(spy(adapter, "delete")).toHaveBeenCalledWith("c1", { confirmed: true });
     // Success triggers the SSR-style refetch: the list is re-read (initial load + refetch).
     await waitFor(() => expect(spy(adapter, "list").mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("system-resolver delete: the FIRST confirm names the resolver + warns, and the delete is forced", async () => {
+    // On a server_resolver row the list's delete must warn (naming the resolver) as its
+    // FIRST prompt and force the delete, matching the detail screen — otherwise a system
+    // cronoton cannot be cleaned up from the list (the handler 409s an un-forced delete).
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const adapter = makeAdapter([makeRow({ server_resolver: "dual-link-activate" })]);
+    mountList(adapter, ADMIN);
+
+    await screen.findByText("Daily treasury sweep");
+    fireEvent.click(screen.getByText("Delete"));
+
+    await waitFor(() =>
+      expect(spy(adapter, "delete")).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ force: true }),
+      ),
+    );
+    const firstMessage = confirmSpy.mock.calls[0][0] as string;
+    expect(firstMessage).toMatch(/dual-link-activate/);
+    expect(firstMessage).toMatch(/anyway\?/);
+    // The in-gate password confirm STILL fires as the second, ordered prompt — the
+    // system path must not collapse to a single warning (design: "keep the in-gate
+    // deletePasswordConfirm"). Without this, dropping the nested confirm would slip by.
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(confirmSpy.mock.calls[1][0]).toBe('Confirm to delete codex cronoton "Daily treasury sweep".');
+  });
+
+  it("non-system delete: the FIRST confirm is the fire-history line and the delete is NOT forced", async () => {
+    // The ordinary row's flow stays byte-identical: fire-history prompt first, force unset.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const adapter = makeAdapter([makeRow({ server_resolver: null })]);
+    mountList(adapter, ADMIN);
+
+    await screen.findByText("Daily treasury sweep");
+    fireEvent.click(screen.getByText("Delete"));
+
+    await waitFor(() => expect(spy(adapter, "delete")).toHaveBeenCalled());
+    expect(confirmSpy.mock.calls[0][0]).toBe(
+      'Delete codex cronoton "Daily treasury sweep"? Fire history is removed too.',
+    );
+    const opts = spy(adapter, "delete").mock.calls[0][1] as { force?: boolean };
+    expect(opts.force).not.toBe(true);
   });
 
   it("delete: declining the first native confirm skips the action entirely", async () => {

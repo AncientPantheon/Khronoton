@@ -123,6 +123,19 @@ describe("createFetchAdapter — routing", () => {
     expect(f.last().url).toBe(`${BASE}/c1`);
   });
 
+  it("delete() appends ?force=1 when force is set (system-row force-delete)", async () => {
+    const f = fakeFetch(response(200, { ok: true }));
+    await createFetchAdapter(BASE, { fetch: f.fn }).delete("c1", { confirmed: true, force: true });
+    expect(f.last().method).toBe("DELETE");
+    expect(f.last().url).toBe(`${BASE}/c1?force=1`);
+  });
+
+  it("delete() sends NO query string when force is absent", async () => {
+    const f = fakeFetch(response(200, { ok: true }));
+    await createFetchAdapter(BASE, { fetch: f.fn }).delete("c1");
+    expect(f.last().url).toBe(`${BASE}/c1`);
+  });
+
   it("simulate() POSTs the envelope wrapped as { envelope }", async () => {
     const f = fakeFetch(response(200, { ok: true, calibratedGasLimit: 1 }));
     await createFetchAdapter(BASE, { fetch: f.fn }).simulate({ pactCode: "(x)" }, { confirmed: true });

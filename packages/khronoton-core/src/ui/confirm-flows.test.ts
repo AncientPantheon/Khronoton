@@ -13,6 +13,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   deleteConfirm,
   deletePasswordConfirm,
+  deleteSystemConfirm,
   pauseResumeConfirm,
   listExecuteConfirm,
   detailExecuteConfirm,
@@ -33,6 +34,12 @@ describe("verbatim confirm strings", () => {
   it("delete password-confirm names the cronoton being deleted", () => {
     expect(deletePasswordConfirm("Daily payout")).toBe(
       'Confirm to delete codex cronoton "Daily payout".',
+    );
+  });
+
+  it("system-delete confirm names the resolver whose capability the delete disables and the cronoton being removed", () => {
+    expect(deleteSystemConfirm("Daily payout", "dual-link-activate")).toBe(
+      'This is the automaton\'s "dual-link-activate" template. Deleting it stops that capability until it\'s recreated. Delete "Daily payout" anyway?',
     );
   });
 

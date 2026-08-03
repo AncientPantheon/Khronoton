@@ -4,6 +4,19 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.8.0 — 2026-08-03
+
+**MINOR — the last two evented-server-resolver UI fixes: DETAIL "Schedule" reads "Evented", and a system cronoton is deletable behind a confirm-gated warning.**
+
+Finalizes the Pythia automatic-link work. 0.7.0 made the store server-authoritative for evented resolvers; two UI gaps remained (verified live against Pythia v2.7.22–2.7.25).
+
+- **Fix 1 — the cronoton DETAIL card's "Schedule" now reads "Evented" for a trigger-only/evented row.** It previously rendered the stored `schedule_config` ("Daily at 12:00 UTC") for a row that never fires on a clock — while Next Fire already showed "—" and the edit form already disabled the scheduler. Root cause: `Detail.tsx` computed `triggerOnly` from runtime-arg keys only, ignoring `external_fireable`. The list's trigger-only predicate is now extracted to a shared `isTriggerOnly(row)` (`external_fireable === 1 || runtime-arg keys present`) used by **both** the list next-fire cell and the detail Schedule cell, so they can never drift again.
+- **Fix 2 — a system (server-resolver) cronoton is deletable with a warning, not hard-blocked.** `DELETE /[id]` previously refused any `server_resolver` row with `409 { protected: true }`. It now accepts a confirm-gated `?force=1` that permits the delete (the 409 still stands without force). Threaded end-to-end: `ConfirmOpts.force` → both reference adapters send `?force=1` → the widened `remove.run({ force })` action. In the bundled Builder, the Delete button is now **enabled** for an admin on a system cronoton (still admin-only) and, on click, shows a warning naming the resolver — *"This is the automaton's `<name>` template. Deleting it stops that capability until it's recreated. Delete anyway?"* — before the existing password confirm. The audit trail is preserved and a forced system delete records `forced: true`.
+
+Behavior for ordinary scheduled cronotons is unchanged; a non-system delete and a `delete(id)`/`remove.run()` without force are byte-identical to 0.7.0, and a system delete without force still 409s. New public surface: `ConfirmOpts.force`, the widened `DeleteAction` run arg (`DeleteRunOpts`), the `deleteSystemConfirm` export, and the shared `isTriggerOnly`/`row-derive` module — all additive.
+
+**893 specs pass.**
+
 ## 0.7.0 — 2026-08-03
 
 **MINOR — server-authoritative evented resolvers: scheduleless + external-fireable enforced in the store, `GET /resolvers`, one-resolver-one-cronoton.**

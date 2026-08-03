@@ -40,11 +40,13 @@ import type { Access } from "./access.js";
 import {
   deleteConfirm,
   deletePasswordConfirm,
+  deleteSystemConfirm,
   listExecuteConfirm,
   pauseResumeConfirm,
   withConfirm,
 } from "./confirm-flows.js";
 import { RelativeTime } from "./RelativeTime.js";
+import { isTriggerOnly } from "./row-derive.js";
 
 /** The default `robots` policy — the list is publicly readable but not indexable. */
 export const DEFAULT_LIST_ROBOTS = "noindex,nofollow";
@@ -94,22 +96,6 @@ function pactPreview(pactCode: string | null | undefined): string {
   return collapsed.length > PACT_PREVIEW_MAX
     ? `${collapsed.slice(0, PACT_PREVIEW_MAX)}…`
     : collapsed;
-}
-
-/**
- * Trigger-only ⇒ the scheduler never auto-fires: the row is external-fireable
- * (evented / HMAC-triggered) or it declares ≥1 runtime-arg key.
- */
-function isTriggerOnly(row: CodexCronotonRow): boolean {
-  if (row.external_fireable === 1) return true;
-  const raw = row.runtime_arg_keys;
-  if (!raw) return false;
-  try {
-    const keys = JSON.parse(raw) as unknown;
-    return Array.isArray(keys) && keys.length > 0;
-  } catch {
-    return false;
-  }
 }
 
 /** The human schedule summary via the shipped summariser (never re-implemented). */
@@ -165,8 +151,14 @@ function CronotonListRowView({
   const ex = executeDisabled(access, row, { working, batchActive: false });
 
   const handleDelete = (): void => {
-    void withConfirm(deleteConfirm(row.name), () =>
-      withConfirm(deletePasswordConfirm(row.name), () => actions.remove.run()),
+    const systemResolver = row.server_resolver;
+    const firstPrompt = systemResolver
+      ? deleteSystemConfirm(row.name, systemResolver)
+      : deleteConfirm(row.name);
+    void withConfirm(firstPrompt, () =>
+      withConfirm(deletePasswordConfirm(row.name), () =>
+        actions.remove.run(systemResolver ? { force: true } : undefined),
+      ),
     );
   };
   const handleToggle = (): void => {

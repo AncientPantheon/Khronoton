@@ -55,6 +55,23 @@ function recurringBody(name = "Recurring cronoton"): CommitBody {
   };
 }
 
+/** A system cronoton — bound to a `server_resolver`, so the handler delete-locks it. */
+function systemBody(serverResolver: string, name = "System cronoton"): CommitBody {
+  return {
+    name,
+    description: null,
+    envelope: {
+      pactCode: '(coin.transfer "a" "b" 1.0)',
+      config: { chainId: "0", gasPrice: 1, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+      payload: {},
+      gasPayer: { type: "gas-station" },
+      signers: [],
+      serverResolver,
+    },
+    schedule: { mode: "one-time", config: { mode: "one-time", fireAt: "2099-01-01T00:00:00.000Z" } },
+  };
+}
+
 let db: Database;
 let adapter: KhronotonAdapter;
 
@@ -139,6 +156,31 @@ describe("createMemoryAdapter — resolvers() drives the registry handler", () =
     const view = await adapter.resolvers!();
     expect(view.ok).toBe(true);
     expect(view.resolvers).toContainEqual({ name, kind: "single-tx", evented: true });
+  });
+});
+
+describe("createMemoryAdapter — force-delete threads ?force=1 to the delete handler", () => {
+  it("refuses a system row without force (409 protected → thrown Error)", async () => {
+    const resolver = `memory-adapter-force-${Date.now()}-a`;
+    const { codexCronotonId } = await adapter.commit(systemBody(resolver), { confirmed: true });
+    // No force: the delete-lock guard surfaces as the shared parseHandlerResult throw.
+    await expect(adapter.delete(codexCronotonId, { confirmed: true })).rejects.toThrow(
+      "cannot be deleted",
+    );
+    // The row is still present — the refusal did not delete it.
+    const got = await adapter.get(codexCronotonId);
+    expect(got.codexCronoton.id).toBe(codexCronotonId);
+  });
+
+  it("deletes a system row when force is set, and the row is gone afterwards", async () => {
+    const resolver = `memory-adapter-force-${Date.now()}-b`;
+    const { codexCronotonId } = await adapter.commit(systemBody(resolver), { confirmed: true });
+
+    const result = await adapter.delete(codexCronotonId, { confirmed: true, force: true });
+    expect(result).toEqual({ ok: true });
+
+    const listed = await adapter.list();
+    expect(listed.codexCronotons.find((c) => c.id === codexCronotonId)).toBeUndefined();
   });
 });
 

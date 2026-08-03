@@ -60,7 +60,12 @@ export interface GatedAction<Args extends unknown[], T> {
 export type CreateAction = GatedAction<[CommitBody], CommitView>;
 export type EditAction = GatedAction<[EditPatch], EditView>;
 export type ToggleAction = GatedAction<[], ToggleView>;
-export type DeleteAction = GatedAction<[], DeleteView>;
+
+/** Run-time options for `remove.run(...)` — `force` deletes a server-resolver/system row. */
+export interface DeleteRunOpts {
+  force?: boolean;
+}
+export type DeleteAction = GatedAction<[DeleteRunOpts?], DeleteView>;
 
 /** The bundle `useCronotonActions` returns. */
 export interface CronotonActions {
@@ -184,11 +189,14 @@ export function useCronotonActions(
     onSuccess,
   );
 
-  const remove = useGatedAction<[], DeleteView>(
-    useCallback(() => {
-      const target = requireId(id, "delete");
-      return (opts) => adapter.delete(target, opts);
-    }, [adapter, id]),
+  const remove = useGatedAction<[DeleteRunOpts?], DeleteView>(
+    useCallback(
+      (runOpts) => {
+        const target = requireId(id, "delete");
+        return (opts) => adapter.delete(target, { ...opts, force: runOpts?.force });
+      },
+      [adapter, id],
+    ),
     onNeedConfirm,
     onSuccess,
   );

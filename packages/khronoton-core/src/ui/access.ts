@@ -39,7 +39,7 @@ export type NewCronotonTier =
 
 export const ADMIN_ONLY_TITLE = "Ancient admins only";
 export const SYSTEM_CRONOTON_DELETE_TITLE =
-  "System cronoton — cannot be deleted. Pause it to disable instead.";
+  "System cronoton — deleting removes the automaton's template; you'll be warned first.";
 export const TERMINAL_PAUSE_RESUME_TITLE =
   "Terminal cronotons cannot be paused or resumed";
 export const TERMINAL_EXECUTE_TITLE =
@@ -62,22 +62,24 @@ const ENABLED: DisableState = { disabled: false, title: undefined };
 const WORKING: DisableState = { disabled: true, title: undefined };
 
 /**
- * Delete precedence: the server-resolver row lock announces first (a system
- * cronoton can never be deleted, only paused — shown even to an admin), then the
- * access tier, then the in-flight guard.
+ * Delete precedence: the access tier gates first (a non-admin is blocked with the
+ * admins-only title, even on a system row), then the in-flight guard, then the
+ * server-resolver hint. A system cronoton is no longer hard-blocked for an admin —
+ * the button is enabled and carries an informative hover; the destructive warning
+ * (`deleteSystemConfirm`) is shown at click time before the delete proceeds.
  */
 export function deleteDisabled(
   access: Access,
   row: RuleRow,
   opts: { working?: boolean } = {},
 ): DisableState {
-  if (row.server_resolver) {
-    return { disabled: true, title: SYSTEM_CRONOTON_DELETE_TITLE };
-  }
   if (!canMutate(access)) {
     return { disabled: true, title: ADMIN_ONLY_TITLE };
   }
   if (opts.working) return WORKING;
+  if (row.server_resolver) {
+    return { disabled: false, title: SYSTEM_CRONOTON_DELETE_TITLE };
+  }
   return ENABLED;
 }
 

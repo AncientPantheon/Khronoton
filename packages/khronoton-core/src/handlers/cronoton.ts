@@ -208,7 +208,10 @@ export async function resumeCodexCronoton(
  * DELETE /[id] — remove a codex cronoton. Confirm-gated. A row bound to a server
  * resolver is a SYSTEM cronoton: it is delete-locked (pause to disable instead),
  * so the handler loads the row first and refuses with 409 before the store's
- * unconditional delete would run (REQ-H05).
+ * unconditional delete would run (REQ-H05) — UNLESS an explicit `?force=1`
+ * (`"1"`/`"true"`) query param accompanies the request, which the operator sets
+ * only after accepting the system-delete warning; a forced delete is recorded in
+ * the audit trail as `forced: true`.
  */
 export async function deleteCodexCronoton(
   ctx: HandlerContext,
@@ -218,7 +221,8 @@ export async function deleteCodexCronoton(
     const id = paramId(req);
     const row = storeGet(id, { db: ctx.db });
     if (!row) throw new CodexCronotonValidationError("not found");
-    if (row.server_resolver) {
+    const force = req.query?.force === "1" || req.query?.force === "true";
+    if (row.server_resolver && !force) {
       return json(409, {
         error: "System cronoton — cannot be deleted. Pause it to disable instead.",
         protected: true,
@@ -230,7 +234,7 @@ export async function deleteCodexCronoton(
       result: "ok",
       targetKind: "codex_cronoton",
       targetId: id,
-      detail: { serverResolver: row.server_resolver ?? null },
+      detail: { serverResolver: row.server_resolver ?? null, forced: row.server_resolver ? force : false },
     });
     return json(200, { ok: true });
   });

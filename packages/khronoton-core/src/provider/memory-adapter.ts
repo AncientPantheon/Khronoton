@@ -229,7 +229,11 @@ export function createMemoryAdapter(opts: MemoryAdapterOptions): KhronotonAdapte
       return call<ToggleView>(resumeCodexCronoton, { params: { id }, confirmed: confirm?.confirmed });
     },
     delete(id: string, confirm?: ConfirmOpts) {
-      return call<DeleteView>(deleteCodexCronoton, { params: { id }, confirmed: confirm?.confirmed });
+      return call<DeleteView>(deleteCodexCronoton, {
+        params: { id },
+        query: confirm?.force ? { force: "1" } : undefined,
+        confirmed: confirm?.confirmed,
+      });
     },
 
     // Execution tier (confirm-gated; simulate/executeNow/trigger are 200-on-ok:false)

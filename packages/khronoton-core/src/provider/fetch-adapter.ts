@@ -180,7 +180,9 @@ export function createFetchAdapter(
       return request<ToggleView>("PATCH", `/${id}/resume`, { confirmed: confirm?.confirmed });
     },
     delete(id: string, confirm?: ConfirmOpts) {
-      return request<DeleteView>("DELETE", `/${id}`, { confirmed: confirm?.confirmed });
+      return request<DeleteView>("DELETE", `/${id}${confirm?.force ? "?force=1" : ""}`, {
+        confirmed: confirm?.confirmed,
+      });
     },
 
     // Execution tier (confirm-gated; simulate/executeNow/trigger are 200-on-ok:false)

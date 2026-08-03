@@ -35,17 +35,23 @@ describe("canMutate", () => {
 });
 
 describe("deleteDisabled", () => {
-  it("blocks a system (server-resolver) cronoton for an admin with the system-lock title, since it must be paused not deleted", () => {
+  it("enables a system (server-resolver) delete for an admin, carrying the system title as an informative hover (admin gets warned before the actual delete)", () => {
     expect(deleteDisabled(ADMIN, row({ server_resolver: "stoicism-mint" }))).toEqual({
-      disabled: true,
+      disabled: false,
       title: SYSTEM_CRONOTON_DELETE_TITLE,
     });
   });
 
-  it("announces the system-lock title even to a non-admin, because the row lock takes precedence over the access tier", () => {
+  it("still blocks a system cronoton for a non-admin with the admins-only title, because the access tier gates before the system hint", () => {
     expect(
-      deleteDisabled(NON_ADMIN, row({ server_resolver: "stoicism-mint" })).title,
-    ).toBe(SYSTEM_CRONOTON_DELETE_TITLE);
+      deleteDisabled(NON_ADMIN, row({ server_resolver: "stoicism-mint" })),
+    ).toEqual({ disabled: true, title: ADMIN_ONLY_TITLE });
+  });
+
+  it("disables an in-flight admin system delete without a tooltip, so the working guard beats the system hint", () => {
+    expect(
+      deleteDisabled(ADMIN, row({ server_resolver: "stoicism-mint" }), { working: true }),
+    ).toEqual({ disabled: true, title: undefined });
   });
 
   it("blocks an ordinary cronoton for a non-admin with the admins-only title", () => {

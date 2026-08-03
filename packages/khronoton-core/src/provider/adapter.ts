@@ -50,6 +50,8 @@ export { NeedsConfirmError } from "../handlers/context.js";
  */
 export interface ConfirmOpts {
   confirmed?: boolean;
+  /** Permits deleting a server-resolver/system row (sent as ?force=1 to DELETE). Ignored by non-delete methods. */
+  force?: boolean;
 }
 
 /** Optional filters for the cronoton list (all default in the read handler). */

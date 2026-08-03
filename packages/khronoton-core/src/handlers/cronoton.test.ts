@@ -258,4 +258,71 @@ describe("deleteCodexCronoton — server-resolver delete-lock", () => {
       expect.objectContaining({ targetKind: "codex_cronoton", targetId: id }),
     );
   });
+
+  it("force-deletes a server-resolver row when ?force=1, returns 200, and the row is gone", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { serverResolver: "stoicism-mint" });
+    const res = await deleteCodexCronoton(
+      h.ctx,
+      req({ confirmed: true, params: { id }, query: { force: "1" } }),
+    );
+
+    expect(res.status).toBe(200);
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+    // The forced delete must actually remove the protected row.
+    expect(getCodexCronoton(id, { db: h.db })).toBeNull();
+  });
+
+  it("force-deletes a server-resolver row when force=true (string) as well as force=1", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { serverResolver: "stoicism-mint" });
+    const res = await deleteCodexCronoton(
+      h.ctx,
+      req({ confirmed: true, params: { id }, query: { force: "true" } }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getCodexCronoton(id, { db: h.db })).toBeNull();
+  });
+
+  it("deletes an ordinary row with force set too (force is harmless on a non-system row)", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const res = await deleteCodexCronoton(
+      h.ctx,
+      req({ confirmed: true, params: { id }, query: { force: "1" } }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getCodexCronoton(id, { db: h.db })).toBeNull();
+  });
+
+  it("records a forced:true audit detail for a forced system delete", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { serverResolver: "stoicism-mint" });
+    await deleteCodexCronoton(
+      h.ctx,
+      req({ confirmed: true, params: { id }, query: { force: "1" } }),
+    );
+    expect(h.onAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetKind: "codex_cronoton",
+        targetId: id,
+        detail: { serverResolver: "stoicism-mint", forced: true },
+      }),
+    );
+  });
+
+  it("records a forced:false audit detail for a non-system delete (force irrelevant)", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    await deleteCodexCronoton(h.ctx, req({ confirmed: true, params: { id } }));
+    expect(h.onAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetKind: "codex_cronoton",
+        targetId: id,
+        detail: { serverResolver: null, forced: false },
+      }),
+    );
+  });
 });

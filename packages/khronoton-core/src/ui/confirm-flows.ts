@@ -32,6 +32,11 @@ export function deleteConfirm(name: string): string {
   return `Delete codex cronoton "${name}"? Fire history is removed too.`;
 }
 
+/** System (server-resolver) cronoton delete warning — shown BEFORE the gated password step, in place of the ordinary deleteConfirm. Names the resolver whose capability the delete disables. */
+export function deleteSystemConfirm(name: string, serverResolver: string): string {
+  return `This is the automaton's "${serverResolver}" template. Deleting it stops that capability until it's recreated. Delete "${name}" anyway?`;
+}
+
 /** Delete's gated password-confirm message (the second, in-gate prompt). */
 export function deletePasswordConfirm(name: string): string {
   return `Confirm to delete codex cronoton "${name}".`;

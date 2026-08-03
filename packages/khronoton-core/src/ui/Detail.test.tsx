@@ -121,9 +121,9 @@ function mount(adapter: KhronotonAdapter, access: Access, props: Record<string, 
 
 describe("Detail — header + metadata", () => {
   it("renders the eyebrow, name, both pills, description, schedule summary, status, and created metadata", async () => {
-    const adapter = makeAdapter(
-      makeRow({ server_resolver: "stoicism-mint", external_fireable: 1 }),
-    );
+    // A plain scheduled row (external_fireable 0, no runtime args) is used here so
+    // the Schedule cell exercises the real summariser; pills get their own coverage below.
+    const adapter = makeAdapter(makeRow({ server_resolver: "stoicism-mint" }));
     const { container } = mount(adapter, ADMIN);
 
     // The pinned header copy frames the observe screen.
@@ -131,9 +131,8 @@ describe("Detail — header + metadata", () => {
     expect(screen.getByRole("heading", { name: "Daily treasury sweep" })).toBeTruthy();
     expect(screen.getByText("Move idle STOA hot to cold nightly")).toBeTruthy();
 
-    // Both provenance pills render off the row flags (resolver lock + external fire).
+    // The resolver provenance pill renders off the row flag.
     expect(screen.getByText("⟳ Updates server state on success")).toBeTruthy();
-    expect(screen.getByText("⚡ externally fireable")).toBeTruthy();
 
     // Schedule uses the shipped summariser (never re-implemented); status via the badge.
     expect(screen.getByText("Daily at 12:00 UTC")).toBeTruthy();
@@ -145,15 +144,35 @@ describe("Detail — header + metadata", () => {
     expect(screen.getByText("2026-01-01T00:00:00.000Z")).toBeTruthy();
   });
 
-  it("shows 'Trigger-only — no schedule' for a runtime-arg (trigger-only) cronoton", async () => {
+  it("shows 'Evented' (not a stored schedule) for an external-fireable cronoton", async () => {
+    // The bug this fixes: an external-fireable row carries a real schedule_mode/config
+    // but must NEVER auto-fire, so its Schedule cell must read "Evented" — not the
+    // stored "Daily at 12:00 UTC". The ⚡ pill confirms the row IS external-fireable.
+    const adapter = makeAdapter(
+      makeRow({
+        external_fireable: 1,
+        schedule_mode: "daily-at-utc",
+        schedule_config_json: JSON.stringify({ mode: "daily-at-utc", hours: [12], minute: 0 }),
+        next_fire_at: null,
+      }),
+    );
+    mount(adapter, ADMIN);
+
+    await screen.findByText("Codex cronoton detail");
+    expect(screen.getByText("⚡ externally fireable")).toBeTruthy();
+    expect(screen.getByText("Evented")).toBeTruthy();
+    expect(screen.queryByText("Daily at 12:00 UTC")).toBeNull();
+  });
+
+  it("shows 'Evented' for a runtime-arg (trigger-only) cronoton", async () => {
     const adapter = makeAdapter(
       makeRow({ runtime_arg_keys: JSON.stringify(["amount", "recipient"]) }),
     );
     mount(adapter, ADMIN);
 
     await screen.findByText("Codex cronoton detail");
-    // A trigger-only cronoton never auto-fires ⇒ the schedule cell says so, not a summary.
-    expect(screen.getByText("Trigger-only — no schedule")).toBeTruthy();
+    // A trigger-only cronoton never auto-fires ⇒ the schedule cell reads "Evented", not a summary.
+    expect(screen.getByText("Evented")).toBeTruthy();
     expect(screen.queryByText("Daily at 12:00 UTC")).toBeNull();
   });
 
@@ -209,15 +228,18 @@ describe("Detail — header actions per tier", () => {
     expect(screen.getByText("view only")).toBeTruthy();
   });
 
-  it("admin + server-resolver row: Delete is locked with the system-cronoton title", async () => {
+  it("admin + server-resolver row: Delete is enabled and carries the system-cronoton hover", async () => {
     const adapter = makeAdapter(makeRow({ server_resolver: "stoicism-mint" }));
     mount(adapter, ADMIN);
 
     await screen.findByText("Codex cronoton detail");
     const del = screen.getByText("Delete") as HTMLButtonElement;
-    expect(del.disabled).toBe(true);
+    // A system cronoton is no longer hard-blocked for an admin (deleteDisabled now
+    // returns enabled) — the button is clickable and carries an informative hover;
+    // the destructive confirm is shown at click time.
+    expect(del.disabled).toBe(false);
     expect(del.getAttribute("title")).toBe(
-      "System cronoton — cannot be deleted. Pause it to disable instead.",
+      "System cronoton — deleting removes the automaton's template; you'll be warned first.",
     );
   });
 });
@@ -286,6 +308,58 @@ describe("Detail — confirm → mutate → refresh/navigate", () => {
     );
     // A successful delete navigates back to the list rather than re-reading the dead row.
     await waitFor(() => expect(onNavigateToList).toHaveBeenCalledTimes(1));
+  });
+
+  it("system-resolver delete: the FIRST confirm names the resolver + warns, and the delete is forced", async () => {
+    // A server_resolver row is the automaton's template — deleting it must FIRST warn
+    // (naming the resolver whose capability it powers), not show the ordinary
+    // fire-history line, and the resulting adapter.delete must carry force:true so the
+    // handler's system-guard is bypassed. Regression: without the wiring the row would
+    // either be blocked or delete un-forced (409).
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onNavigateToList = vi.fn();
+    const adapter = makeAdapter(makeRow({ server_resolver: "dual-link-activate" }));
+    mount(adapter, ADMIN, { onNavigateToList });
+
+    await screen.findByText("Codex cronoton detail");
+    fireEvent.click(screen.getByText("Delete"));
+
+    await waitFor(() =>
+      expect(spy(adapter, "delete")).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ force: true }),
+      ),
+    );
+    // The FIRST native confirm is the system warning (names the resolver), not the
+    // fire-history line — confirm messages arrive in prompt order.
+    const firstMessage = confirmSpy.mock.calls[0][0] as string;
+    expect(firstMessage).toMatch(/dual-link-activate/);
+    expect(firstMessage).toMatch(/anyway\?/);
+    // The in-gate password confirm STILL fires as the second, ordered prompt — the
+    // system path must not collapse to a single warning (design: "keep the in-gate
+    // deletePasswordConfirm"). Without this, dropping the nested confirm would slip by.
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(confirmSpy.mock.calls[1][0]).toBe('Confirm to delete codex cronoton "Daily treasury sweep".');
+    await waitFor(() => expect(onNavigateToList).toHaveBeenCalledTimes(1));
+  });
+
+  it("non-system delete: the FIRST confirm is the fire-history line and the delete is NOT forced", async () => {
+    // The ordinary (non-resolver) delete flow must be byte-identical to before: the
+    // first prompt is the fire-history warning and force is never set (undefined) so a
+    // plain delete cannot silently gain the system-bypass.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const adapter = makeAdapter(makeRow({ server_resolver: null }));
+    mount(adapter, ADMIN, { onNavigateToList: vi.fn() });
+
+    await screen.findByText("Codex cronoton detail");
+    fireEvent.click(screen.getByText("Delete"));
+
+    await waitFor(() => expect(spy(adapter, "delete")).toHaveBeenCalled());
+    expect(confirmSpy.mock.calls[0][0]).toBe(
+      'Delete codex cronoton "Daily treasury sweep"? Fire history is removed too.',
+    );
+    const opts = spy(adapter, "delete").mock.calls[0][1] as { force?: boolean };
+    expect(opts.force).not.toBe(true);
   });
 
   it("execute now: confirms with the detail-execute wording, then fires the gated executeNow", async () => {
