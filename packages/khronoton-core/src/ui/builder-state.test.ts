@@ -307,6 +307,24 @@ describe("validateConfig", () => {
     );
   });
 
+  it("rejects a gas price below an injected LIVE floor, naming that floor", () => {
+    // The 10000 default is the GENESIS floor and the chain's minimum rises from
+    // it over time, so a form validated only against the static constant happily
+    // accepts an already-underpriced price. A caller that knows the live floor
+    // passes it in.
+    const s = makeEmptyBuilderState();
+    s.config.gasPriceAnu = 10000;
+    expect(validateConfig(s, { minGasPriceAnu: 10500 })).toContain(
+      "Gas price must be at least 10500 ANU (the protocol floor).",
+    );
+  });
+
+  it("accepts a gas price at or above the injected live floor", () => {
+    const s = makeEmptyBuilderState();
+    s.config.gasPriceAnu = 10500;
+    expect(validateConfig(s, { minGasPriceAnu: 10500 })).toEqual([]);
+  });
+
   it("rejects a non-positive gas limit", () => {
     const s = makeEmptyBuilderState();
     s.config.gasLimit = 0;

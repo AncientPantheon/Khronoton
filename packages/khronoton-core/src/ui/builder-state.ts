@@ -114,7 +114,8 @@ export interface BuilderState {
 const MSG = {
   name: "Name is required.",
   ttl: "TTL must be between 60 and 86400 seconds.",
-  gasPrice: "Gas price must be at least 10000 ANU (the protocol floor).",
+  gasPrice: (floorAnu: number) =>
+    `Gas price must be at least ${floorAnu} ANU (the protocol floor).`,
   gasLimit: "Gas limit must be greater than zero.",
   autoGas: "AUTO gas requires a successful Simulate to calibrate, or switch to manual.",
   signers: "At least one signer is required.",
@@ -133,7 +134,10 @@ export function makeEmptyBuilderState(): BuilderState {
     pactCode: "",
     config: {
       chainId: "0",
-      gasPriceAnu: 10000,
+      // The GENESIS floor, and deliberately a FLOOR rather than a final price:
+      // the executor raises it to the chain's live minimum at fire time, so a
+      // cronoton created at this default does not underprice as it ages.
+      gasPriceAnu: GENESIS_MIN_GAS_ANU,
       gasLimit: 1500,
       autoGasLimit: false,
       ttl: 600,
@@ -300,10 +304,30 @@ export function builderToCommit(
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
+/**
+ * The Yin Engine floor at genesis. Used only as the fallback when a caller does
+ * not supply the live floor — the chain's real minimum rises above this over
+ * time, so it is a lower bound on the truth, never the truth itself.
+ */
+const GENESIS_MIN_GAS_ANU = 10000;
+
 /** Options threaded into the config + commit gate. */
 export interface CommitGateOptions {
   /** True once a successful Simulate has calibrated the AUTO gas limit. */
   simulateCalibrated?: boolean;
+  /**
+   * The chain's LIVE minimum gas price in ANU. Optional so this module stays
+   * synchronous and free of any `@stoachain/*` import (which is an optional peer
+   * dependency); a caller that can resolve the live floor — e.g. via
+   * `minGasPriceAnu` from `@stoachain/stoa-core/gas` — passes it here.
+   *
+   * Omitting it validates against the GENESIS floor, which under-rejects rather
+   * than over-rejects: a price this gate lets through but the chain would refuse
+   * is still raised to the live floor by the executor at fire time
+   * (`ChainRuntime.gasMeta`), so the consequence is a stale form hint, not a
+   * rejected transaction.
+   */
+  minGasPriceAnu?: number;
 }
 
 export function validateName(state: BuilderState): string[] {
@@ -314,7 +338,8 @@ export function validateConfig(state: BuilderState, opts: CommitGateOptions = {}
   const errors: string[] = [];
   const c = state.config;
   if (c.ttl < 60 || c.ttl > 86400) errors.push(MSG.ttl);
-  if (c.gasPriceAnu < 10000) errors.push(MSG.gasPrice);
+  const minGasAnu = opts.minGasPriceAnu ?? GENESIS_MIN_GAS_ANU;
+  if (c.gasPriceAnu < minGasAnu) errors.push(MSG.gasPrice(minGasAnu));
   if (c.gasLimit <= 0) errors.push(MSG.gasLimit);
   // A server-resolver or trigger-only cronoton postpones/bypasses the Simulate
   // that would calibrate AUTO gas, so the calibration requirement is waived.

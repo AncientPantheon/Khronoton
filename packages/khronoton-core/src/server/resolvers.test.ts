@@ -70,6 +70,13 @@ function makeChainMocks() {
       .mockResolvedValue({ cmd: '{"networkId":"stoa"}', hash: "RK-DERIVED", sigs: [{ sig: "x" }] }),
     calculateAutoGasLimit: (g: number) => g * 2,
     anuToStoa: (a: number) => a / 1e12,
+    // The live-gas-floor seam. Deterministic here: the stored ANU is treated as
+    // a raisable floor exactly as the real adapter does, with a fixed clock so
+    // the built tx is byte-stable across runs.
+    gasMeta: (floorAnu: number) => ({
+      creationTime: 1_800_000_000,
+      gasPrice: Number("0." + String(Math.max(floorAnu, 10500)).padStart(12, "0")),
+    }),
     getPactUrl: (c: string) => `https://node/${c}`,
     networkId: "stoa",
     namespace: "ouronet-ns",

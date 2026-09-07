@@ -76,7 +76,7 @@ export async function estimateTxSize(state: BuilderState): Promise<TxSizeEstimat
     // caught and reverted — don't re-parallelize these without re-reading
     // that comment first.
     const { Pact } = await import("@stoachain/kadena-stoic-legacy/client");
-    const { anuToStoa } = await import("@stoachain/stoa-core/gas");
+    const { anuToStoaNumber } = await import("@stoachain/stoa-core/gas");
     const { KADENA_NETWORK } = await import("@stoachain/stoa-core/constants");
 
     const builder = (Pact.builder.execution(pactCode || "") as any)
@@ -85,7 +85,11 @@ export async function estimateTxSize(state: BuilderState): Promise<TxSizeEstimat
           state.gasPayer.type === "codex" ? (state.gasPayer.address ?? "") : "c:gas-station",
         chainId: config.chainId,
         gasLimit: config.gasLimit,
-        gasPrice: anuToStoa(config.gasPrice),
+        // `anuToStoaNumber`, not `anuToStoa`: this meter exists to predict the
+        // SIZE of the real signed transaction, so it must serialize gasPrice
+        // exactly the way the executor does. Plain float division can render a
+        // different number of characters than the value that actually ships.
+        gasPrice: anuToStoaNumber(config.gasPrice),
         ttl: config.ttl,
       })
       .setNetworkId(KADENA_NETWORK);

@@ -71,7 +71,13 @@ interface PactBuilder {
 /**
  * Build a Pact transaction from the definition:
  * `Pact.builder.execution().setMeta().setNetworkId()` + an `addData` loop over
- * the payload + pure-vs-scoped `addSigner`. Throws if no signers.
+ * the payload + pure-vs-scoped `addSigner`. Throws if no signers, and throws if
+ * the injected runtime cannot supply gas meta (see {@link ChainRuntime.gasMeta}).
+ *
+ * The per-cronoton `config.gasPrice` is a FLOOR, not a final price: it is passed
+ * to the runtime's `gasMeta`, which raises it to the chain's live minimum when
+ * the stored value has gone stale. This is what lets a cronoton stored years ago
+ * at the genesis default still fire today with no database migration.
  */
 function buildTransaction(
   runtime: ChainRuntime,
@@ -94,12 +100,33 @@ function buildTransaction(
     definition.pactCode,
   ) as PactBuilder;
 
+  // Gas meta is derived HERE, once per build, and never hoisted out or cached
+  // by a caller: the AUTO-gas path calls this function a SECOND time to rebuild
+  // and re-sign at the calibrated limit, and that rebuild must re-derive both
+  // fields fresh. Reusing the pre-flight build's values would let creationTime
+  // and gasPrice drift apart across a tick boundary — underpricing the very
+  // transaction that gets submitted.
+  if (!runtime.gasMeta) {
+    throw new Error(
+      "ChainRuntime.gasMeta is required to price a transaction: without it the " +
+        "per-cronoton stored gasPrice would be used verbatim, which drifts below " +
+        "the chain's rising minimum as a cronoton ages and gets the fire rejected. " +
+        "Upgrade the injected runtime adapter (see blockchain/stoachain.ts).",
+    );
+  }
+  const { creationTime, gasPrice } = runtime.gasMeta(definition.config.gasPrice);
+
   builder
     .setMeta({
       senderAccount,
       chainId: definition.config.chainId,
       gasLimit: gasLimitOverride ?? definition.config.gasLimit,
-      gasPrice: runtime.anuToStoa(definition.config.gasPrice),
+      gasPrice,
+      // Stamped EXPLICITLY, from the same call that produced gasPrice. Left
+      // unset, the Pact builder auto-stamps its own creationTime at
+      // createTransaction() — a second, independent clock read that the price
+      // above would then no longer correspond to.
+      creationTime,
       ttl: definition.config.ttl,
     })
     .setNetworkId(runtime.networkId);

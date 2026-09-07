@@ -144,6 +144,7 @@ function throwingRuntime(): ChainRuntime {
     universalSignTransaction: notWired,
     calculateAutoGasLimit: notWired,
     anuToStoa: notWired,
+    gasMeta: notWired,
     getPactUrl: notWired,
     networkId: "memory",
     namespace: "memory-ns",

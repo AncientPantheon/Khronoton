@@ -1,6 +1,6 @@
 /**
  * Real-runtime integration test — NO @stoachain mocks. This calls the actual
- * factory against the installed `@stoachain/*@4.3.6` packages, which is the ONLY
+ * factory against the installed `@stoachain/*@4.4.0` packages, which is the ONLY
  * path that catches a module-loading regression (the mocked unit tests in
  * `stoachain.test.ts` never load the real ESM/CJS-interop modules).
  *
@@ -36,6 +36,7 @@ const CHAIN_RUNTIME_MEMBERS = [
   "universalSignTransaction",
   "calculateAutoGasLimit",
   "anuToStoa",
+  "gasMeta",
   "getPactUrl",
   "networkId",
   "namespace",
@@ -54,6 +55,41 @@ describe.skipIf(!stoachainInstalled)("createStoachainRuntime — real @stoachain
     expect(typeof rt.networkId).toBe("string");
     expect(typeof rt.namespace).toBe("string");
     expect(typeof rt.gasStationAccount).toBe("string");
+  });
+
+  it("gasMeta floors a STALE stored price against the REAL Yin Engine", async () => {
+    // The end-to-end check for the actual bug: a cronoton stored at the genesis
+    // default 10000 ANU must not fire at 10000 once the live floor has risen
+    // past it. Asserted against the real formula, not a mock of it.
+    const { minGasPriceAnu, anuToStoaNumber } = await import("@stoachain/stoa-core/gas");
+    const rt = await createStoachainRuntime();
+
+    const out = rt.gasMeta!(10000);
+    const liveFloor = minGasPriceAnu(out.creationTime);
+
+    expect(out.creationTime).toBeGreaterThan(0);
+    expect(out.gasPrice).toBe(anuToStoaNumber(Math.max(10000, liveFloor)));
+    // Post-genesis the floor has risen, so the stale stored value is raised.
+    expect(liveFloor).toBeGreaterThanOrEqual(10000);
+    expect(out.gasPrice).toBeGreaterThanOrEqual(anuToStoaNumber(10000));
+  });
+
+  it("gasMeta treats the stored price as a floor an operator can raise, never a cap", async () => {
+    const { minGasPriceAnu, anuToStoaNumber } = await import("@stoachain/stoa-core/gas");
+    const rt = await createStoachainRuntime();
+
+    const out = rt.gasMeta!(400000); // MAX_GAS_ANU — comfortably above any live floor
+    expect(out.gasPrice).toBe(anuToStoaNumber(400000));
+    expect(minGasPriceAnu(out.creationTime)).toBeLessThanOrEqual(400000);
+  });
+
+  it("gasMeta's creationTime is a live clock read, and its price matches THAT read", async () => {
+    const rt = await createStoachainRuntime();
+    const nowS = Math.floor(Date.now() / 1000);
+    const out = rt.gasMeta!(10000);
+    // Within a couple of seconds of now — i.e. genuinely re-derived per call,
+    // not a value captured once at factory-construction time.
+    expect(Math.abs(out.creationTime - nowS)).toBeLessThanOrEqual(5);
   });
 
   it("default getPactUrl uses the @stoachain resolver; nodeBaseUrl overrides it", async () => {

@@ -100,6 +100,25 @@ export interface ChainClient {
 }
 
 /**
+ * The transaction gas meta produced by {@link ChainRuntime.gasMeta} — a
+ * `creationTime` (unix seconds) and the `gasPrice` (in the chain's own
+ * transaction units, NOT ANU) derived from that exact `creationTime`.
+ *
+ * Both fields come from ONE call, and both must be spread into the same
+ * `setMeta`. They are a matched pair: a chain whose minimum gas price rises
+ * over time validates a signed transaction's price against the transaction's
+ * OWN `creationTime`, so a price derived from a different clock read than the
+ * `creationTime` that ships with it can silently fall under the floor when the
+ * two reads straddle a tick boundary.
+ */
+export interface StoaGasMeta {
+  /** Unix seconds stamped into the transaction. */
+  creationTime: number;
+  /** Price for that creationTime, in chain transaction units (e.g. STOA). */
+  gasPrice: number;
+}
+
+/**
  * The chain runtime seam — every `@stoachain/*` runtime value the executor
  * reaches for, inverted into one injectable object. Ported from the Hub's
  * private `StoachainRuntime` interface, with the ambient constants renamed to
@@ -107,6 +126,22 @@ export interface ChainClient {
  * `STOA_AUTONOMIC_OURONETGASSTATION -> gasStationAccount`,
  * `KADENA_NAMESPACE -> namespace`. Deliberately excludes `pollRequestKeys`
  * (the executor confirms via `listen`, never polls).
+ *
+ * `gasMeta` is OPTIONAL so this package stays chain-POLYGLOT and
+ * `@stoachain/*` stays an optional peer dependency — a runtime for a chain with
+ * no rising gas floor simply omits it. It is NOT optional in effect for a
+ * StoaChain fire: the executor HARD THROWS when it is absent rather than
+ * falling back to the per-cronoton stored price. That fallback is precisely the
+ * bug this capability exists to kill — a stored price is captured once at
+ * cronoton-creation time and never re-derived, so it drifts below the live
+ * floor as the cronoton ages, and nobody is watching a 3am tick fire to notice
+ * the rejection. Failing loudly on an un-upgraded runtime adapter is the point.
+ *
+ * `floorAnu` is the caller's stored price in ANU, treated as a floor an
+ * operator may raise ABOVE the live minimum, never a cap that can hold a
+ * transaction below it. Implementations return
+ * `max(floorAnu, liveFloor(creationTime))`, converted to chain units.
+ * See `blockchain/stoachain.ts` for the StoaChain implementation.
  */
 export interface ChainRuntime {
   Pact: { builder: { execution(code: string): unknown } };
@@ -118,6 +153,7 @@ export interface ChainRuntime {
   ): Promise<unknown>;
   calculateAutoGasLimit(gas: number): number;
   anuToStoa(anu: number): number;
+  gasMeta?(floorAnu: number): StoaGasMeta;
   getPactUrl(chainId: string): string;
   networkId: string;
   namespace: string;

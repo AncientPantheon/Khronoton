@@ -13,6 +13,13 @@ import type { ChainRuntime } from "../server/index.js";
  * subpath costs nothing (the SDK imports are lazy, inside the factory), so a
  * consumer who never talks StoaChain never installs them. Only calling
  * `createStoachainRuntime()` pulls the SDK — and a StoaChain automaton has it.
+ *
+ * This adapter is also the ONLY place khronoton knows StoaChain's rising gas
+ * floor (the Yin Engine) exists. The `/server` executor asks for gas meta
+ * through the {@link ChainRuntime.gasMeta} seam and never imports the formula;
+ * `@stoachain/stoa-core/gas` owns the single canonical implementation, which is
+ * why this wraps it rather than reimplementing the arithmetic locally — that
+ * reimplementation has already happened four times across the ecosystem.
  */
 
 /**
@@ -81,6 +88,20 @@ export async function createStoachainRuntime(
       signing.universalSignTransaction as ChainRuntime["universalSignTransaction"],
     calculateAutoGasLimit: gas.calculateAutoGasLimit,
     anuToStoa: gas.anuToStoa,
+    gasMeta: (floorAnu: number) => {
+      // ONE clock read, via the canonical anti-race primitive: `stoaGasMeta`
+      // returns a creationTime and the floor price for that exact instant. Only
+      // its creationTime is taken here, because the floor must be compared to
+      // the caller's stored value in ANU before conversion — but it is the SAME
+      // read, so the pair can never straddle a tick boundary.
+      const { creationTime } = gas.stoaGasMeta();
+      const anu = Math.max(floorAnu, gas.minGasPriceAnu(creationTime));
+      // `anuToStoaNumber`, NOT `anuToStoa`: this value goes into meta that
+      // chainweb hashes and validates exactly, and plain float division is
+      // documented upstream as unsafe for precisely that. `anuToStoa` above
+      // stays as-is — it is the display-oriented converter.
+      return { creationTime, gasPrice: gas.anuToStoaNumber(anu) };
+    },
     getPactUrl,
     networkId,
     namespace,

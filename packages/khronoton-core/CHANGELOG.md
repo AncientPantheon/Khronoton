@@ -4,6 +4,28 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.9.0 — 2026-09-07
+
+**MINOR — scheduled transactions are priced against the chain's LIVE gas floor at fire time, not a static value stored at creation time.**
+
+A cronoton's `gasPrice` was a plain ANU number persisted once at creation time and read back verbatim on every tick — never re-derived. Post-fork, chainweb validates a signed transaction's price against the **rising** Yin Engine floor as of that transaction's own `creationTime`, so a long-lived cronoton silently drifts below the floor and its fire is rejected. This is unattended automation: nobody is watching a 3am tick.
+
+This was **live, not theoretical** — at the time of this release the floor stood at **11,569 ANU** while the builder's stored default was **10,000**, leaving every default-priced cronoton ~15.7% underpriced.
+
+- **New OPTIONAL `ChainRuntime.gasMeta(floorAnu)` seam.** Returns `{ creationTime, gasPrice }` from **one** clock read. Optional so the package stays chain-POLYGLOT and `@stoachain/*` stays an optional peer dependency — a chain with no rising floor omits it. It is *not* optional in effect for a StoaChain fire: the executor **hard throws** when it is absent rather than falling back to the stored price, because a silent fallback ships the original bug to anyone who does not notice they must upgrade their runtime adapter.
+- **The stored price is now a FLOOR, not a final price.** `max(stored, liveFloor(creationTime))` — an operator can still raise it above the minimum, and it can never hold a transaction below one. **Existing rows self-heal with no database migration.**
+- **`creationTime` is now stamped explicitly.** `setMeta` previously omitted it, letting the Pact builder auto-stamp its own at `createTransaction()` — a second, independent clock read the price no longer corresponded to. Both fields now come from the same call, closing a tick-boundary race.
+- **The AUTO-gas rebuild re-derives gas meta fresh.** The calibrated rebuild+re-sign calls the seam again rather than reusing the pre-flight build's values, so the two builds cannot straddle a tick boundary and underprice the transaction that actually gets submitted. Pinned by a regression spec that fails if the call is hoisted out of `buildTransaction`.
+- **Precision.** Transaction meta now uses `anuToStoaNumber` (exact padded-decimal conversion) instead of `anuToStoa` (float division), which upstream documents as unsafe for a value chainweb hashes and validates exactly. Fixed at the meta site and at `ui/tx-size.ts`'s fee meter, whose whole job is predicting the real signed transaction's size.
+- **`validateConfig` accepts an optional live floor.** `CommitGateOptions.minGasPriceAnu` replaces a hardcoded `>= 10000` gate that happily accepted an already-underpriced price; the message names the floor actually applied. Omitting it validates against the genesis floor as before — it under-rejects rather than over-rejects, and the executor raises the price at fire time regardless.
+- **`blockchain/stoachain.ts` is the only place that knows the Yin Engine exists**, wrapping `@stoachain/stoa-core/gas` rather than reimplementing the arithmetic — a formula already independently reimplemented four times across the ecosystem.
+
+**Dependencies — a coordinated family bump, not a standalone repin.** `@stoachain/stoa-core@4.4.0` peer-pins `@stoachain/kadena-stoic-legacy@4.4.0` exactly, and only `@ouronet/ouronet-core@4.6.0` accepts stoa-core 4.4.0; the three must move together or `npm install` fails to resolve. Peer + dev ranges: stoa-core `^4.3.6 → ^4.4.0`, kadena-stoic-legacy `^4.3.6 → ^4.4.0`, ouronet-core `^4.3.6 → ^4.6.0`.
+
+New public surface — `StoaGasMeta`, the optional `ChainRuntime.gasMeta`, and `CommitGateOptions.minGasPriceAnu` — is entirely additive. A consumer injecting its own `ChainRuntime` for a StoaChain fire must add `gasMeta` (the bundled `createStoachainRuntime` supplies it); a consumer wrapping the adapter by spread picks it up with no change.
+
+**907 specs pass, plus 5 real-runtime integration specs against the installed `@stoachain/*@4.4.0`.**
+
 ## 0.8.0 — 2026-08-03
 
 **MINOR — the last two evented-server-resolver UI fixes: DETAIL "Schedule" reads "Evented", and a system cronoton is deletable behind a confirm-gated warning.**

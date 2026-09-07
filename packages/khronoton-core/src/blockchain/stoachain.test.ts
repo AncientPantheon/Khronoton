@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // The five `@stoachain/*` modules the factory dynamic-imports are mocked so the
 // test exercises the adapter's own wiring (defaults, getPactUrl branch,
@@ -33,9 +33,28 @@ vi.mock("@stoachain/kadena-stoic-legacy/client", () => ({
 vi.mock("@stoachain/stoa-core/signing", () => ({
   universalSignTransaction: mockUniversalSign,
 }));
+// The Yin Engine floor, mocked with the real formula's shape so the adapter's
+// max()/convert wiring is exercised without pinning the live constants.
+const GENESIS_S = 1771869600;
+const TICK_S = 10800;
+let mockNowS = GENESIS_S + TICK_S * 500; // -> floor 10500 ANU
+const mockMinGasPriceAnu = vi.fn((t: number) =>
+  Math.min(10000 + Math.max(0, Math.floor((t - GENESIS_S) / TICK_S)), 400000),
+);
+const mockAnuToStoaNumber = vi.fn((anu: number) =>
+  Number("0." + String(anu).padStart(12, "0")),
+);
+const mockStoaGasMeta = vi.fn(() => ({
+  creationTime: mockNowS,
+  gasPrice: mockAnuToStoaNumber(mockMinGasPriceAnu(mockNowS)),
+}));
+
 vi.mock("@stoachain/stoa-core/gas", () => ({
   calculateAutoGasLimit: mockCalcGas,
   anuToStoa: mockAnuToStoa,
+  minGasPriceAnu: mockMinGasPriceAnu,
+  anuToStoaNumber: mockAnuToStoaNumber,
+  stoaGasMeta: mockStoaGasMeta,
 }));
 vi.mock("@stoachain/stoa-core/constants", () => ({
   KADENA_NETWORK: mockNetwork,
@@ -65,6 +84,7 @@ describe("createStoachainRuntime", () => {
     expect(typeof rt.universalSignTransaction).toBe("function");
     expect(typeof rt.calculateAutoGasLimit).toBe("function");
     expect(typeof rt.anuToStoa).toBe("function");
+    expect(typeof rt.gasMeta).toBe("function");
     expect(typeof rt.getPactUrl).toBe("function");
     expect(typeof rt.networkId).toBe("string");
     expect(typeof rt.namespace).toBe("string");
@@ -125,5 +145,59 @@ describe("createStoachainRuntime", () => {
     expect(rt.getPactUrl("1")).toBe(
       "http://127.0.0.1:1848/chainweb/0.0/testnet04/chain/1/pact",
     );
+  });
+});
+
+describe("createStoachainRuntime — gasMeta (the live gas floor seam)", () => {
+  beforeEach(() => {
+    mockNowS = GENESIS_S + TICK_S * 500;
+    // Scoped reset so a call-count assertion below is meaningful test-to-test —
+    // this file has no global clearMocks, so an uncleared spy would accumulate
+    // calls from earlier tests in this describe block.
+    mockStoaGasMeta.mockClear();
+  });
+
+  it("raises a STALE stored price up to the live floor", async () => {
+    const rt = await createStoachainRuntime();
+    // Stored at the genesis default; the floor has since risen to 10500.
+    expect(rt.gasMeta!(10000)).toEqual({
+      creationTime: mockNowS,
+      gasPrice: Number("0.000000010500"),
+    });
+  });
+
+  it("leaves an operator-raised price above the floor alone (floor, not cap)", async () => {
+    const rt = await createStoachainRuntime();
+    expect(rt.gasMeta!(25000).gasPrice).toBe(Number("0.000000025000"));
+  });
+
+  it("derives the floor from stoaGasMeta's creationTime — ONE clock read, not two", async () => {
+    const rt = await createStoachainRuntime();
+    const out = rt.gasMeta!(10000);
+    // The floor must be computed against the very creationTime that ships with
+    // the price, so a tick boundary can never fall between the two reads. A
+    // regression to a second `stoaGasMeta()` call — even one whose result is
+    // discarded — would reintroduce exactly that race, so the count itself
+    // (not just presence) is the invariant under test.
+    expect(mockStoaGasMeta).toHaveBeenCalledTimes(1);
+    expect(mockMinGasPriceAnu).toHaveBeenCalledWith(out.creationTime);
+  });
+
+  it("tracks the rising floor as the clock advances", async () => {
+    const rt = await createStoachainRuntime();
+    const before = rt.gasMeta!(10000).gasPrice;
+    mockNowS += TICK_S * 10;
+    const after = rt.gasMeta!(10000);
+    expect(after.gasPrice).toBeGreaterThan(before);
+    expect(after.gasPrice).toBe(Number("0.000000010510"));
+    expect(after.creationTime).toBe(mockNowS);
+  });
+
+  it("converts with anuToStoaNumber, NOT the float-division anuToStoa", async () => {
+    const rt = await createStoachainRuntime();
+    rt.gasMeta!(10000);
+    // `anuToStoa` stays exposed for display, but must never price a signed tx.
+    expect(mockAnuToStoaNumber).toHaveBeenCalledWith(10500);
+    expect(mockAnuToStoa).not.toHaveBeenCalled();
   });
 });

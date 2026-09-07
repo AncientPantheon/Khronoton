@@ -81,6 +81,25 @@ const createClient = vi.fn((..._a: unknown[]) => ({ dirtyRead, submit, listen })
 // ── gas + sign + verify stubs ───────────────────────────────────────────────
 const calculateAutoGasLimit = vi.fn((g: number) => g * 2);
 const anuToStoa = vi.fn((a: number) => a / 1e12);
+
+// ── live gas floor (Yin Engine) stub ────────────────────────────────────────
+// Mirrors the real `blockchain/stoachain.ts` adapter: ONE clock read produces
+// BOTH fields, and the caller's stored ANU is treated as a raisable FLOOR via
+// Math.max against the live floor. `nowS` is mutable so a test can advance the
+// clock across a tick boundary between two builds.
+const GENESIS_S = 1771869600;
+const TICK_S = 10800;
+let nowS = GENESIS_S + TICK_S * 500; // 500 ticks past genesis -> floor 10500 ANU
+const liveFloorAnu = (t: number) =>
+  Math.min(10000 + Math.max(0, Math.floor((t - GENESIS_S) / TICK_S)), 400000);
+const anuToStoaNumber = (anu: number) => Number("0." + String(anu).padStart(12, "0"));
+const gasMeta = vi.fn((floorAnu: number) => {
+  const creationTime = nowS;
+  return {
+    creationTime,
+    gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+  };
+});
 const universalSignTransaction = vi.fn();
 const isSignedTransaction = vi.fn((..._a: unknown[]) => true);
 const getPactUrl = vi.fn((c: string) => `https://node/${c}`);
@@ -92,6 +111,7 @@ const mockRuntime: ChainRuntime = {
   universalSignTransaction,
   calculateAutoGasLimit,
   anuToStoa,
+  gasMeta,
   getPactUrl,
   networkId: "stoa",
   namespace: "ouronet-ns",
@@ -139,6 +159,14 @@ beforeEach(() => {
   lastSignerCaps = [];
   calculateAutoGasLimit.mockImplementation((g: number) => g * 2);
   anuToStoa.mockImplementation((a: number) => a / 1e12);
+  nowS = GENESIS_S + TICK_S * 500;
+  gasMeta.mockImplementation((floorAnu: number) => {
+    const creationTime = nowS;
+    return {
+      creationTime,
+      gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+    };
+  });
   isSignedTransaction.mockReturnValue(true);
   getPactUrl.mockImplementation((c: string) => `https://node/${c}`);
   createClient.mockReturnValue({ dirtyRead, submit, listen });
@@ -185,10 +213,13 @@ describe("executeCodexTransaction — build shape", () => {
     expect(meta.senderAccount).toBe(`k:${PUB_GAS}`);
   });
 
-  it("setMeta uses anuToStoa for gasPrice and carries chain/networkId/ttl", async () => {
+  it("setMeta prices via the gasMeta seam (NOT anuToStoa) and carries chain/networkId/ttl", async () => {
     await executeCodexTransaction(baseDef(), "simulate", ctx);
     const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
-    expect(anuToStoa).toHaveBeenCalledWith(10000);
+    // The stored ANU is handed to the seam as a FLOOR, and `anuToStoa` — plain
+    // float division — is no longer used to price a signed tx at all.
+    expect(gasMeta).toHaveBeenCalledWith(10000);
+    expect(anuToStoa).not.toHaveBeenCalled();
     expect(meta.chainId).toBe("0");
     expect(meta.ttl).toBe(28800);
     const net = findCall("setNetworkId")!.args[0];
@@ -593,5 +624,99 @@ describe("executeCodexTransaction — gas-station GAS_PAYER signer synthesis wir
         ctx,
       ),
     ).rejects.toThrow(/gas[_\s-]?station|key|GAS_PAYER/i);
+  });
+});
+
+// ── live gas floor (Yin Engine) ────────────────────────────────────────────
+// The bug these pin: `definition.config.gasPrice` is a STATIC ANU number stored
+// once at cronoton-creation time and read back verbatim on every tick, so a
+// long-lived cronoton drifts below chainweb's rising floor and its 3am fire is
+// rejected with nobody watching.
+describe("executeCodexTransaction — live gas floor at fire time", () => {
+  it("floors a STALE stored gasPrice up to the live floor (self-heal, no DB migration)", async () => {
+    // Stored at the genesis default 10000; the live floor is now 10500.
+    await executeCodexTransaction(baseDef(), "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    expect(gasMeta).toHaveBeenCalledWith(10000);
+    expect(meta.gasPrice).toBe(anuToStoaNumber(10500));
+  });
+
+  it("keeps an operator-raised gasPrice ABOVE the floor (the stored value is a floor, never a cap)", async () => {
+    const def = baseDef({
+      config: { chainId: "0", gasPrice: 25000, gasLimit: 1500, autoGasLimit: false, ttl: 28800 },
+    });
+    await executeCodexTransaction(def, "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    expect(meta.gasPrice).toBe(anuToStoaNumber(25000));
+  });
+
+  it("stamps creationTime from the SAME seam call that produced gasPrice (no two-clock race)", async () => {
+    await executeCodexTransaction(baseDef(), "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    // Left unset, the Kadena builder would auto-stamp its own creationTime,
+    // which could land on the far side of a tick boundary from the price.
+    expect(meta.creationTime).toBe(nowS);
+    expect(meta.gasPrice).toBe(anuToStoaNumber(liveFloorAnu(meta.creationTime as number)));
+  });
+
+  it("uses precision-safe ANU->STOA, not float division", async () => {
+    // 0.0000000105 via padded-string conversion. Plain `10500 / 1e12` float
+    // division is what upstream explicitly forbids for a value chainweb hashes.
+    await executeCodexTransaction(baseDef(), "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    expect(meta.gasPrice).toBe(Number("0.000000010500"));
+  });
+
+  it("AUTO-gas rebuild re-derives gas meta FRESH for the second build", async () => {
+    // REGRESSION: the calibrated rebuild+re-sign must not reuse the pre-flight
+    // build's creationTime/gasPrice. If the two builds straddle a tick
+    // boundary, reused values underprice the tx that actually gets submitted.
+    // This fails if anyone hoists the seam call out of buildTransaction.
+    const def = baseDef({
+      config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+    });
+    gasMeta.mockImplementation((floorAnu: number) => {
+      const creationTime = nowS;
+      nowS += TICK_S; // clock crosses a tick boundary between the two builds
+      return {
+        creationTime,
+        gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+      };
+    });
+
+    await executeCodexTransaction(def, "fire", ctx);
+
+    expect(gasMeta).toHaveBeenCalledTimes(2);
+    const metas = builderCalls
+      .filter((c) => c.method === "setMeta")
+      .map((c) => c.args[0] as Record<string, unknown>);
+    expect(metas).toHaveLength(2);
+    expect(metas[1].creationTime).toBe((metas[0].creationTime as number) + TICK_S);
+    expect(metas[0].gasPrice).toBe(anuToStoaNumber(10500));
+    expect(metas[1].gasPrice).toBe(anuToStoaNumber(10501));
+  });
+});
+
+describe("executeCodexTransaction — runtime WITHOUT the gasMeta capability", () => {
+  function legacyCtx(): ExecutorCtx {
+    const legacyRuntime = { ...mockRuntime } as ChainRuntime;
+    delete (legacyRuntime as { gasMeta?: unknown }).gasMeta;
+    return { runtime: legacyRuntime, resolver: mockResolver };
+  }
+
+  it("fire returns a CLEAR structured failure and never submits (F-002, no silent static price)", async () => {
+    const res = await executeCodexTransaction(baseDef(), "fire", legacyCtx());
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/gasMeta/);
+    // Never silently falls back to the stale stored price.
+    expect(submit).not.toHaveBeenCalled();
+    // F-002: a one-time entry still records its spent attempt.
+    expect(res.terminalIntent).not.toBeUndefined();
+  });
+
+  it("simulate surfaces the missing capability as a throw", async () => {
+    await expect(
+      executeCodexTransaction(baseDef(), "simulate", legacyCtx()),
+    ).rejects.toThrow(/gasMeta/);
   });
 });
