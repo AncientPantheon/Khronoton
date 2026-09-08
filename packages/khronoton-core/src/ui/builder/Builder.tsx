@@ -42,6 +42,7 @@ import { GasPayerTab } from "./GasPayerTab.js";
 import { SignaturesTab } from "./SignaturesTab.js";
 import { ExecuteTab } from "./ExecuteTab.js";
 import { TxMeters } from "./TxMeters.js";
+import { useLiveGasFloor } from "./live-gas-floor.js";
 
 /** Default `<meta name="robots">` for the builder route (host-overridable). */
 export const DEFAULT_BUILDER_ROBOTS = "noindex,nofollow";
@@ -234,6 +235,11 @@ export function Builder({
   // into `config.gasLimit` + `autoGasLimit` after a successful Simulate).
   const calibratedGasLimit = state.config.autoGasLimit ? state.config.gasLimit : null;
 
+  // The live network gas floor — polled once here and threaded to both Config
+  // (display) and Execute (gas summary line) so they never drift against each
+  // other (see `live-gas-floor.ts`).
+  const liveFloorAnu = useLiveGasFloor();
+
   // Stable identity (the functional `setState` form needs no dep beyond the
   // setter, which React guarantees is stable) — `@uiw/react-codemirror`'s
   // reconfigure effect watches `onChange` by reference, so a fresh closure
@@ -292,7 +298,12 @@ export function Builder({
             </div>
 
             {activeTab === "config" && (
-              <ConfigTab state={state} onChange={setState} calibratedGasLimit={calibratedGasLimit} />
+              <ConfigTab
+                state={state}
+                onChange={setState}
+                calibratedGasLimit={calibratedGasLimit}
+                liveFloorAnu={liveFloorAnu}
+              />
             )}
             {activeTab === "payload" && (
               <PayloadTab state={state} onChange={(payload) => setState((s) => ({ ...s, payload }))} />
@@ -311,6 +322,7 @@ export function Builder({
                 committing={committing}
                 eventDrivenResolver={eventDrivenResolver}
                 sim={sim}
+                liveFloorAnu={liveFloorAnu}
               />
             )}
           </div>

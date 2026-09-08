@@ -68,7 +68,12 @@ interface MountResult {
 /** Mount the tab in a stateful harness over a provider so onChange edits re-render. */
 function mount(
   start: BuilderState,
-  opts: { adapter?: KhronotonAdapter; committing?: boolean; eventDrivenResolver?: boolean } = {},
+  opts: {
+    adapter?: KhronotonAdapter;
+    committing?: boolean;
+    eventDrivenResolver?: boolean;
+    liveFloorAnu?: number | null;
+  } = {},
 ): MountResult {
   const adapter = opts.adapter ?? makeAdapter();
   const onChange = vi.fn<(next: BuilderState) => void>();
@@ -89,6 +94,7 @@ function mount(
         onCommit={onCommit}
         committing={opts.committing}
         eventDrivenResolver={opts.eventDrivenResolver}
+        liveFloorAnu={opts.liveFloorAnu}
         sim={sim}
       />
     );
@@ -112,25 +118,60 @@ const scopedSigner = (id: string, caps: string): SignerRow => ({
 });
 
 describe("ExecuteTab — transaction summary", () => {
-  it("renders the gas line thousands-grouped with the '@ price ANU' + (AUTO) suffix", () => {
-    // gasLimit 1500 groups to 1,500; the raw gas price is NOT grouped; AUTO is on.
+  it("renders the gas line thousands-grouped with the '@ price ANU (floor)' + (AUTO) suffix", () => {
+    // gasLimit 1500 groups to 1,500; buffer 0 -> "(floor)"; AUTO is on.
     mount(
       validState({
-        config: { chainId: "0", gasPriceAnu: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 600 },
+        config: { chainId: "0", gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: true, ttl: 600 },
       }),
+      { liveFloorAnu: 10000 },
     );
-    expect(screen.getByTestId("summary-gas").textContent).toContain("1,500 @ 10000 ANU (AUTO)");
+    expect(screen.getByTestId("summary-gas").textContent).toContain(
+      "1,500 @ 10,000 ANU (floor) (AUTO)",
+    );
   });
 
   it("omits the (AUTO) suffix for a manual gas limit", () => {
     mount(
       validState({
-        config: { chainId: "0", gasPriceAnu: 10000, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        config: { chainId: "0", gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
       }),
+      { liveFloorAnu: 10000 },
     );
     const gas = screen.getByTestId("summary-gas").textContent ?? "";
-    expect(gas).toContain("1,500 @ 10000 ANU");
+    expect(gas).toContain("1,500 @ 10,000 ANU (floor)");
     expect(gas).not.toContain("AUTO");
+  });
+
+  it("shows the priority buffer added onto the floor in the gas line", () => {
+    mount(
+      validState({
+        config: { chainId: "0", gasPriceBufferAnu: 500, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+      }),
+      { liveFloorAnu: 10000 },
+    );
+    expect(screen.getByTestId("summary-gas").textContent).toContain("10,500 ANU (floor + 500)");
+  });
+
+  it("shows a loading placeholder in the gas line when the floor hasn't resolved", () => {
+    mount(validState());
+    expect(screen.getByTestId("summary-gas").textContent).toContain("@ … ANU");
+  });
+
+  it("labels a transient negative buffer as a shortfall, not plainly '(floor)'", () => {
+    // A negative buffer never reaches a real fire (validateConfig blocks the
+    // commit), but this summary re-renders on every keystroke regardless —
+    // it must not label a below-floor total as though it equalled the
+    // unmodified floor.
+    mount(
+      validState({
+        config: { chainId: "0", gasPriceBufferAnu: -500, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+      }),
+      { liveFloorAnu: 10000 },
+    );
+    const text = screen.getByTestId("summary-gas").textContent ?? "";
+    expect(text).toContain("9,500 ANU (floor - 500)");
+    expect(text).not.toContain("9,500 ANU (floor)");
   });
 
   it("counts effective signers (incl. the gas-payer-derived one) and total scoped cap lines", () => {
@@ -239,9 +280,9 @@ describe("ExecuteTab — simulate", () => {
     // Start from a MANUAL config so the calibrate flips autoGasLimit on.
     const { onChange, current } = mount(
       validState({
-        config: { chainId: "0", gasPriceAnu: 10000, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        config: { chainId: "0", gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
       }),
-      { adapter },
+      { adapter, liveFloorAnu: 10000 },
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Simulate" }));
@@ -253,7 +294,9 @@ describe("ExecuteTab — simulate", () => {
     });
     expect(onChange).toHaveBeenCalled();
     // The summary re-renders with the calibrated, thousands-grouped figure.
-    expect(screen.getByTestId("summary-gas").textContent).toContain("42,000 @ 10000 ANU (AUTO)");
+    expect(screen.getByTestId("summary-gas").textContent).toContain(
+      "42,000 @ 10,000 ANU (floor) (AUTO)",
+    );
   });
 });
 

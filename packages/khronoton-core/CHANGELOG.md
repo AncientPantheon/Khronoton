@@ -4,6 +4,23 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.10.0 — 2026-09-08
+
+**MINOR — the Builder's absolute "Gas Price (ANU)" field is gone; a cronoton now always pays the live network floor plus an optional priority buffer.**
+
+0.9.0 made the executor floor a *stored* absolute price against the live Yin Engine floor, so a fire could no longer underprice — but the Builder UI still framed gas price as something an operator *sets*, which is the wrong model for a recurring transaction: any absolute number typed today is guaranteed to go stale as the live floor keeps rising. This finishes the redesign: the UI shows a read-only, live-refreshing "Live Network Floor" display plus an editable "Priority Buffer (ANU above floor)" (default 0), and every fire prices as `liveFloor(creationTime) + buffer`, derived fresh at build time.
+
+- **`CodexTxConfig.gasPriceBufferAnu`** (optional, additive) — ANU to pay above the live floor; absent (every pre-migration row) defaults to 0, so existing cronotons self-heal with no DB migration. `gasPrice` is kept, `@deprecated`, read-only, for parsing historical `config_json`.
+- **`ChainRuntime.gasMeta(floorAnu, bufferAnu?)`** — the buffer is a new optional 2nd parameter, non-breaking. The adapter (`blockchain/stoachain.ts`) sums `floorAnu + bufferAnu` **in ANU**, inside the adapter, before the **one** `anuToStoaNumber` conversion — summing two independently-converted STOA floats instead produces a different serialized value in roughly 1 in 5 floor/buffer pairs, reintroducing exactly the precision bug 0.9.0 fixed. `buildTransaction` always calls `gasMeta(0, config.gasPriceBufferAnu ?? 0)` now — there is no more stored absolute value to raise to a floor.
+- **A negative or non-finite buffer can never underprice a fire — enforced at three independent layers**, not just the UI: `ui/builder-state.ts`'s `validateConfig` blocks commit client-side; `server/store/cronoton.ts`'s `commitCodexCronoton`/`editCodexCronoton` reject a present-and-invalid `gasPriceBufferAnu` before any write (so a caller reaching the store directly, bypassing the Builder UI, can't persist a row that silently underprices every future fire); and `blockchain/stoachain.ts`'s `gasMeta` clamps a bad buffer to 0 as a third line of defense for any `CodexTxDefinition` built outside the store entirely.
+- **New `useLiveGasFloor()` hook** (`ui/builder/live-gas-floor.ts`) polls the live floor every 30s plus a `visibilitychange`/`focus` refresh (browsers throttle `setInterval` in backgrounded tabs, and this screen is routinely left open for hours) — called once in `Builder.tsx`, threaded to `ConfigTab` and `ExecuteTab`.
+- **Precision fix applied a second place**: `ui/tx-size.ts`'s size estimator now computes the same floor+buffer-summed-in-ANU-then-converted-once formula the executor uses, instead of the deprecated absolute `gasPrice`.
+- **Not purely additive at the UI-type layer**: `BuilderConfig.gasPriceAnu` and `CommitGateOptions.minGasPriceAnu` are **removed**, not deprecated-in-place — both lose all meaning once there is no absolute price to floor-check, and keeping them would be actively misleading. `CodexTxConfig` itself stays additive.
+
+Reviewed via nectar (3 rounds, 5 lenses each, adversarial validation): round 1 found and fixed a HIGH gap (a negative buffer could underprice below the live floor — server-side validation was entirely absent) plus 5 lower-severity gaps in the fix's own test coverage and a minor UI re-render inefficiency; round 2 re-verified round 1's fixes and found 3 more small issues (a misleading UI label for a transient invalid state, duplicated validation logic, a test-loop robustness nit) plus 2 STYLISTIC items the validator concluded were actually already-consistent with each file's own convention; round 3 caught one last barrel-export asymmetry. All CONFIRMED findings fixed; full history in `docs/work/gas-price-buffer/review.md`.
+
+**938 specs pass**, plus 5 real-runtime integration specs against the installed `@stoachain/*@4.4.0`. Behavioral verification against the real compiled package + a real SQLite DB confirms: a pre-migration row self-heals to buffer 0; a negative buffer is rejected at commit AND edit time with the row genuinely left unwritten/unchanged, not just "throws".
+
 ## 0.9.0 — 2026-09-07
 
 **MINOR — scheduled transactions are priced against the chain's LIVE gas floor at fire time, not a static value stored at creation time.**

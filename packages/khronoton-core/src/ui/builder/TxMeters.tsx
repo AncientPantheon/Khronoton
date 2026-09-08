@@ -98,7 +98,7 @@ export function TxMeters({ state, sim }: TxMetersProps): ReactNode {
     state.pactCode,
     state.config.chainId,
     state.config.gasLimit,
-    state.config.gasPriceAnu,
+    state.config.gasPriceBufferAnu,
     state.config.ttl,
     state.payload,
     state.signers.length,

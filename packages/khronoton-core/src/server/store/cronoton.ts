@@ -34,6 +34,7 @@ import type {
 import { CodexCronotonValidationError, TerminalCronotonError } from "./errors.js";
 import {
   assertAutoGasGate,
+  assertGasPriceBufferAnu,
   rowExternalFireable,
   rowRuntimeArgKeys,
 } from "./mappers.js";
@@ -101,6 +102,10 @@ export function commitCodexCronoton(
   if (!input.config || typeof input.config.chainId !== "string") {
     throw new CodexCronotonValidationError("config.chainId must be a string");
   }
+  // See `assertGasPriceBufferAnu`'s doc: rejected here, not just in the
+  // Builder UI's `validateConfig`, so a caller reaching this store directly
+  // can't persist a row that silently underprices every future fire.
+  assertGasPriceBufferAnu(input.config);
   if (!Array.isArray(input.signers)) {
     throw new CodexCronotonValidationError("signers must be an array");
   }
@@ -316,6 +321,7 @@ export function editCodexCronoton(
     changedFields.push("pactCode");
   }
   if (patch.config) {
+    assertGasPriceBufferAnu(patch.config);
     assertAutoGasGate(patch.config);
     nextConfigJson = JSON.stringify(patch.config);
     changedFields.push("config");

@@ -12,6 +12,11 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 
+// The live gas floor's optional peer, mocked so `useLiveGasFloor()` resolves a
+// fixed value instead of pulling the real WASM/crypto runtime (mirrors
+// `stoachain.test.ts`'s `@stoachain/*` module-mock idiom).
+vi.mock("@stoachain/stoa-core/gas", () => ({ minGasPriceAnu: vi.fn(() => 12345) }));
+
 import { KhronotonProvider } from "../../provider/KhronotonProvider.js";
 import type { KhronotonAdapter } from "../../provider/adapter.js";
 import { KhronotonUiRoot } from "../KhronotonUiRoot.js";
@@ -499,6 +504,21 @@ describe("Builder — top/bottom layout", () => {
 
     expect(paneWrap?.style.flexDirection).toBe("column");
     expect(paneWrap?.style.display).not.toBe("grid");
+  });
+});
+
+describe("Builder — live gas floor threaded to Config + Execute", () => {
+  it("polls the live floor once and shows it on both the Config and Execute tabs", async () => {
+    mount(makeAdapter());
+
+    // Config tab: the read-only floor display resolves from the mocked peer.
+    expect(await screen.findByText(/12,345 ANU/)).toBeTruthy();
+
+    // Execute tab: the same polled value feeds the gas summary line.
+    fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("summary-gas").textContent).toContain("12,345"),
+    );
   });
 });
 

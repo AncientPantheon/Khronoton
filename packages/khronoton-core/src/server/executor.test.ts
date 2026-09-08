@@ -93,11 +93,17 @@ let nowS = GENESIS_S + TICK_S * 500; // 500 ticks past genesis -> floor 10500 AN
 const liveFloorAnu = (t: number) =>
   Math.min(10000 + Math.max(0, Math.floor((t - GENESIS_S) / TICK_S)), 400000);
 const anuToStoaNumber = (anu: number) => Number("0." + String(anu).padStart(12, "0"));
-const gasMeta = vi.fn((floorAnu: number) => {
+// Mirrors `blockchain/stoachain.ts`'s defensive clamp: a negative/non-finite
+// buffer is treated as no premium at all, never a discount below the floor.
+const safeBufferAnu = (bufferAnu: number) =>
+  Number.isFinite(bufferAnu) && bufferAnu > 0 ? bufferAnu : 0;
+const gasMeta = vi.fn((floorAnu: number, bufferAnu = 0) => {
   const creationTime = nowS;
   return {
     creationTime,
-    gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+    gasPrice: anuToStoaNumber(
+      Math.max(floorAnu, liveFloorAnu(creationTime)) + safeBufferAnu(bufferAnu),
+    ),
   };
 });
 const universalSignTransaction = vi.fn();
@@ -160,11 +166,13 @@ beforeEach(() => {
   calculateAutoGasLimit.mockImplementation((g: number) => g * 2);
   anuToStoa.mockImplementation((a: number) => a / 1e12);
   nowS = GENESIS_S + TICK_S * 500;
-  gasMeta.mockImplementation((floorAnu: number) => {
+  gasMeta.mockImplementation((floorAnu: number, bufferAnu = 0) => {
     const creationTime = nowS;
     return {
       creationTime,
-      gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+      gasPrice: anuToStoaNumber(
+        Math.max(floorAnu, liveFloorAnu(creationTime)) + safeBufferAnu(bufferAnu),
+      ),
     };
   });
   isSignedTransaction.mockReturnValue(true);
@@ -216,9 +224,11 @@ describe("executeCodexTransaction — build shape", () => {
   it("setMeta prices via the gasMeta seam (NOT anuToStoa) and carries chain/networkId/ttl", async () => {
     await executeCodexTransaction(baseDef(), "simulate", ctx);
     const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
-    // The stored ANU is handed to the seam as a FLOOR, and `anuToStoa` — plain
-    // float division — is no longer used to price a signed tx at all.
-    expect(gasMeta).toHaveBeenCalledWith(10000);
+    // floorAnu is always 0 now (no more stored absolute value to raise to a
+    // floor), and `baseDef()`'s config has no gasPriceBufferAnu, so it
+    // defaults to 0. `anuToStoa` — plain float division — is no longer used
+    // to price a signed tx at all.
+    expect(gasMeta).toHaveBeenCalledWith(0, 0);
     expect(anuToStoa).not.toHaveBeenCalled();
     expect(meta.chainId).toBe("0");
     expect(meta.ttl).toBe(28800);
@@ -633,21 +643,66 @@ describe("executeCodexTransaction — gas-station GAS_PAYER signer synthesis wir
 // long-lived cronoton drifts below chainweb's rising floor and its 3am fire is
 // rejected with nobody watching.
 describe("executeCodexTransaction — live gas floor at fire time", () => {
-  it("floors a STALE stored gasPrice up to the live floor (self-heal, no DB migration)", async () => {
-    // Stored at the genesis default 10000; the live floor is now 10500.
-    await executeCodexTransaction(baseDef(), "simulate", ctx);
-    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
-    expect(gasMeta).toHaveBeenCalledWith(10000);
-    expect(meta.gasPrice).toBe(anuToStoaNumber(10500));
-  });
-
-  it("keeps an operator-raised gasPrice ABOVE the floor (the stored value is a floor, never a cap)", async () => {
+  it("prices at exactly the live floor when no buffer is set — config.gasPrice is never read", async () => {
+    // A deliberately huge, WRONG stored gasPrice proves it is never read for
+    // pricing: the live floor is 10500 and the fire prices at exactly that.
     const def = baseDef({
-      config: { chainId: "0", gasPrice: 25000, gasLimit: 1500, autoGasLimit: false, ttl: 28800 },
+      config: {
+        chainId: "0",
+        gasPrice: 99999999,
+        gasLimit: 1500,
+        autoGasLimit: false,
+        ttl: 28800,
+      },
     });
     await executeCodexTransaction(def, "simulate", ctx);
     const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
-    expect(meta.gasPrice).toBe(anuToStoaNumber(25000));
+    expect(gasMeta).toHaveBeenCalledWith(0, 0);
+    expect(meta.gasPrice).toBe(anuToStoaNumber(10500));
+  });
+
+  it("adds the priority buffer ON TOP of the live floor", async () => {
+    const def = baseDef({
+      config: {
+        chainId: "0",
+        gasPrice: 10000,
+        gasPriceBufferAnu: 500,
+        gasLimit: 1500,
+        autoGasLimit: false,
+        ttl: 28800,
+      },
+    });
+    await executeCodexTransaction(def, "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    expect(gasMeta).toHaveBeenCalledWith(0, 500);
+    // A SINGLE conversion of the summed ANU, not two summed STOA floats.
+    expect(meta.gasPrice).toBe(anuToStoaNumber(10500 + 500));
+  });
+
+  it("passes a stored NEGATIVE gasPriceBufferAnu through to gasMeta unclamped — validation/clamping is the seam's job, not buildTransaction's", async () => {
+    // buildTransaction itself does no defensive clamping of its own — it
+    // trusts the seam (blockchain/stoachain.ts, defense-in-depth) and the
+    // store's commit/edit-time rejection (server/store/cronoton.ts) to keep a
+    // bad buffer from ever reaching here. This test documents that boundary:
+    // the raw value is handed to gasMeta as-is, and it is gasMeta's own
+    // clamp (mirrored in this file's `safeBufferAnu` helper) that keeps the
+    // final price from falling below the live floor.
+    const def = baseDef({
+      config: {
+        chainId: "0",
+        gasPrice: 10000,
+        gasPriceBufferAnu: -500,
+        gasLimit: 1500,
+        autoGasLimit: false,
+        ttl: 28800,
+      },
+    });
+    await executeCodexTransaction(def, "simulate", ctx);
+    const meta = findCall("setMeta")!.args[0] as Record<string, unknown>;
+    expect(gasMeta).toHaveBeenCalledWith(0, -500);
+    // The seam clamps the negative buffer to 0 — the shipped price is
+    // exactly the live floor, never below it.
+    expect(meta.gasPrice).toBe(anuToStoaNumber(10500));
   });
 
   it("stamps creationTime from the SAME seam call that produced gasPrice (no two-clock race)", async () => {
@@ -673,27 +728,38 @@ describe("executeCodexTransaction — live gas floor at fire time", () => {
     // boundary, reused values underprice the tx that actually gets submitted.
     // This fails if anyone hoists the seam call out of buildTransaction.
     const def = baseDef({
-      config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      config: {
+        chainId: "0",
+        gasPrice: 10000,
+        gasPriceBufferAnu: 200,
+        gasLimit: 1500,
+        autoGasLimit: true,
+        ttl: 28800,
+      },
     });
-    gasMeta.mockImplementation((floorAnu: number) => {
+    gasMeta.mockImplementation((floorAnu: number, bufferAnu = 0) => {
       const creationTime = nowS;
       nowS += TICK_S; // clock crosses a tick boundary between the two builds
       return {
         creationTime,
-        gasPrice: anuToStoaNumber(Math.max(floorAnu, liveFloorAnu(creationTime))),
+        gasPrice: anuToStoaNumber(
+          Math.max(floorAnu, liveFloorAnu(creationTime)) + bufferAnu,
+        ),
       };
     });
 
     await executeCodexTransaction(def, "fire", ctx);
 
     expect(gasMeta).toHaveBeenCalledTimes(2);
+    expect(gasMeta).toHaveBeenNthCalledWith(1, 0, 200);
+    expect(gasMeta).toHaveBeenNthCalledWith(2, 0, 200);
     const metas = builderCalls
       .filter((c) => c.method === "setMeta")
       .map((c) => c.args[0] as Record<string, unknown>);
     expect(metas).toHaveLength(2);
     expect(metas[1].creationTime).toBe((metas[0].creationTime as number) + TICK_S);
-    expect(metas[0].gasPrice).toBe(anuToStoaNumber(10500));
-    expect(metas[1].gasPrice).toBe(anuToStoaNumber(10501));
+    expect(metas[0].gasPrice).toBe(anuToStoaNumber(10500 + 200));
+    expect(metas[1].gasPrice).toBe(anuToStoaNumber(10501 + 200));
   });
 });
 

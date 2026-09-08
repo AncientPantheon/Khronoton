@@ -60,6 +60,76 @@ describe("estimateTxSize", () => {
 
     await expect(estimateTxSize(state)).resolves.toBeDefined();
   });
+
+  it("grows the estimate when a large gasPriceBufferAnu adds digits to the serialized price", async () => {
+    const withoutBuffer = makeEmptyBuilderState();
+    const withBuffer = makeEmptyBuilderState();
+    withBuffer.config.gasPriceBufferAnu = 999999999999;
+
+    const [without, buffered] = await Promise.all([
+      estimateTxSize(withoutBuffer),
+      estimateTxSize(withBuffer),
+    ]);
+
+    expect(buffered.bytes).toBeGreaterThan(without.bytes);
+  });
+
+  it("prices via a SINGLE conversion of the summed ANU — not two summed STOA floats (precision fix)", async () => {
+    // The "grows" test above only proves the estimate reacts to a buffer at
+    // all — a REGRESSED implementation that summed `anuToStoa(floor) +
+    // anuToStoa(buffer)` as two separately-converted STOA floats (the exact
+    // bug class fixed in `blockchain/stoachain.ts`'s `gasMeta`) would ALSO
+    // grow the byte count as the buffer grows, so it wouldn't be caught by a
+    // mere "grows" assertion. This test proves the byte DELTA matches the
+    // correct single-conversion formula specifically, mirroring
+    // `stoachain.test.ts`'s "sums floor+buffer in ANU before the ONE
+    // conversion" technique.
+    const { minGasPriceAnu, anuToStoaNumber } = await import("@stoachain/stoa-core/gas");
+    const nowS = Math.floor(Date.now() / 1000);
+    const floor = minGasPriceAnu(nowS);
+
+    const baselineBytes = new TextEncoder().encode(JSON.stringify(anuToStoaNumber(floor))).length;
+    const deltaFor = (str: string): number =>
+      new TextEncoder().encode(str).length - baselineBytes;
+
+    // Search for a buffer value that actually diverges between the correct
+    // and buggy formulas' BYTE-LENGTH deltas for the CURRENT live floor —
+    // computed at runtime rather than hardcoded, so the test keeps working
+    // as the floor rises. Deliberately checks byte-length divergence, not
+    // mere value inequality: two different decimal strings can still have
+    // the SAME length, which the test below couldn't distinguish, so the
+    // search must stop only once it has found what it actually needs.
+    let buffer = -1;
+    let correctDelta = 0;
+    let buggyDelta = 0;
+    for (let candidate = 1; candidate <= 5000; candidate++) {
+      const correct = deltaFor(JSON.stringify(anuToStoaNumber(floor + candidate)));
+      const buggy = deltaFor(
+        JSON.stringify(anuToStoaNumber(floor) + anuToStoaNumber(candidate)),
+      );
+      if (correct !== buggy) {
+        buffer = candidate;
+        correctDelta = correct;
+        buggyDelta = buggy;
+        break;
+      }
+    }
+    expect(buffer).toBeGreaterThan(0); // sanity: a divergent pair must exist
+    // sanity: the two formulas must actually disagree on byte length too,
+    // or this test couldn't tell correct from buggy either (redundant with
+    // the loop's own break condition, kept as a readable, explicit check).
+    expect(correctDelta).not.toBe(buggyDelta);
+
+    const withoutBuffer = makeEmptyBuilderState();
+    const withBuffer = makeEmptyBuilderState();
+    withBuffer.config.gasPriceBufferAnu = buffer;
+    const [without, buffered] = await Promise.all([
+      estimateTxSize(withoutBuffer),
+      estimateTxSize(withBuffer),
+    ]);
+
+    expect(buffered.bytes - without.bytes).toBe(correctDelta);
+  });
 });
 
 describe("estimateFallbackBytes", () => {

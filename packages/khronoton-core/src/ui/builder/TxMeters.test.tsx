@@ -87,4 +87,37 @@ describe("TxMeters — Tx Size row", () => {
 
     expect(screen.getByText(/‰/)).toBeTruthy();
   });
+
+  it("the byte estimate grows when gasPriceBufferAnu adds digits to the serialized price", async () => {
+    const baseState = { ...makeEmptyBuilderState(), pactCode: "(module-body)" };
+    render(<TxMeters state={baseState} sim={makeSim(undefined)} />);
+    await waitFor(() => {
+      expect(screen.queryByText("…")).toBeNull();
+    });
+    const baseSizeText = screen.getByText(/‰/).textContent ?? "";
+    cleanup();
+
+    const bufferedState = {
+      ...makeEmptyBuilderState(),
+      pactCode: "(module-body)",
+      config: { ...baseState.config, gasPriceBufferAnu: 999999999999 },
+    };
+    render(<TxMeters state={bufferedState} sim={makeSim(undefined)} />);
+    await waitFor(() => {
+      expect(screen.queryByText("…")).toBeNull();
+    });
+    const bufferedSizeText = screen.getByText(/‰/).textContent ?? "";
+
+    // Parses `formatBytes`' own output shapes ("N B" / "N.NN KB" / "N.NNN MB")
+    // back into a byte count, so the comparison is unit-agnostic regardless of
+    // which bucket either render happens to land in.
+    const parseBytes = (text: string): number => {
+      const [num, unit] = text.split(" ");
+      const value = Number(num.replace(/,/g, ""));
+      if (unit === "KB") return value * 1024;
+      if (unit === "MB") return value * 1024 * 1024;
+      return value;
+    };
+    expect(parseBytes(bufferedSizeText)).toBeGreaterThan(parseBytes(baseSizeText));
+  });
 });

@@ -76,7 +76,7 @@ export async function estimateTxSize(state: BuilderState): Promise<TxSizeEstimat
     // caught and reverted — don't re-parallelize these without re-reading
     // that comment first.
     const { Pact } = await import("@stoachain/kadena-stoic-legacy/client");
-    const { anuToStoaNumber } = await import("@stoachain/stoa-core/gas");
+    const { anuToStoaNumber, minGasPriceAnu } = await import("@stoachain/stoa-core/gas");
     const { KADENA_NETWORK } = await import("@stoachain/stoa-core/constants");
 
     const builder = (Pact.builder.execution(pactCode || "") as any)
@@ -87,9 +87,15 @@ export async function estimateTxSize(state: BuilderState): Promise<TxSizeEstimat
         gasLimit: config.gasLimit,
         // `anuToStoaNumber`, not `anuToStoa`: this meter exists to predict the
         // SIZE of the real signed transaction, so it must serialize gasPrice
-        // exactly the way the executor does. Plain float division can render a
-        // different number of characters than the value that actually ships.
-        gasPrice: anuToStoaNumber(config.gasPrice),
+        // exactly the way the executor does — the live network floor plus
+        // `gasPriceBufferAnu`, summed IN ANU before the ONE conversion below
+        // (same precision fix as `blockchain/stoachain.ts`'s `gasMeta`: two
+        // independently-converted STOA floats summed can produce a different
+        // serialized value than converting the summed ANU once). The
+        // deprecated `config.gasPrice` field is never read here.
+        gasPrice: anuToStoaNumber(
+          minGasPriceAnu(Math.floor(Date.now() / 1000)) + (config.gasPriceBufferAnu ?? 0),
+        ),
         ttl: config.ttl,
       })
       .setNetworkId(KADENA_NETWORK);

@@ -6,7 +6,7 @@ import type {
   CodexTxDefinition,
   ManualBatchView,
 } from '../types.js';
-import { AutoGasGateError } from './errors.js';
+import { AutoGasGateError, CodexCronotonValidationError } from './errors.js';
 
 function parseJson<T>(json: string | null, fallback: T): T {
   if (json == null) return fallback;
@@ -53,6 +53,27 @@ export function assertAutoGasGate(config: CodexTxConfig): void {
   if (config.autoGasLimit !== true) return;
   if (!Number.isFinite(config.gasLimit) || config.gasLimit <= 0) {
     throw new AutoGasGateError();
+  }
+}
+
+/**
+ * `gasPriceBufferAnu` is a PREMIUM above the live network floor, never a
+ * discount — a negative or non-finite value would let a fire underprice
+ * below the floor (the guarantee the whole buffer redesign exists to
+ * provide). Called identically at commit and edit time, same as
+ * {@link assertAutoGasGate}, so a caller reaching the store directly
+ * (bypassing the Builder UI's own `validateConfig`) can't persist a row that
+ * silently underprices every future fire. `blockchain/stoachain.ts`'s
+ * `gasMeta` seam also clamps defensively as a second line of defense for any
+ * `CodexTxDefinition` built outside this store. Absent is fine — only a
+ * present-and-invalid value is rejected.
+ */
+export function assertGasPriceBufferAnu(config: CodexTxConfig): void {
+  if (config.gasPriceBufferAnu == null) return;
+  if (!Number.isFinite(config.gasPriceBufferAnu) || config.gasPriceBufferAnu < 0) {
+    throw new CodexCronotonValidationError(
+      'config.gasPriceBufferAnu must be a non-negative finite number',
+    );
   }
 }
 

@@ -142,6 +142,14 @@ export interface StoaGasMeta {
  * transaction below it. Implementations return
  * `max(floorAnu, liveFloor(creationTime))`, converted to chain units.
  * See `blockchain/stoachain.ts` for the StoaChain implementation.
+ *
+ * `bufferAnu` (default 0) is added to `floorAnu` **in ANU**, before the
+ * implementation's one `anuToStoaNumber` conversion — summing two
+ * independently-converted STOA numbers instead produces a different
+ * serialized value in roughly 1 in 5 floor/buffer pairs (verified:
+ * `anuToStoaNumber(11569) + anuToStoaNumber(500)` !== `anuToStoaNumber(12069)`
+ * as JSON strings), which is exactly the class of bug `anuToStoaNumber`
+ * exists to prevent.
  */
 export interface ChainRuntime {
   Pact: { builder: { execution(code: string): unknown } };
@@ -153,7 +161,7 @@ export interface ChainRuntime {
   ): Promise<unknown>;
   calculateAutoGasLimit(gas: number): number;
   anuToStoa(anu: number): number;
-  gasMeta?(floorAnu: number): StoaGasMeta;
+  gasMeta?(floorAnu: number, bufferAnu?: number): StoaGasMeta;
   getPactUrl(chainId: string): string;
   networkId: string;
   namespace: string;

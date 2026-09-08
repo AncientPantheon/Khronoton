@@ -5,10 +5,10 @@
  * {@link BuilderState}: it renders `state.config` and, on every edit, calls
  * `onChange` with a fresh `BuilderState` carrying the patched config. No math or
  * validation lives here — the Max Tx Fee figure is derived through
- * {@link maxTxFee} (gas price × gas limit) and the defaults/validation belong to
- * `builder-state.ts`. Every label and helper string is reproduced verbatim from
- * the Hub builder so the surface reads identically. Styling is inline
- * `var(--khr-*)` only.
+ * {@link maxTxFee} ((live floor + buffer) × gas limit) and the defaults/
+ * validation belong to `builder-state.ts`. Every label and helper string is
+ * reproduced verbatim from the Hub builder so the surface reads identically.
+ * Styling is inline `var(--khr-*)` only.
  */
 
 import type { CSSProperties, ReactNode } from "react";
@@ -28,6 +28,12 @@ export interface ConfigTabProps {
    * "Calibrated: {n} gas" instead of the run-Simulate prompt.
    */
   calibratedGasLimit?: number | null;
+  /**
+   * The live network gas floor (`useLiveGasFloor()`, hoisted to `Builder.tsx`).
+   * `null`/absent while the first poll hasn't resolved yet — the floor display
+   * and Max Tx Fee both show a loading placeholder in that state.
+   */
+  liveFloorAnu?: number | null;
 }
 
 const INPUT_STYLE: CSSProperties = {
@@ -112,7 +118,12 @@ function Hint({ children }: { children: ReactNode }): ReactNode {
   return <p style={HINT_STYLE}>{children}</p>;
 }
 
-export function ConfigTab({ state, onChange, calibratedGasLimit }: ConfigTabProps): ReactNode {
+export function ConfigTab({
+  state,
+  onChange,
+  calibratedGasLimit,
+  liveFloorAnu,
+}: ConfigTabProps): ReactNode {
   const config = state.config;
 
   const patch = (next: Partial<BuilderConfig>): void => {
@@ -121,6 +132,7 @@ export function ConfigTab({ state, onChange, calibratedGasLimit }: ConfigTabProp
 
   const auto = config.autoGasLimit;
   const calibrated = typeof calibratedGasLimit === "number";
+  const fee = maxTxFee(config, liveFloorAnu ?? null);
 
   return (
     <div>
@@ -136,15 +148,25 @@ export function ConfigTab({ state, onChange, calibratedGasLimit }: ConfigTabProp
         <Hint>Single chain per job (Stoa Network).</Hint>
       </Field>
 
-      <Field label="Gas Price (ANU)">
+      <Field label="Live Network Floor (ANU)">
+        <div style={DISPLAY_STYLE}>
+          {liveFloorAnu != null ? `${formatThousands(liveFloorAnu)} ANU` : "Loading…"}
+        </div>
+        <Hint>The chain's live minimum gas price right now. Refreshes automatically.</Hint>
+      </Field>
+
+      <Field label="Priority Buffer (ANU above floor)">
         <input
-          aria-label="Gas Price (ANU)"
+          aria-label="Priority Buffer (ANU above floor)"
           type="number"
           style={INPUT_STYLE}
-          value={config.gasPriceAnu}
-          onChange={(e) => patch({ gasPriceAnu: Number(e.target.value) })}
+          value={config.gasPriceBufferAnu}
+          onChange={(e) => patch({ gasPriceBufferAnu: Number(e.target.value) })}
         />
-        <Hint>Minimum 10,000 ANU (protocol floor).</Hint>
+        <Hint>
+          The transaction always pays the live floor at fire time, plus this. Leave at 0
+          unless you need priority over other pending transactions.
+        </Hint>
       </Field>
 
       <div style={{ marginBottom: "14px" }}>
@@ -182,7 +204,8 @@ export function ConfigTab({ state, onChange, calibratedGasLimit }: ConfigTabProp
 
       <Field label="Max Tx Fee (ANU)">
         <div style={DISPLAY_STYLE}>
-          {formatThousands(maxTxFee(config))} ANU <span style={MUTED_STYLE}>(gas price x gas limit)</span>
+          {fee != null ? `${formatThousands(fee)} ANU` : "…"}{" "}
+          <span style={MUTED_STYLE}>((floor + buffer) x gas limit)</span>
         </div>
       </Field>
 

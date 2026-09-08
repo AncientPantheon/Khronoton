@@ -63,7 +63,13 @@ export interface PayloadState {
 /** Transaction config as the form holds it (gas price is in ANU here). */
 export interface BuilderConfig {
   chainId: string;
-  gasPriceAnu: number;
+  /**
+   * ANU to pay ABOVE the live network floor at fire time. 0 (default) = exactly
+   * the floor. The only gas-price knob an operator sets — never an absolute
+   * price, since the floor rises roughly every 3h and any absolute number set
+   * today is guaranteed to go stale.
+   */
+  gasPriceBufferAnu: number;
   gasLimit: number;
   autoGasLimit: boolean;
   ttl: number;
@@ -114,8 +120,7 @@ export interface BuilderState {
 const MSG = {
   name: "Name is required.",
   ttl: "TTL must be between 60 and 86400 seconds.",
-  gasPrice: (floorAnu: number) =>
-    `Gas price must be at least ${floorAnu} ANU (the protocol floor).`,
+  gasPriceBuffer: "Priority buffer cannot be negative.",
   gasLimit: "Gas limit must be greater than zero.",
   autoGas: "AUTO gas requires a successful Simulate to calibrate, or switch to manual.",
   signers: "At least one signer is required.",
@@ -134,10 +139,10 @@ export function makeEmptyBuilderState(): BuilderState {
     pactCode: "",
     config: {
       chainId: "0",
-      // The GENESIS floor, and deliberately a FLOOR rather than a final price:
-      // the executor raises it to the chain's live minimum at fire time, so a
-      // cronoton created at this default does not underprice as it ages.
-      gasPriceAnu: GENESIS_MIN_GAS_ANU,
+      // 0 = pay exactly the live floor at fire time. The executor always
+      // prices from the live network floor plus this buffer, so a cronoton
+      // created at this default never underprices as the floor rises.
+      gasPriceBufferAnu: 0,
       gasLimit: 1500,
       autoGasLimit: false,
       ttl: 600,
@@ -162,9 +167,14 @@ export function makeEmptyBuilderState(): BuilderState {
 
 // ── Derived + parsing helpers ─────────────────────────────────────────────────
 
-/** The read-only "Max Tx Fee" figure: gas price × gas limit. */
-export function maxTxFee(config: BuilderConfig): number {
-  return config.gasPriceAnu * config.gasLimit;
+/**
+ * The read-only "Max Tx Fee" figure: (live floor + buffer) × gas limit. `null`
+ * while the live floor has not resolved yet — there is no absolute price to
+ * fall back on.
+ */
+export function maxTxFee(config: BuilderConfig, liveFloorAnu: number | null): number | null {
+  if (liveFloorAnu == null) return null;
+  return (liveFloorAnu + config.gasPriceBufferAnu) * config.gasLimit;
 }
 
 /** Parse the free-text runtime-arg-keys field (comma OR newline separated, blanks dropped). */
@@ -273,7 +283,8 @@ export function builderToCommit(
 ): CommitBody {
   const config: CodexTxConfig = {
     chainId: state.config.chainId,
-    gasPrice: state.config.gasPriceAnu,
+    gasPrice: 0, // deprecated — kept as an honest 0 placeholder; never read for pricing
+    gasPriceBufferAnu: state.config.gasPriceBufferAnu,
     gasLimit: state.config.gasLimit,
     autoGasLimit: state.config.autoGasLimit,
     ttl: state.config.ttl,
@@ -304,30 +315,10 @@ export function builderToCommit(
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-/**
- * The Yin Engine floor at genesis. Used only as the fallback when a caller does
- * not supply the live floor — the chain's real minimum rises above this over
- * time, so it is a lower bound on the truth, never the truth itself.
- */
-const GENESIS_MIN_GAS_ANU = 10000;
-
 /** Options threaded into the config + commit gate. */
 export interface CommitGateOptions {
   /** True once a successful Simulate has calibrated the AUTO gas limit. */
   simulateCalibrated?: boolean;
-  /**
-   * The chain's LIVE minimum gas price in ANU. Optional so this module stays
-   * synchronous and free of any `@stoachain/*` import (which is an optional peer
-   * dependency); a caller that can resolve the live floor — e.g. via
-   * `minGasPriceAnu` from `@stoachain/stoa-core/gas` — passes it here.
-   *
-   * Omitting it validates against the GENESIS floor, which under-rejects rather
-   * than over-rejects: a price this gate lets through but the chain would refuse
-   * is still raised to the live floor by the executor at fire time
-   * (`ChainRuntime.gasMeta`), so the consequence is a stale form hint, not a
-   * rejected transaction.
-   */
-  minGasPriceAnu?: number;
 }
 
 export function validateName(state: BuilderState): string[] {
@@ -338,8 +329,9 @@ export function validateConfig(state: BuilderState, opts: CommitGateOptions = {}
   const errors: string[] = [];
   const c = state.config;
   if (c.ttl < 60 || c.ttl > 86400) errors.push(MSG.ttl);
-  const minGasAnu = opts.minGasPriceAnu ?? GENESIS_MIN_GAS_ANU;
-  if (c.gasPriceAnu < minGasAnu) errors.push(MSG.gasPrice(minGasAnu));
+  if (!Number.isFinite(c.gasPriceBufferAnu) || c.gasPriceBufferAnu < 0) {
+    errors.push(MSG.gasPriceBuffer);
+  }
   if (c.gasLimit <= 0) errors.push(MSG.gasLimit);
   // A server-resolver or trigger-only cronoton postpones/bypasses the Simulate
   // that would calibrate AUTO gas, so the calibration requirement is waived.
@@ -455,7 +447,8 @@ function toGasPayerState(gasPayer: CodexGasPayer): GasPayerState {
  * Rehydrate a persisted row into builder state for EDIT.
  *
  * Parity rules: payload opens in FORCED raw mode (lossless pretty JSON, typed
- * rows/keysets empty); stored `gasPrice` maps back to `gasPriceAnu`;
+ * rows/keysets empty); a missing stored `gasPriceBufferAnu` (every
+ * pre-migration row) defaults to 0 — "pay exactly the live floor";
  * serverResolver + gas payer preserved; signers rehydrate lossily (fresh id,
  * blank label, `foreign` source, capability mode/lines kept); schedule
  * preserved. `runtime_arg_keys` and `external_fireable` are CREATE-ONLY and are
@@ -483,7 +476,7 @@ export function detailToBuilderState(row: CodexCronotonRow): BuilderState {
     pactCode: row.pact_code,
     config: {
       chainId: storedConfig.chainId,
-      gasPriceAnu: storedConfig.gasPrice,
+      gasPriceBufferAnu: storedConfig.gasPriceBufferAnu ?? 0,
       gasLimit: storedConfig.gasLimit,
       autoGasLimit: storedConfig.autoGasLimit,
       ttl: storedConfig.ttl,

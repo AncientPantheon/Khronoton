@@ -88,14 +88,30 @@ export async function createStoachainRuntime(
       signing.universalSignTransaction as ChainRuntime["universalSignTransaction"],
     calculateAutoGasLimit: gas.calculateAutoGasLimit,
     anuToStoa: gas.anuToStoa,
-    gasMeta: (floorAnu: number) => {
+    gasMeta: (floorAnu: number, bufferAnu = 0) => {
       // ONE clock read, via the canonical anti-race primitive: `stoaGasMeta`
       // returns a creationTime and the floor price for that exact instant. Only
       // its creationTime is taken here, because the floor must be compared to
       // the caller's stored value in ANU before conversion — but it is the SAME
       // read, so the pair can never straddle a tick boundary.
       const { creationTime } = gas.stoaGasMeta();
-      const anu = Math.max(floorAnu, gas.minGasPriceAnu(creationTime));
+      // The buffer is a PREMIUM, never a discount: a negative, NaN, or
+      // Infinity value is clamped to 0 here rather than trusted, because
+      // adding it after the floor-clamp below would otherwise let a bad
+      // buffer pull the shipped price back BELOW the live floor — defeating
+      // the one guarantee this seam exists to provide. This is defense in
+      // depth alongside the reject-on-commit validation in
+      // `server/store/cronoton.ts`; a caller that constructs a
+      // `CodexTxDefinition` directly (bypassing the store) still can't
+      // underprice a fire through this seam.
+      const safeBufferAnu = Number.isFinite(bufferAnu) && bufferAnu > 0 ? bufferAnu : 0;
+      // floorAnu and safeBufferAnu are summed IN ANU, before the one
+      // conversion below — NOT converted to STOA separately and added as
+      // floats. Summing two independently-converted decimal floats produces a
+      // different serialized value than converting the summed ANU once (see
+      // the ChainRuntime.gasMeta doc comment in server/seams.ts), which can
+      // round the shipped price fractionally below the intended floor+buffer.
+      const anu = Math.max(floorAnu, gas.minGasPriceAnu(creationTime)) + safeBufferAnu;
       // `anuToStoaNumber`, NOT `anuToStoa`: this value goes into meta that
       // chainweb hashes and validates exactly, and plain float division is
       // documented upstream as unsafe for precisely that. `anuToStoa` above

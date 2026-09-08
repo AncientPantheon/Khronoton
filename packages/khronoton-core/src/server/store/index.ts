@@ -29,6 +29,7 @@ export {
   rowExternalFireable,
   rowRuntimeArgKeys,
   assertAutoGasGate,
+  assertGasPriceBufferAnu,
   manualBatchView,
 } from "./mappers.js";
 

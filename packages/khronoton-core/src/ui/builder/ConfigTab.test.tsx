@@ -28,7 +28,14 @@ describe("ConfigTab — fields + verbatim helpers", () => {
     render(<ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} />);
     expect(screen.getByText("Transaction Configuration")).toBeDefined();
     expect(screen.getByText("Single chain per job (Stoa Network).")).toBeDefined();
-    expect(screen.getByText("Minimum 10,000 ANU (protocol floor).")).toBeDefined();
+    expect(
+      screen.getByText("The chain's live minimum gas price right now. Refreshes automatically."),
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        "The transaction always pays the live floor at fire time, plus this. Leave at 0 unless you need priority over other pending transactions.",
+      ),
+    ).toBeDefined();
     expect(screen.getByText("Range: 60s (1 min) to 86,400s (24 hours).")).toBeDefined();
   });
 
@@ -52,14 +59,16 @@ describe("ConfigTab — edits produce the right config patch", () => {
     });
   });
 
-  it("patches config.gasPriceAnu as a NUMBER when Gas Price changes", () => {
+  it("patches config.gasPriceBufferAnu as a NUMBER when Priority Buffer changes", () => {
     const onChange = vi.fn();
     const state = makeEmptyBuilderState();
     render(<ConfigTab state={state} onChange={onChange} />);
-    fireEvent.change(screen.getByLabelText("Gas Price (ANU)"), { target: { value: "20000" } });
+    fireEvent.change(screen.getByLabelText("Priority Buffer (ANU above floor)"), {
+      target: { value: "500" },
+    });
     expect(onChange).toHaveBeenCalledWith({
       ...state,
-      config: { ...state.config, gasPriceAnu: 20000 },
+      config: { ...state.config, gasPriceBufferAnu: 500 },
     });
   });
 
@@ -127,14 +136,38 @@ describe("ConfigTab — Gas Limit MANUAL/AUTO toggle", () => {
 });
 
 describe("ConfigTab — Max Tx Fee derivation", () => {
-  it("renders the default fee 10000 × 1500 = 15,000,000 ANU with the derivation caption", () => {
-    render(<ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} />);
+  it("renders the default fee (floor 10000 + buffer 0) × 1500 = 15,000,000 ANU with the derivation caption", () => {
+    render(<ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} liveFloorAnu={10000} />);
     expect(screen.getByText(/15,000,000 ANU/)).toBeDefined();
-    expect(screen.getByText("(gas price x gas limit)")).toBeDefined();
+    expect(screen.getByText("((floor + buffer) x gas limit)")).toBeDefined();
   });
 
-  it("moves the fee when the config moves (20000 × 2000 = 40,000,000 ANU)", () => {
-    render(<ConfigTab state={withConfig({ gasPriceAnu: 20000, gasLimit: 2000 })} onChange={vi.fn()} />);
-    expect(screen.getByText(/40,000,000 ANU/)).toBeDefined();
+  it("moves the fee when the config moves ((10000 + 500) × 2000 = 21,000,000 ANU)", () => {
+    render(
+      <ConfigTab
+        state={withConfig({ gasPriceBufferAnu: 500, gasLimit: 2000 })}
+        onChange={vi.fn()}
+        liveFloorAnu={10000}
+      />,
+    );
+    expect(screen.getByText(/21,000,000 ANU/)).toBeDefined();
+  });
+
+  it("shows a loading placeholder for the fee when the live floor hasn't resolved", () => {
+    render(<ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} />);
+    expect(screen.getByText("…")).toBeDefined();
+  });
+});
+
+describe("ConfigTab — live network floor display", () => {
+  it("shows the live floor when provided, and a loading placeholder when not", () => {
+    const { unmount } = render(
+      <ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} liveFloorAnu={10069} />,
+    );
+    expect(screen.getByText(/10,069 ANU/)).toBeDefined();
+    unmount();
+
+    render(<ConfigTab state={makeEmptyBuilderState()} onChange={vi.fn()} />);
+    expect(screen.getByText("Loading…")).toBeDefined();
   });
 });

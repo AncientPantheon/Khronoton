@@ -176,6 +176,50 @@ describe("commitCodexCronoton — validation reject paths", () => {
       ),
     ).toThrow(/server-resolver/);
   });
+
+  it("rejects a NEGATIVE gasPriceBufferAnu — a buffer is a premium, never a discount", () => {
+    expect(() =>
+      commitCodexCronoton(
+        validInput({
+          config: { chainId: "0", gasPrice: 1, gasPriceBufferAnu: -1, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        }),
+        { now: new Date(), db },
+      ),
+    ).toThrow(/gasPriceBufferAnu/);
+  });
+
+  it("rejects a non-finite gasPriceBufferAnu (NaN/Infinity)", () => {
+    expect(() =>
+      commitCodexCronoton(
+        validInput({
+          config: { chainId: "0", gasPrice: 1, gasPriceBufferAnu: NaN, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        }),
+        { now: new Date(), db },
+      ),
+    ).toThrow(/gasPriceBufferAnu/);
+    expect(() =>
+      commitCodexCronoton(
+        validInput({
+          config: { chainId: "0", gasPrice: 1, gasPriceBufferAnu: Infinity, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        }),
+        { now: new Date(), db },
+      ),
+    ).toThrow(/gasPriceBufferAnu/);
+  });
+
+  it("accepts an absent or zero gasPriceBufferAnu", () => {
+    expect(() =>
+      commitCodexCronoton(validInput(), { now: new Date(), db }),
+    ).not.toThrow();
+    expect(() =>
+      commitCodexCronoton(
+        validInput({
+          config: { chainId: "0", gasPrice: 1, gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: false, ttl: 600 },
+        }),
+        { now: new Date(), db },
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("commitCodexCronoton — trigger-only skips the schedule engine", () => {
@@ -299,6 +343,26 @@ describe("editCodexCronoton", () => {
         { db },
       ),
     ).toThrow(AutoGasGateError);
+  });
+
+  it("rejects a NEGATIVE gasPriceBufferAnu on a config patch", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    expect(() =>
+      editCodexCronoton(
+        id,
+        {
+          config: {
+            chainId: "0",
+            gasPrice: 1,
+            gasPriceBufferAnu: -1,
+            gasLimit: 1500,
+            autoGasLimit: false,
+            ttl: 600,
+          },
+        },
+        { db },
+      ),
+    ).toThrow(/gasPriceBufferAnu/);
   });
 
   it("NEVER touches status — editing a paused row leaves it paused", () => {

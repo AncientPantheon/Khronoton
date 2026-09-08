@@ -17,7 +17,7 @@
  * calibrated gas limit is written back into builder state via `onChange` (AUTO
  * on), which also opens the AUTO-gas gate for the commit.
  */
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import { summariseSchedule } from "../../index.js";
 import type { UseExecuteActionResult } from "../../hooks/index.js";
@@ -57,6 +57,12 @@ export interface ExecuteTabProps {
    * hoisting required"). This tab no longer calls `useSimulate()` itself.
    */
   sim: UseExecuteActionResult<[envelope: SimulateEnvelope], SimulateView>;
+  /**
+   * The live network gas floor (`useLiveGasFloor()`, hoisted to `Builder.tsx`).
+   * `null`/absent while the first poll hasn't resolved yet — the gas summary
+   * line shows a loading placeholder in that state.
+   */
+  liveFloorAnu?: number | null;
 }
 
 const ROW_STYLE: CSSProperties = {
@@ -145,11 +151,25 @@ const EVENT_DRIVEN_NOTICE =
   "Event-driven — the host application fires this when its trigger condition is met; " +
   "there is no schedule.";
 
-/** The gas summary line: grouped limit @ raw price, with an AUTO suffix. */
-function gasLine(state: BuilderState): string {
+/** The gas summary line: grouped limit @ (live floor + buffer), with an AUTO suffix. */
+function gasLine(state: BuilderState, liveFloorAnu?: number | null): string {
   const c = state.config;
   const suffix = c.autoGasLimit ? " (AUTO)" : "";
-  return `${formatThousands(c.gasLimit)} @ ${c.gasPriceAnu} ANU${suffix}`;
+  const buffer = c.gasPriceBufferAnu;
+  if (liveFloorAnu == null) return `${formatThousands(c.gasLimit)} @ … ANU${suffix}`;
+  const total = liveFloorAnu + buffer;
+  // A negative buffer can only exist transiently while the operator is
+  // mid-edit — `validateConfig` blocks the commit itself — but this summary
+  // renders on every keystroke regardless, so it must never label a
+  // below-floor total as plainly "(floor)": that would read as though the
+  // shown total were the unmodified floor when it is actually less.
+  const priceLabel =
+    buffer > 0
+      ? `${formatThousands(total)} ANU (floor + ${formatThousands(buffer)})`
+      : buffer < 0
+        ? `${formatThousands(total)} ANU (floor - ${formatThousands(Math.abs(buffer))})`
+        : `${formatThousands(total)} ANU (floor)`;
+  return `${formatThousands(c.gasLimit)} @ ${priceLabel}${suffix}`;
 }
 
 /** A short label for the configured gas payer. */
@@ -208,10 +228,16 @@ export function ExecuteTab({
   committing,
   eventDrivenResolver,
   sim,
+  liveFloorAnu,
 }: ExecuteTabProps): ReactNode {
   const [banner, setBanner] = useState<ReactNode>(null);
 
-  const commit = builderToCommit(state);
+  // Neither `commit` nor `gate` depends on `liveFloorAnu` (only `gasLine`
+  // below does) — memoized so the 30s gas-floor poll tick that re-renders
+  // this component with a changed `liveFloorAnu` prop doesn't re-run
+  // `builderToCommit`'s payload/signer mapping or `canCommit`'s payload
+  // JSON-parse + full-pactCode regex scan for no reason.
+  const commit = useMemo(() => builderToCommit(state), [state]);
   const payloadKeyCount = Object.keys(commit.envelope.payload ?? {}).length;
 
   // A successful Simulate that calibrated the AUTO gas limit opens the AUTO-gas
@@ -219,7 +245,10 @@ export function ExecuteTab({
   const simulateCalibrated = Boolean(
     sim.result?.ok && typeof sim.result.calibratedGasLimit === "number",
   );
-  const gate = canCommit(state, { simulateCalibrated });
+  const gate = useMemo(
+    () => canCommit(state, { simulateCalibrated }),
+    [state, simulateCalibrated],
+  );
 
   const triggerOnly = isTriggerOnly(state);
   // The scheduler is off — and the ScheduleStep swapped for a notice — for a
@@ -275,7 +304,7 @@ export function ExecuteTab({
       <Panel style={{ marginBottom: "16px" }}>
         <div style={{ ...ROW_LABEL_STYLE, marginBottom: "4px" }}>Transaction Summary</div>
         <SummaryRow label="Chain" value={state.config.chainId} testId="summary-chain" />
-        <SummaryRow label="Gas" value={gasLine(state)} testId="summary-gas" />
+        <SummaryRow label="Gas" value={gasLine(state, liveFloorAnu)} testId="summary-gas" />
         <SummaryRow label="TTL" value={`${state.config.ttl}s`} testId="summary-ttl" />
         <SummaryRow label="Payload keys" value={String(payloadKeyCount)} testId="summary-payload" />
         <SummaryRow label="Gas payer" value={gasPayerLabel(state.gasPayer)} testId="summary-gaspayer" />

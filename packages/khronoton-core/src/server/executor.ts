@@ -74,10 +74,12 @@ interface PactBuilder {
  * the payload + pure-vs-scoped `addSigner`. Throws if no signers, and throws if
  * the injected runtime cannot supply gas meta (see {@link ChainRuntime.gasMeta}).
  *
- * The per-cronoton `config.gasPrice` is a FLOOR, not a final price: it is passed
- * to the runtime's `gasMeta`, which raises it to the chain's live minimum when
- * the stored value has gone stale. This is what lets a cronoton stored years ago
- * at the genesis default still fire today with no database migration.
+ * Every fire prices at the chain's live network floor plus
+ * `config.gasPriceBufferAnu` (default 0, ANU above the floor). `floorAnu` is
+ * always passed as `0` — there is no more stored absolute value to raise to a
+ * floor; the deprecated `config.gasPrice` is never read here at all. This is
+ * what lets a cronoton stored years ago at the genesis default still fire
+ * today with no database migration.
  */
 function buildTransaction(
   runtime: ChainRuntime,
@@ -114,7 +116,10 @@ function buildTransaction(
         "Upgrade the injected runtime adapter (see blockchain/stoachain.ts).",
     );
   }
-  const { creationTime, gasPrice } = runtime.gasMeta(definition.config.gasPrice);
+  const { creationTime, gasPrice } = runtime.gasMeta(
+    0,
+    definition.config.gasPriceBufferAnu ?? 0,
+  );
 
   builder
     .setMeta({

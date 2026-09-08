@@ -56,8 +56,22 @@ export interface CodexGasPayer {
 /** Transaction config — chain, gas, ttl. `gasPrice` is in ANU. */
 export interface CodexTxConfig {
   readonly chainId: string;
-  /** Gas price in ANU (converted to STOA via `anuToStoa` at build time). */
+  /**
+   * @deprecated Superseded by `gasPriceBufferAnu`. Kept only so historical rows'
+   * `config_json` still parses; no longer used to price new fires — see
+   * `server/executor.ts`'s `buildTransaction`, which always prices from the live
+   * network floor plus `gasPriceBufferAnu`.
+   */
   readonly gasPrice: number;
+  /**
+   * ANU to pay ABOVE the live network floor at fire time. 0 (default, and the
+   * value used when absent — e.g. every pre-migration row) = exactly the floor.
+   * The only gas-price knob an operator sets — never an absolute price, since
+   * the floor rises roughly every 3h and any absolute number set today is
+   * guaranteed to go stale. Absence self-heals a historical row with no DB
+   * migration.
+   */
+  readonly gasPriceBufferAnu?: number;
   readonly gasLimit: number;
   /** When true, the executor calibrates the gas limit from a dirty-read. */
   readonly autoGasLimit: boolean;

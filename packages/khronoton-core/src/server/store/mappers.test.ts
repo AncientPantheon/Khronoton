@@ -5,9 +5,14 @@ import {
   rowExternalFireable,
   rowRuntimeArgKeys,
   assertAutoGasGate,
+  assertGasPriceBufferAnu,
   manualBatchView,
 } from './mappers.js';
-import { AutoGasGateError, TerminalCronotonError } from './errors.js';
+import {
+  AutoGasGateError,
+  CodexCronotonValidationError,
+  TerminalCronotonError,
+} from './errors.js';
 import type {
   CodexCronotonRow,
   CodexManualBatchRow,
@@ -155,6 +160,44 @@ describe('assertAutoGasGate (AUTO-gas commit-gate)', () => {
 
   it('accepts autoGasLimit=false regardless (manual gas is always concrete)', () => {
     expect(() => assertAutoGasGate(cfg({ gasLimit: 1500, autoGasLimit: false }))).not.toThrow();
+  });
+});
+
+describe('assertGasPriceBufferAnu', () => {
+  const cfg = (over: Partial<CodexTxConfig>): CodexTxConfig => ({
+    chainId: '0',
+    gasPrice: 1,
+    gasLimit: 1500,
+    autoGasLimit: false,
+    ttl: 600,
+    ...over,
+  });
+
+  it('accepts an ABSENT gasPriceBufferAnu (every pre-migration row)', () => {
+    expect(() => assertGasPriceBufferAnu(cfg({}))).not.toThrow();
+  });
+
+  it('accepts gasPriceBufferAnu = 0 (no premium)', () => {
+    expect(() => assertGasPriceBufferAnu(cfg({ gasPriceBufferAnu: 0 }))).not.toThrow();
+  });
+
+  it('accepts a positive gasPriceBufferAnu', () => {
+    expect(() => assertGasPriceBufferAnu(cfg({ gasPriceBufferAnu: 500 }))).not.toThrow();
+  });
+
+  it('rejects a NEGATIVE gasPriceBufferAnu — a buffer is a premium, never a discount', () => {
+    expect(() => assertGasPriceBufferAnu(cfg({ gasPriceBufferAnu: -1 }))).toThrow(
+      CodexCronotonValidationError,
+    );
+  });
+
+  it('rejects a non-finite gasPriceBufferAnu (NaN/Infinity)', () => {
+    expect(() => assertGasPriceBufferAnu(cfg({ gasPriceBufferAnu: NaN }))).toThrow(
+      CodexCronotonValidationError,
+    );
+    expect(() => assertGasPriceBufferAnu(cfg({ gasPriceBufferAnu: Infinity }))).toThrow(
+      CodexCronotonValidationError,
+    );
   });
 });
 

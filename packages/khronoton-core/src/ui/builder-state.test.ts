@@ -78,7 +78,7 @@ describe("makeEmptyBuilderState defaults", () => {
     expect(s.pactCode).toBe("");
     expect(s.config).toEqual({
       chainId: "0",
-      gasPriceAnu: 10000,
+      gasPriceBufferAnu: 0,
       gasLimit: 1500,
       autoGasLimit: false,
       ttl: 600,
@@ -118,22 +118,36 @@ describe("makeEmptyBuilderState defaults", () => {
 });
 
 describe("maxTxFee", () => {
-  it("derives gas price x gas limit so the read-only fee display stays authoritative", () => {
-    expect(maxTxFee(makeEmptyBuilderState().config)).toBe(15_000_000);
-    expect(maxTxFee({ ...makeEmptyBuilderState().config, gasLimit: 2500, gasPriceAnu: 20000 })).toBe(
-      50_000_000,
-    );
+  it("derives (live floor + buffer) x gas limit so the read-only fee display stays authoritative", () => {
+    expect(maxTxFee(makeEmptyBuilderState().config, 10000)).toBe(15_000_000);
+    expect(
+      maxTxFee(
+        { ...makeEmptyBuilderState().config, gasLimit: 2000, gasPriceBufferAnu: 500 },
+        10000,
+      ),
+    ).toBe(21_000_000);
+  });
+
+  it("returns null while the live floor has not resolved yet", () => {
+    expect(maxTxFee(makeEmptyBuilderState().config, null)).toBeNull();
   });
 });
 
 describe("builderToCommit — envelope config + gas payer", () => {
-  it("maps gasPriceAnu back to the store's gasPrice field losslessly", () => {
+  it("maps gasPriceBufferAnu into the envelope config, with gasPrice as a deprecated 0 placeholder", () => {
     const s = committableState();
-    s.config = { chainId: "5", gasPriceAnu: 12345, gasLimit: 2000, autoGasLimit: true, ttl: 900 };
+    s.config = {
+      chainId: "5",
+      gasPriceBufferAnu: 12345,
+      gasLimit: 2000,
+      autoGasLimit: true,
+      ttl: 900,
+    };
     const { config } = builderToCommit(s).envelope;
     expect(config).toEqual({
       chainId: "5",
-      gasPrice: 12345,
+      gasPrice: 0,
+      gasPriceBufferAnu: 12345,
       gasLimit: 2000,
       autoGasLimit: true,
       ttl: 900,
@@ -299,30 +313,26 @@ describe("validateConfig", () => {
     expect(validateConfig(hi)).toContain("TTL must be between 60 and 86400 seconds.");
   });
 
-  it("rejects a gas price below the 10000 ANU protocol floor", () => {
+  it("rejects a negative priority buffer", () => {
     const s = makeEmptyBuilderState();
-    s.config.gasPriceAnu = 9999;
-    expect(validateConfig(s)).toContain(
-      "Gas price must be at least 10000 ANU (the protocol floor).",
-    );
+    s.config.gasPriceBufferAnu = -1;
+    expect(validateConfig(s)).toContain("Priority buffer cannot be negative.");
   });
 
-  it("rejects a gas price below an injected LIVE floor, naming that floor", () => {
-    // The 10000 default is the GENESIS floor and the chain's minimum rises from
-    // it over time, so a form validated only against the static constant happily
-    // accepts an already-underpriced price. A caller that knows the live floor
-    // passes it in.
-    const s = makeEmptyBuilderState();
-    s.config.gasPriceAnu = 10000;
-    expect(validateConfig(s, { minGasPriceAnu: 10500 })).toContain(
-      "Gas price must be at least 10500 ANU (the protocol floor).",
-    );
+  it("accepts a zero buffer", () => {
+    expect(validateConfig(makeEmptyBuilderState())).toEqual([]);
   });
 
-  it("accepts a gas price at or above the injected live floor", () => {
+  it("rejects a NaN priority buffer — NaN < 0 is false, so this needs its own finiteness check", () => {
     const s = makeEmptyBuilderState();
-    s.config.gasPriceAnu = 10500;
-    expect(validateConfig(s, { minGasPriceAnu: 10500 })).toEqual([]);
+    s.config.gasPriceBufferAnu = NaN;
+    expect(validateConfig(s)).toContain("Priority buffer cannot be negative.");
+  });
+
+  it("rejects a non-finite priority buffer (Infinity)", () => {
+    const s = makeEmptyBuilderState();
+    s.config.gasPriceBufferAnu = Infinity;
+    expect(validateConfig(s)).toContain("Priority buffer cannot be negative.");
   });
 
   it("rejects a non-positive gas limit", () => {
@@ -518,15 +528,31 @@ describe("detailToBuilderState — edit rehydration", () => {
     });
   });
 
-  it("maps stored gasPrice back to gasPriceAnu and preserves the rest of config", () => {
+  it("defaults gasPriceBufferAnu to 0 for a pre-migration row (no stored buffer)", () => {
     const s = detailToBuilderState(sampleRow());
     expect(s.config).toEqual({
       chainId: "2",
-      gasPriceAnu: 20000,
+      gasPriceBufferAnu: 0,
       gasLimit: 2500,
       autoGasLimit: true,
       ttl: 1200,
     });
+  });
+
+  it("rehydrates a stored gasPriceBufferAnu when present", () => {
+    const s = detailToBuilderState(
+      sampleRow({
+        config_json: JSON.stringify({
+          chainId: "2",
+          gasPrice: 20000,
+          gasPriceBufferAnu: 750,
+          gasLimit: 2500,
+          autoGasLimit: true,
+          ttl: 1200,
+        }),
+      }),
+    );
+    expect(s.config.gasPriceBufferAnu).toBe(750);
   });
 
   it("preserves serverResolver and the gas-station payer with its signing key", () => {
@@ -593,7 +619,8 @@ describe("detailToBuilderState — edit rehydration", () => {
 
   it("round-trips definition fields back through builderToCommit (raw payload preserved)", () => {
     const env = builderToCommit(detailToBuilderState(sampleRow())).envelope;
-    expect(env.config.gasPrice).toBe(20000);
+    expect(env.config.gasPrice).toBe(0);
+    expect(env.config.gasPriceBufferAnu).toBe(0);
     expect(env.payload).toEqual({
       amount: 1.5,
       ks: { keys: ["a".repeat(64)], pred: "keys-all" },

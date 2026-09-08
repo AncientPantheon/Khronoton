@@ -200,4 +200,52 @@ describe("createStoachainRuntime — gasMeta (the live gas floor seam)", () => {
     expect(mockAnuToStoaNumber).toHaveBeenCalledWith(10500);
     expect(mockAnuToStoa).not.toHaveBeenCalled();
   });
+
+  it("omitting bufferAnu behaves exactly as before (0.9.0 regression pin)", async () => {
+    const rt = await createStoachainRuntime();
+    expect(rt.gasMeta!(10000)).toEqual({
+      creationTime: mockNowS,
+      gasPrice: Number("0.000000010500"),
+    });
+  });
+
+  it("sums floor+buffer in ANU before the ONE conversion — proves the precision fix", async () => {
+    const rt = await createStoachainRuntime();
+    // bufferAnu 100 (not 500): with this file's own mockAnuToStoaNumber
+    // formula, `mockAnuToStoaNumber(10500) + mockAnuToStoaNumber(500)` happens
+    // to be bit-identical to the single-conversion form for THIS pair (500
+    // does not land in the ~1-in-5 divergent set the design doc measured for
+    // the real anuToStoaNumber), so it can't distinguish a correct
+    // implementation from the buggy two-call one. 100 does diverge under this
+    // mock (verified: mockAnuToStoaNumber(10600) !==
+    // mockAnuToStoaNumber(10500) + mockAnuToStoaNumber(100)), so it is the
+    // value that actually exercises the regression this test exists to pin.
+    const out = rt.gasMeta!(10000, 100);
+    // The correct behaviour: ONE conversion of the pre-summed ANU total.
+    expect(out.gasPrice).toBe(mockAnuToStoaNumber(10500 + 100));
+    // The bug this pins against: summing two independently-converted STOA
+    // floats produces a different serialized value than the single-conversion
+    // form above — asserting inequality is what actually catches a regression
+    // back to the buggy two-call form.
+    expect(out.gasPrice).not.toBe(
+      mockAnuToStoaNumber(10500) + mockAnuToStoaNumber(100),
+    );
+  });
+
+  it("clamps a NEGATIVE buffer to 0 — never prices below the live floor", async () => {
+    const rt = await createStoachainRuntime();
+    // A negative buffer must never be able to pull the shipped price below
+    // the live floor: it is treated as no premium at all, not a discount.
+    expect(rt.gasMeta!(0, -500)).toEqual({
+      creationTime: mockNowS,
+      gasPrice: mockAnuToStoaNumber(10500),
+    });
+  });
+
+  it("clamps a non-finite buffer (NaN/Infinity) to 0", async () => {
+    const rt = await createStoachainRuntime();
+    expect(rt.gasMeta!(0, NaN).gasPrice).toBe(mockAnuToStoaNumber(10500));
+    expect(rt.gasMeta!(0, Infinity).gasPrice).toBe(mockAnuToStoaNumber(10500));
+    expect(rt.gasMeta!(0, -Infinity).gasPrice).toBe(mockAnuToStoaNumber(10500));
+  });
 });
