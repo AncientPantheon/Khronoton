@@ -95,6 +95,26 @@ export interface ListenResult {
 /** A network client bound to a single Pact endpoint URL. */
 export interface ChainClient {
   dirtyRead(tx: unknown): Promise<DirtyReadResult>;
+  /**
+   * `local` with `{ preflight: true, signatureVerification: false }` — measures
+   * the TRUE gas a transaction will consume, including the transaction-size
+   * charge that a plain `dirtyRead` (execution gas only) omits. Optional so the
+   * package stays non-breaking for any custom `ChainClient`; the executor HARD
+   * THROWS when it's absent on an AUTO-gas fire — a silent fallback to the
+   * inaccurate `dirtyRead` measurement would ship the exact over-reservation bug
+   * this capability exists to fix (mirrors `ChainRuntime.gasMeta`'s precedent).
+   * A MANUAL-gas fire never needs this and is unaffected by its absence.
+   */
+  preflightRead?(tx: unknown): Promise<DirtyReadResult>;
+  /**
+   * The live block gas limit, read from the node. Optional and BEST-EFFORT —
+   * unlike `preflightRead`, a stale/failed read here only degrades the
+   * simulate-at-ceiling sizing and the refuse-unmineable threshold, since the
+   * real chainweb node is still the authoritative validator of what actually
+   * fits; the executor falls back to `Config.autoGasCeiling`/`AUTO_GAS_CEILING`
+   * on any failure or absence, matching OuronetUI's own documented choice here.
+   */
+  getBlockGasLimit?(): Promise<number>;
   submit(tx: unknown): Promise<{ requestKey: string }>;
   listen(desc: unknown): Promise<ListenResult>;
 }

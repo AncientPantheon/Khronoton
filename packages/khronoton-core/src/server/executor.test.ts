@@ -14,7 +14,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { executeCodexTransaction } from "./executor.js";
 import type { ExecutorCtx } from "./executor.js";
-import type { ChainRuntime, KeyResolver } from "./seams.js";
+import type { ChainRuntime, ChainClient, KeyResolver } from "./seams.js";
+import { AUTO_GAS_CEILING } from "./seams.js";
 import type { CodexTxDefinition } from "./types.js";
 
 // ── recorders for the fake Pact.builder chain ───────────────────────────────
@@ -72,11 +73,17 @@ const fakePactBuilder = {
   },
 };
 
-// ── client mock (dirtyRead / submit / listen) ───────────────────────────────
+// ── client mock (dirtyRead / preflightRead / submit / listen) ──────────────
 const dirtyRead = vi.fn();
+const preflightRead = vi.fn();
 const submit = vi.fn();
 const listen = vi.fn();
-const createClient = vi.fn((..._a: unknown[]) => ({ dirtyRead, submit, listen }));
+const createClient = vi.fn((..._a: unknown[]) => ({
+  dirtyRead,
+  submit,
+  listen,
+  preflightRead,
+}));
 
 // ── gas + sign + verify stubs ───────────────────────────────────────────────
 const calculateAutoGasLimit = vi.fn((g: number) => g * 2);
@@ -177,7 +184,7 @@ beforeEach(() => {
   });
   isSignedTransaction.mockReturnValue(true);
   getPactUrl.mockImplementation((c: string) => `https://node/${c}`);
-  createClient.mockReturnValue({ dirtyRead, submit, listen });
+  createClient.mockReturnValue({ dirtyRead, submit, listen, preflightRead });
   universalSignTransaction.mockResolvedValue({ cmd: "SIGNED", sigs: [{ sig: "x" }] });
   getKeyPairByPublicKey.mockResolvedValue({
     publicKey: PUB_A,
@@ -185,6 +192,7 @@ beforeEach(() => {
     seedType: "koala",
   });
   dirtyRead.mockResolvedValue({ result: { status: "success", data: "OK" }, gas: 700 });
+  preflightRead.mockResolvedValue({ result: { status: "success", data: "OK" }, gas: 700 });
   submit.mockResolvedValue({ requestKey: "RK-1" });
   listen.mockResolvedValue({ result: { status: "success", data: "DONE" }, reqKey: "RK-1" });
 });
@@ -288,7 +296,7 @@ describe("executeCodexTransaction — simulate mode", () => {
   });
 
   it("autoGasLimit → calibrated gas is calculateAutoGasLimit(700) === 1400", async () => {
-    dirtyRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
     const res = await executeCodexTransaction(
       baseDef({
         config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
@@ -298,6 +306,10 @@ describe("executeCodexTransaction — simulate mode", () => {
     );
     expect(calculateAutoGasLimit).toHaveBeenCalledWith(700);
     expect(res.mode === "simulate" && res.calibratedGasLimit).toBe(1400);
+    // AUTO-gas fires calibrate from the accurate preflight measurement, never
+    // the old execution-only dirtyRead figure.
+    expect(preflightRead).toHaveBeenCalled();
+    expect(dirtyRead).not.toHaveBeenCalled();
   });
 
   it("dirty-read failure → structured failure result, no throw, no submit", async () => {
@@ -402,7 +414,7 @@ describe("executeCodexTransaction — fire mode", () => {
   });
 
   it("autoGasLimit fire → rebuilds so the last setMeta.gasLimit === 1400", async () => {
-    dirtyRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
     await executeCodexTransaction(
       baseDef({
         config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
@@ -414,6 +426,10 @@ describe("executeCodexTransaction — fire mode", () => {
     const metas = builderCalls.filter((c) => c.method === "setMeta");
     const lastMeta = metas[metas.length - 1].args[0] as { gasLimit: number };
     expect(lastMeta.gasLimit).toBe(1400);
+    // AUTO-gas fires calibrate from the accurate preflight measurement, never
+    // the old execution-only dirtyRead figure.
+    expect(preflightRead).toHaveBeenCalled();
+    expect(dirtyRead).not.toHaveBeenCalled();
   });
 });
 
@@ -488,7 +504,7 @@ describe("executeCodexTransaction — REQ-23 504/derived-request-key recovery", 
 
 describe("executeCodexTransaction — FIX 1 config.autoGasCeiling override", () => {
   it("injected autoGasCeiling is the gasLimit of the FIRST (pre-flight) build", async () => {
-    dirtyRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
     await executeCodexTransaction(
       baseDef({
         config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
@@ -784,5 +800,194 @@ describe("executeCodexTransaction — runtime WITHOUT the gasMeta capability", (
     await expect(
       executeCodexTransaction(baseDef(), "simulate", legacyCtx()),
     ).rejects.toThrow(/gasMeta/);
+  });
+});
+
+// ── auto-gas: live block ceiling ────────────────────────────────────────────
+// The bug this pins: the ceiling used to be a hardcoded AUTO_GAS_CEILING
+// (StoaChain's own limit, wrong for chainweb's 1.6M default or Kadena
+// mainnet's 150k). resolveCeiling must prefer a live client.getBlockGasLimit()
+// read, falling back to the static constant only when that capability is
+// absent or fails.
+describe("executeCodexTransaction — live block gas limit", () => {
+  it("resolves the ceiling via getBlockGasLimit when no config override is set", async () => {
+    const liveRuntime: ChainRuntime = {
+      ...mockRuntime,
+      createClient: vi.fn(() => ({
+        dirtyRead,
+        submit,
+        listen,
+        preflightRead,
+        getBlockGasLimit: vi.fn(async () => 1_600_000),
+      })),
+    };
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      { runtime: liveRuntime, resolver: mockResolver },
+    );
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    const firstMeta = metas[0].args[0] as { gasLimit: number };
+    expect(firstMeta.gasLimit).toBe(1_600_000);
+  });
+
+  it("falls back to AUTO_GAS_CEILING when getBlockGasLimit is absent", async () => {
+    // The file's shared mockRuntime/createClient fixture predates
+    // getBlockGasLimit — a regression pin that an un-upgraded runtime's
+    // pre-existing default ceiling behavior is unchanged by this task.
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      ctx,
+    );
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    const firstMeta = metas[0].args[0] as { gasLimit: number };
+    expect(firstMeta.gasLimit).toBe(AUTO_GAS_CEILING);
+  });
+
+  it.each([NaN, 0, -1, Infinity])(
+    "falls back to AUTO_GAS_CEILING when getBlockGasLimit resolves %s (not a sane ceiling)",
+    async (badValue) => {
+      // NaN in particular is the dangerous case: `typeof NaN === "number"` is
+      // true, and `gasUsed > NaN` is ALWAYS false, so trusting it verbatim
+      // would silently defeat the refuse-unmineable check below rather than
+      // falling back as `ChainClient.getBlockGasLimit`'s own doc promises.
+      const liveRuntime: ChainRuntime = {
+        ...mockRuntime,
+        createClient: vi.fn(() => ({
+          dirtyRead,
+          submit,
+          listen,
+          preflightRead,
+          getBlockGasLimit: vi.fn(async () => badValue),
+        })),
+      };
+      await executeCodexTransaction(
+        baseDef({
+          config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+        }),
+        "simulate",
+        { runtime: liveRuntime, resolver: mockResolver },
+      );
+      const metas = builderCalls.filter((c) => c.method === "setMeta");
+      const firstMeta = metas[0].args[0] as { gasLimit: number };
+      expect(firstMeta.gasLimit).toBe(AUTO_GAS_CEILING);
+    },
+  );
+
+  it("falls back to AUTO_GAS_CEILING when ctx.config.autoGasCeiling itself is NaN, never trusting it verbatim", async () => {
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      { runtime: mockRuntime, resolver: mockResolver, config: { autoGasCeiling: NaN } },
+    );
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    const firstMeta = metas[0].args[0] as { gasLimit: number };
+    expect(firstMeta.gasLimit).toBe(AUTO_GAS_CEILING);
+  });
+
+  it("constructs the ChainClient exactly ONCE per simulate/fire — never a second client for ceiling resolution", async () => {
+    // `resolveCeiling` takes the already-constructed `client` as a parameter
+    // specifically so it never calls `runtime.createClient` itself; a
+    // regression that reintroduced a second, independent construction call
+    // would otherwise be invisible to every dirtyRead/submit/listen/
+    // preflightRead assertion in this file, since they all alias the same
+    // shared spies regardless of call count.
+    createClient.mockClear();
+    await executeCodexTransaction(baseDef(), "simulate", ctx);
+    expect(createClient).toHaveBeenCalledTimes(1);
+
+    createClient.mockClear();
+    await executeCodexTransaction(baseDef(), "fire", ctx);
+    expect(createClient).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── refuse the unmineable case ──────────────────────────────────────────────
+// A transaction whose measured gas exceeds the resolved block ceiling must be
+// refused with a structured error BEFORE any calibration/rebuild or submit —
+// never silently capped, never submitted — for both an AUTO-gas fire and a
+// manually-set-limit fire.
+describe("executeCodexTransaction — refuse the unmineable case", () => {
+  it("AUTO-gas simulate refuses when gasUsed exceeds the ceiling — never returns a calibratedGasLimit", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 3_000_000 });
+    const res = await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/over the block limit/);
+    expect(res.calibratedGasLimit).toBeUndefined();
+  });
+
+  it("MANUAL-gas fire also refuses when measured gas exceeds the ceiling", async () => {
+    dirtyRead.mockResolvedValue({ result: { status: "success" }, gas: 3_000_000 });
+    const res = await executeCodexTransaction(
+      baseDef({ scheduleKind: "one-time" }),
+      "fire",
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+    expect(res.error).toMatch(/over the block limit/);
+    expect(res.terminalIntent).toEqual({ status: "error", clearNextFire: true });
+  });
+});
+
+describe("executeCodexTransaction — AUTO-gas fire on a runtime WITHOUT preflightRead", () => {
+  // Strips preflightRead from the CLIENT this fixture's createClient returns
+  // (not the whole runtime) — a runtime that hasn't upgraded its ChainClient
+  // adapter, mirroring the existing "runtime WITHOUT the gasMeta capability"
+  // describe block above.
+  function legacyCtx(): ExecutorCtx {
+    const legacyRuntime: ChainRuntime = {
+      ...mockRuntime,
+      createClient: (..._a: unknown[]) => {
+        const client: Partial<ChainClient> = { dirtyRead, submit, listen, preflightRead };
+        delete client.preflightRead;
+        return client as ChainClient;
+      },
+    };
+    return { runtime: legacyRuntime, resolver: mockResolver };
+  }
+
+  it("AUTO-gas fire on this legacy client returns a structured failure, never submits", async () => {
+    const res = await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "fire",
+      legacyCtx(),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/preflightRead/);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("AUTO-gas simulate on it rejects with a throw mentioning preflightRead", async () => {
+    await expect(
+      executeCodexTransaction(
+        baseDef({
+          config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+        }),
+        "simulate",
+        legacyCtx(),
+      ),
+    ).rejects.toThrow(/preflightRead/);
+  });
+
+  it("MANUAL-gas fire on the SAME legacy client succeeds exactly as today", async () => {
+    const res = await executeCodexTransaction(baseDef(), "fire", legacyCtx());
+    expect(res.ok).toBe(true);
+    expect(dirtyRead).toHaveBeenCalled();
   });
 });

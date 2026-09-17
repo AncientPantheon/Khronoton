@@ -136,6 +136,12 @@ describe("Builder — create round-trip", () => {
       target: { value: "k:alice" },
     });
 
+    // AUTO gas is the default (T2-builder-state) and this test doesn't select a
+    // server resolver or run Simulate, so the commit gate stays closed on AUTO gas
+    // until an explicit manual override — switch to manual on the Config tab first.
+    fireEvent.click(screen.getByRole("tab", { name: "Config" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch to manual" }));
+
     // Cross to Execute and fire the (now-open) commit gate.
     fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
     fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
@@ -147,6 +153,7 @@ describe("Builder — create round-trip", () => {
       ...makeEmptyBuilderState(),
       name: "Nightly",
       gasPayer: { type: "gas-station", signingKey: "k:alice" },
+      config: { ...makeEmptyBuilderState().config, autoGasLimit: false },
     });
     expect(commit.mock.calls[0][0]).toEqual(expected);
 
@@ -374,8 +381,11 @@ describe("Builder — edit rehydration + patch", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
     expect(screen.getByTestId("summary-schedule").textContent).toContain("09:30");
 
-    // Saving issues a PATCH (edit) to the bound id — NOT a create POST.
-    fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
+    // Saving issues a PATCH (edit) to the bound id — NOT a create POST. In edit
+    // mode BOTH the SaveBar and ExecuteTab's own commit button now read "Save
+    // changes" (T1b/T1d), so the Execute tab shows two matches — click the
+    // always-visible SaveBar's (rendered first in DOM, present on every tab).
+    fireEvent.click(screen.getAllByRole("button", { name: "Save changes" })[0]);
     await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
     expect(edit.mock.calls[0][0]).toBe("cr_7");
     expect(edit.mock.calls[0][1]).toEqual(builderToCommit(detailToBuilderState(row)));
@@ -471,9 +481,12 @@ describe("Builder — switching editId on a mounted instance", () => {
       ),
     );
 
-    // Saving PATCHes cr_9 with cr_9's rehydrated body — never cr_7's.
+    // Saving PATCHes cr_9 with cr_9's rehydrated body — never cr_7's. In edit
+    // mode BOTH the SaveBar and ExecuteTab's own commit button now read "Save
+    // changes" (T1b/T1d), so the Execute tab shows two matches — click the
+    // always-visible SaveBar's (rendered first in DOM, present on every tab).
     fireEvent.click(screen.getByRole("tab", { name: "Execute" }));
-    fireEvent.click(screen.getByRole("button", { name: "Commit Codex Cronoton" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Save changes" })[0]);
     await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
     expect(edit.mock.calls[0][0]).toBe("cr_9");
     expect(edit.mock.calls[0][1]).toEqual(builderToCommit(detailToBuilderState(row9)));
@@ -519,6 +532,85 @@ describe("Builder — live gas floor threaded to Config + Execute", () => {
     await waitFor(() =>
       expect(screen.getByTestId("summary-gas").textContent).toContain("12,345"),
     );
+  });
+});
+
+describe("Builder — SaveBar wiring (edit-mode discoverable Save)", () => {
+  it("renders SaveBar in edit mode, not in create mode", async () => {
+    const row = seedRow();
+    const get = vi.fn(async () => ({ ok: true as const, codexCronoton: row }));
+    const adapter = makeAdapter({ get: get as unknown as KhronotonAdapter["get"] });
+
+    mount(adapter, { editId: "cr_7" });
+
+    // Wait for the row to rehydrate so the form (and SaveBar) is mounted.
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("Daily payout") as HTMLInputElement).value).toBe(
+        "Weekly settle",
+      ),
+    );
+
+    // Visible on every tab — the bar renders above the tabs, not inside Execute.
+    // (On the Execute tab specifically, ExecuteTab's OWN commit button is also
+    // edit-aware and reads "Save changes" too — T1b — so at least one match is
+    // the right assertion there, not exactly one.)
+    for (const tabName of ["Config", "Payload", "Gas Payer", "Signatures", "Execute"]) {
+      fireEvent.click(screen.getByRole("tab", { name: tabName }));
+      expect(screen.getAllByRole("button", { name: "Save changes" }).length).toBeGreaterThanOrEqual(1);
+    }
+
+    cleanup();
+
+    // Create mode: no SaveBar at all.
+    mount(makeAdapter());
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+  });
+
+  it("SaveBar does not render (and cannot fire a stray Simulate) until the edited row has loaded", async () => {
+    // Before `adapter.get` resolves, `state` is still `makeEmptyBuilderState()`
+    // — SaveBar must not be mounted (let alone clickable) against that blank
+    // default, or a Simulate click during the load window would dry-run the
+    // wrong transaction entirely (nothing to do with the row being edited).
+    const row = seedRow();
+    let resolveGet!: (v: { ok: true; codexCronoton: typeof row }) => void;
+    const get = vi.fn(
+      () => new Promise((resolve) => { resolveGet = resolve; }),
+    );
+    const adapter = makeAdapter({ get: get as unknown as KhronotonAdapter["get"] });
+
+    mount(adapter, { editId: "cr_7" });
+
+    // Still loading: neither the form nor SaveBar exists yet.
+    expect(screen.getByText("Loading cronoton…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Simulate" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+
+    // Resolve the load — SaveBar appears once (and only once) the row has rehydrated.
+    resolveGet({ ok: true, codexCronoton: row });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Simulate" })).toBeTruthy(),
+    );
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeTruthy();
+  });
+
+  it("a non-admin access tier never sees an enabled Save in edit mode", async () => {
+    const row = seedRow();
+    const get = vi.fn(async () => ({ ok: true as const, codexCronoton: row }));
+    const adapter = makeAdapter({ get: get as unknown as KhronotonAdapter["get"] });
+    const NON_ADMIN: Access = { tier: "non-admin" };
+
+    mount(adapter, { editId: "cr_7", access: NON_ADMIN });
+
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("Daily payout") as HTMLInputElement).value).toBe(
+        "Weekly settle",
+      ),
+    );
+
+    // The seeded row is a fully committable manual-gas config, so a non-admin
+    // access check — not the gate — is what's proven disabled here.
+    const saveButton = screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
   });
 });
 

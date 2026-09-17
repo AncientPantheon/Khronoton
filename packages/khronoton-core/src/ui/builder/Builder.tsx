@@ -41,8 +41,10 @@ import { PayloadTab } from "./PayloadTab.js";
 import { GasPayerTab } from "./GasPayerTab.js";
 import { SignaturesTab } from "./SignaturesTab.js";
 import { ExecuteTab } from "./ExecuteTab.js";
+import { SaveBar } from "./SaveBar.js";
 import { TxMeters } from "./TxMeters.js";
 import { useLiveGasFloor } from "./live-gas-floor.js";
+import { useCommitGate } from "./use-commit-gate.js";
 
 /** Default `<meta name="robots">` for the builder route (host-overridable). */
 export const DEFAULT_BUILDER_ROBOTS = "noindex,nofollow";
@@ -115,7 +117,7 @@ const EDIT_BANNER: CSSProperties = {
  */
 export function Builder({
   editId,
-  access: _access,
+  access,
   onDone,
   robots = DEFAULT_BUILDER_ROBOTS,
 }: BuilderProps): ReactNode {
@@ -240,6 +242,12 @@ export function Builder({
   // other (see `live-gas-floor.ts`).
   const liveFloorAnu = useLiveGasFloor();
 
+  // Computed ONCE here (not independently inside SaveBar AND ExecuteTab) so
+  // `builderToCommit`'s payload/signer mapping and `canCommit`'s payload
+  // JSON-parse + full-pactCode regex scan don't run twice per keystroke when
+  // both are mounted simultaneously (edit mode, Execute tab active).
+  const { commit, gate } = useCommitGate(state, sim);
+
   // Stable identity (the functional `setState` form needs no dep beyond the
   // setter, which React guarantees is stable) — `@uiw/react-codemirror`'s
   // reconfigure effect watches `onChange` by reference, so a fresh closure
@@ -254,17 +262,35 @@ export function Builder({
       <meta name="robots" content={robots} />
 
       {isEdit && (
-        <div style={EDIT_BANNER}>
-          <p style={{ margin: 0 }}>
-            Edits apply at the NEXT fire. Payload opens in raw-JSON mode. Re-run Simulate before
-            saving.
-          </p>
-          {editRow && (
-            <p style={{ margin: "0.35rem 0 0" }}>
-              Current schedule: {editRow.schedule_mode} · Status: {editRow.status}
-            </p>
+        <>
+          {/* Gated on `editReady`, not just `isEdit`: before the row has
+              loaded, `state` is still the empty default, so `commit`/`gate`
+              here would reflect a blank form rather than the cronoton being
+              edited. Rendering nothing until `editReady` (instead of, say,
+              disabling the buttons) means there is no window where an admin
+              could fire a Simulate against the wrong transaction. */}
+          {editReady && (
+            <SaveBar
+              commit={commit}
+              gate={gate}
+              sim={sim}
+              onSave={handleCommit}
+              committing={committing}
+              access={access}
+            />
           )}
-        </div>
+          <div style={EDIT_BANNER}>
+            <p style={{ margin: 0 }}>
+              Edits apply at the NEXT fire. Payload opens in raw-JSON mode. Re-run Simulate before
+              saving.
+            </p>
+            {editRow && (
+              <p style={{ margin: "0.35rem 0 0" }}>
+                Current schedule: {editRow.schedule_mode} · Status: {editRow.status}
+              </p>
+            )}
+          </div>
+        </>
       )}
 
       {editReady ? (
@@ -323,6 +349,9 @@ export function Builder({
                 eventDrivenResolver={eventDrivenResolver}
                 sim={sim}
                 liveFloorAnu={liveFloorAnu}
+                isEdit={isEdit}
+                commit={commit}
+                gate={gate}
               />
             )}
           </div>

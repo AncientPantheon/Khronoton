@@ -144,7 +144,11 @@ export function makeEmptyBuilderState(): BuilderState {
       // created at this default never underprices as the floor rises.
       gasPriceBufferAnu: 0,
       gasLimit: 1500,
-      autoGasLimit: false,
+      // AUTO is now the default per the auto-gas handoff: a fixed manual
+      // limit was the prior default's failure mode (real fires over-reserve
+      // gas wildly against a static number). Manual stays available as a
+      // deliberate toggle for the operators who want it.
+      autoGasLimit: true,
       ttl: 600,
     },
     payload: {

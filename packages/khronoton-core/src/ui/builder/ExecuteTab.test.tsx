@@ -18,6 +18,7 @@ import { useSimulate } from "../../hooks/index.js";
 import { ExecuteTab } from "./ExecuteTab.js";
 import { makeEmptyBuilderState } from "../builder-state.js";
 import type { BuilderState, SignerRow } from "../builder-state.js";
+import { useCommitGate } from "./use-commit-gate.js";
 
 afterEach(() => {
   cleanup();
@@ -49,12 +50,16 @@ function makeAdapter(overrides: Partial<KhronotonAdapter> = {}): KhronotonAdapte
   } as unknown as KhronotonAdapter;
 }
 
-/** A gas-station state with a signing key set — the minimum that clears the gate. */
+/** A gas-station state with a signing key set — the minimum that clears the gate.
+ *  Defaults to manual gas (`autoGasLimit: false`) since `makeEmptyBuilderState()`
+ *  now defaults to AUTO, which needs a Simulate before the gate opens — a caller
+ *  that passes its own `patch.config` still fully overrides this default. */
 function validState(patch: Partial<BuilderState> = {}): BuilderState {
   return {
     ...makeEmptyBuilderState(),
     name: "Daily payout",
     gasPayer: { type: "gas-station", signingKey: "k:payer" },
+    config: { ...makeEmptyBuilderState().config, autoGasLimit: false },
     ...patch,
   };
 }
@@ -73,6 +78,7 @@ function mount(
     committing?: boolean;
     eventDrivenResolver?: boolean;
     liveFloorAnu?: number | null;
+    isEdit?: boolean;
   } = {},
 ): MountResult {
   const adapter = opts.adapter ?? makeAdapter();
@@ -83,6 +89,9 @@ function mount(
   function Harness() {
     const [state, setState] = React.useState<BuilderState>(start);
     const sim = useSimulate();
+    // ExecuteTab no longer computes its own commit/gate — Builder.tsx does,
+    // once, and passes them down. This harness stands in for that.
+    const { commit, gate } = useCommitGate(state, sim);
     latest = state;
     return (
       <ExecuteTab
@@ -95,7 +104,10 @@ function mount(
         committing={opts.committing}
         eventDrivenResolver={opts.eventDrivenResolver}
         liveFloorAnu={opts.liveFloorAnu}
+        isEdit={opts.isEdit}
         sim={sim}
+        commit={commit}
+        gate={gate}
       />
     );
   }
@@ -329,5 +341,19 @@ describe("ExecuteTab — commit gate", () => {
     expect(button.disabled).toBe(true);
     fireEvent.click(button);
     expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("reads 'Save changes' / 'Saving…' in edit mode", () => {
+    mount(validState(), { isEdit: true });
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeTruthy();
+    cleanup();
+
+    mount(validState(), { isEdit: true, committing: true });
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
+  });
+
+  it("stays 'Commit Codex Cronoton' in create mode regardless of isEdit being omitted", () => {
+    mount(validState());
+    expect(screen.getByRole("button", { name: "Commit Codex Cronoton" })).toBeTruthy();
   });
 });

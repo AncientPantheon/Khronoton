@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // The five `@stoachain/*` modules the factory dynamic-imports are mocked so the
 // test exercises the adapter's own wiring (defaults, getPactUrl branch,
@@ -6,10 +6,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // the `await import()` calls. Helper names are `mock`-prefixed so vitest's
 // hoisting of `vi.mock` permits referencing them inside the factories.
 const mockPact = { builder: { execution: (code: string) => ({ code }) } };
+const mockDirtyRead = vi.fn(async () => ({ result: { status: "success" } }));
+const mockSubmit = vi.fn(async () => ({ requestKey: "rk" }));
+const mockListen = vi.fn(async () => ({ result: { status: "success" } }));
+const mockLocal = vi.fn(async () => ({
+  result: { status: "success" },
+  gas: 900,
+}));
 const mockCreateClient = vi.fn((url: string) => ({
-  dirtyRead: async () => ({ result: { status: "success" } }),
-  submit: async () => ({ requestKey: "rk" }),
-  listen: async () => ({ result: { status: "success" } }),
+  dirtyRead: mockDirtyRead,
+  submit: mockSubmit,
+  listen: mockListen,
+  local: mockLocal,
   url,
 }));
 const mockIsSignedTransaction = vi.fn((_tx: unknown) => true);
@@ -112,7 +120,11 @@ describe("createStoachainRuntime", () => {
   it("passes the mocked @stoachain runtime functions through by identity", async () => {
     const rt = await createStoachainRuntime();
     expect(rt.Pact).toBe(mockPact);
-    expect(rt.createClient).toBe(mockCreateClient);
+    // rt.createClient itself is now a THIN WRAPPER around the real
+    // client.createClient (it adds preflightRead/getBlockGasLimit), so it is
+    // no longer identical to mockCreateClient — the wrapped client's own
+    // dirtyRead/submit/listen pass-through identity is pinned separately in
+    // the "createClient wrapper" describe block below.
     expect(rt.isSignedTransaction).toBe(mockIsSignedTransaction);
     expect(rt.universalSignTransaction).toBe(mockUniversalSign);
     expect(rt.calculateAutoGasLimit).toBe(mockCalcGas);
@@ -247,5 +259,66 @@ describe("createStoachainRuntime — gasMeta (the live gas floor seam)", () => {
     expect(rt.gasMeta!(0, NaN).gasPrice).toBe(mockAnuToStoaNumber(10500));
     expect(rt.gasMeta!(0, Infinity).gasPrice).toBe(mockAnuToStoaNumber(10500));
     expect(rt.gasMeta!(0, -Infinity).gasPrice).toBe(mockAnuToStoaNumber(10500));
+  });
+});
+
+describe("createStoachainRuntime — createClient wrapper (preflightRead + getBlockGasLimit)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("preflightRead(tx) calls the mocked client's local with (tx, { preflight: true, signatureVerification: false })", async () => {
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    const tx = { cmd: "the-tx" };
+    const result = await client.preflightRead!(tx);
+    expect(mockLocal).toHaveBeenCalledWith(tx, {
+      preflight: true,
+      signatureVerification: false,
+    });
+    expect(result).toEqual({ result: { status: "success" }, gas: 900 });
+  });
+
+  it("getBlockGasLimit() resolves the nested-object-walked value from a mocked /config fetch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ nested: { blockGasLimit: 1_600_000 } }),
+      })),
+    );
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    await expect(client.getBlockGasLimit!()).resolves.toBe(1_600_000);
+  });
+
+  it("getBlockGasLimit() falls back to 2,000,000 when fetch rejects (network error), never throwing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    );
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    await expect(client.getBlockGasLimit!()).resolves.toBe(2_000_000);
+  });
+
+  it("getBlockGasLimit() falls back to 2,000,000 when fetch resolves a non-2xx response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false })),
+    );
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    await expect(client.getBlockGasLimit!()).resolves.toBe(2_000_000);
+  });
+
+  it("still delegates dirtyRead/submit/listen to the real mocked client's own methods BY IDENTITY", async () => {
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    expect(client.dirtyRead).toBe(mockDirtyRead);
+    expect(client.submit).toBe(mockSubmit);
+    expect(client.listen).toBe(mockListen);
   });
 });

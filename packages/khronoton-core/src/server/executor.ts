@@ -13,14 +13,31 @@
  *   - fire NEVER throws (F-002) — every failure returns a structured result;
  *   - the dirty-read pre-flight gate (F-001) — a failing pre-flight never submits;
  *   - AUTO-gas calibrate — build at the ceiling, rebuild + re-sign at the
- *     dirty-read-derived limit;
+ *     preflight-derived limit;
  *   - the 504/derived-request-key recovery (REQ-23) — the request key is derived
  *     from the signed command hash UP FRONT so a lost submit response or a listen
  *     timeout never discards a tx that may already be on-chain.
+ *
+ * Auto self-calibrating gas (khronoton-auto-gas) adds three more:
+ *   - AUTO-gas calibration sources its measurement from `ChainClient.preflightRead`
+ *     (the TRUE gas, including the transaction-size charge) instead of the plain
+ *     `dirtyRead` (execution gas only) — the executor HARD THROWS when
+ *     `autoGasLimit` is true and `preflightRead` is absent from the injected
+ *     runtime, mirroring the `gasMeta` hard-throw precedent above. A MANUAL-gas
+ *     fire never needs this and stays on `dirtyRead`, unaffected by its absence;
+ *   - the simulate/fire ceiling is resolved live via `resolveCeiling`: an
+ *     explicit `config.autoGasCeiling` override wins outright, else a
+ *     best-effort `client.getBlockGasLimit()` read, else the static
+ *     `AUTO_GAS_CEILING` fallback;
+ *   - refuse-unmineable — a transaction whose measured gas exceeds the resolved
+ *     ceiling is refused with a structured `{ ok: false, error }` (never a
+ *     throw, matching F-002) BEFORE any calibration/rebuild or submit, for both
+ *     AUTO and MANUAL fires.
  */
 
 import type {
   ChainRuntime,
+  ChainClient,
   KeyResolver,
   Config,
   UniversalKeypair,
@@ -52,6 +69,32 @@ export interface ExecutorCtx {
   runtime: ChainRuntime;
   resolver: KeyResolver;
   config?: Partial<Config>;
+}
+
+/** A ceiling value is only trusted if it's a genuine positive number — `NaN`
+ * passes `typeof === "number"` but every `gasUsed > ceiling` comparison
+ * against it is `false`, which would silently defeat the refuse-unmineable
+ * check below rather than falling back as documented. Applied uniformly to
+ * BOTH the config override and the live-fetched value: `ChainClient` is an
+ * injectable, chain-polyglot seam (per `seams.ts`'s own "BEST-EFFORT" doc on
+ * `getBlockGasLimit`), so the executor must not trust an adapter — any
+ * adapter, not just the one shipped in `blockchain/stoachain.ts` — to hand
+ * back a sane number unchecked. */
+function isSaneCeiling(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+/** Resolves the effective simulate/fire ceiling: an explicit config override
+ * wins outright (no network call); else a best-effort live fetch off the
+ * ALREADY-CONSTRUCTED client for this fire's own chain; else the static
+ * fallback. Never throws — `getBlockGasLimit` failures are absorbed by the
+ * adapter itself (see `blockchain/stoachain.ts`), and an out-of-range value
+ * from EITHER source falls back to `AUTO_GAS_CEILING` rather than being
+ * trusted verbatim. */
+async function resolveCeiling(ctx: ExecutorCtx, client: ChainClient): Promise<number> {
+  if (isSaneCeiling(ctx.config?.autoGasCeiling)) return ctx.config.autoGasCeiling;
+  const live = await client.getBlockGasLimit?.();
+  return isSaneCeiling(live) ? live : AUTO_GAS_CEILING;
 }
 
 /** The mutable Pact builder surface `buildTransaction` drives. */
@@ -232,8 +275,9 @@ async function runSimulate(
   signers: CodexTxDefinition["signers"],
 ): Promise<SimulateResult> {
   const { runtime, resolver } = ctx;
-  const ceiling = ctx.config?.autoGasCeiling ?? AUTO_GAS_CEILING;
   const { autoGasLimit } = definition.config;
+  const client = runtime.createClient(runtime.getPactUrl(definition.config.chainId));
+  const ceiling = await resolveCeiling(ctx, client);
 
   const tx = buildTransaction(
     runtime,
@@ -243,10 +287,19 @@ async function runSimulate(
   );
   const signed = await signTransaction(runtime, resolver, signers, tx);
 
-  const { dirtyRead } = runtime.createClient(
-    runtime.getPactUrl(definition.config.chainId),
-  );
-  const simulation = await dirtyRead(signed);
+  if (autoGasLimit && !client.preflightRead) {
+    throw new Error(
+      "ChainRuntime.preflightRead is required to auto-size gas for an AUTO-gas " +
+        "transaction: without it the calibration would use dirtyRead's execution-" +
+        "only gas figure, which omits the transaction-size charge and reproduces " +
+        "the exact over-reservation bug this capability exists to fix. Upgrade the " +
+        "injected runtime adapter (see blockchain/stoachain.ts), or switch this " +
+        "cronoton to manual gas.",
+    );
+  }
+  const simulation = autoGasLimit
+    ? await client.preflightRead!(signed)
+    : await client.dirtyRead(signed);
 
   if (simulation.result.status === "failure") {
     return {
@@ -259,10 +312,18 @@ async function runSimulate(
   }
 
   const gasUsed = simulation.gas || 0;
+  if (gasUsed > ceiling) {
+    return {
+      ok: false,
+      mode: "simulate",
+      gasUsed,
+      error: `Transaction needs ${gasUsed} gas, over the block limit of ${ceiling} — no gas setting can mine it. Reduce the transaction's size or complexity.`,
+      rawResult: simulation.result,
+      terminalIntent: null,
+    };
+  }
   const calibratedGasLimit =
-    autoGasLimit && gasUsed > 0
-      ? runtime.calculateAutoGasLimit(gasUsed)
-      : undefined;
+    autoGasLimit && gasUsed > 0 ? runtime.calculateAutoGasLimit(gasUsed) : undefined;
 
   return {
     ok: true,
@@ -280,12 +341,12 @@ async function runFire(
   signers: CodexTxDefinition["signers"],
 ): Promise<FireResult> {
   const { runtime, resolver } = ctx;
-  const ceiling = ctx.config?.autoGasCeiling ?? AUTO_GAS_CEILING;
   const listenMs = ctx.config?.listenTimeoutMs ?? LISTEN_TIMEOUT_MS;
   const { chainId, autoGasLimit } = definition.config;
   const client = runtime.createClient(runtime.getPactUrl(chainId));
+  const ceiling = await resolveCeiling(ctx, client);
 
-  // Build + sign for the pre-flight dirty-read.
+  // Build + sign for the pre-flight read.
   let tx = buildTransaction(
     runtime,
     definition,
@@ -294,9 +355,23 @@ async function runFire(
   );
   let signed = await signTransaction(runtime, resolver, signers, tx);
 
-  // (F-001) Pre-submit dirty-read pre-flight — never submit a tx a pre-flight
-  // would catch (saves a one-time terminal fire + gas).
-  const preflight = await client.dirtyRead(signed);
+  if (autoGasLimit && !client.preflightRead) {
+    throw new Error(
+      "ChainRuntime.preflightRead is required to auto-size gas for an AUTO-gas " +
+        "transaction: without it the calibration would use dirtyRead's execution-" +
+        "only gas figure, which omits the transaction-size charge and reproduces " +
+        "the exact over-reservation bug this capability exists to fix. Upgrade the " +
+        "injected runtime adapter (see blockchain/stoachain.ts), or switch this " +
+        "cronoton to manual gas.",
+    );
+  }
+
+  // (F-001) Pre-submit pre-flight — never submit a tx a pre-flight would
+  // catch (saves a one-time terminal fire + gas). AUTO-gas fires source this
+  // from the accurate `preflightRead`; MANUAL-gas fires stay on `dirtyRead`.
+  const preflight = autoGasLimit
+    ? await client.preflightRead!(signed)
+    : await client.dirtyRead(signed);
   if (preflight.result.status === "failure") {
     return {
       ok: false,
@@ -308,9 +383,24 @@ async function runFire(
     };
   }
 
-  // Auto-gas: rebuild + re-sign with the calibrated limit from the dirty-read.
-  if (autoGasLimit && (preflight.gas || 0) > 0) {
-    const calibrated = runtime.calculateAutoGasLimit(preflight.gas || 0);
+  // Refuse the unmineable case BEFORE any rebuild/resubmit — a transaction
+  // whose measured gas exceeds the resolved block ceiling can never mine, for
+  // either an AUTO-gas or a manually-set-limit fire.
+  const gasUsed = preflight.gas || 0;
+  if (gasUsed > ceiling) {
+    return {
+      ok: false,
+      mode: "fire",
+      chainId,
+      error: `Transaction needs ${gasUsed} gas, over the block limit of ${ceiling} — no gas setting can mine it. Reduce the transaction's size or complexity.`,
+      rawResult: preflight.result,
+      terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", false),
+    };
+  }
+
+  // Auto-gas: rebuild + re-sign with the calibrated limit from the pre-flight read.
+  if (autoGasLimit && gasUsed > 0) {
+    const calibrated = runtime.calculateAutoGasLimit(gasUsed);
     tx = buildTransaction(runtime, definition, signers, calibrated);
     signed = await signTransaction(runtime, resolver, signers, tx);
   }
@@ -393,19 +483,23 @@ async function runFire(
 }
 
 /**
- * Execute a codex transaction in `simulate` (sign + dirty-read, NO submit) or
- * `fire` (pre-flight dirty-read → submit → listen) mode against the injected
- * {@link ExecutorCtx}.
+ * Execute a codex transaction in `simulate` (sign + pre-submit read, NO
+ * submit) or `fire` (pre-flight read → submit → listen) mode against the
+ * injected {@link ExecutorCtx}. That pre-submit/pre-flight read is
+ * `ChainClient.preflightRead` for an AUTO-gas transaction (accurate gas,
+ * including the transaction-size charge) and plain `ChainClient.dirtyRead`
+ * for a MANUAL-gas one (see the module doc above for why) — both modes
+ * inherit whichever the definition's `autoGasLimit` selects.
  *
  * `fire` mode NEVER throws on chain/sign/decrypt failure (F-002): every failure
- * mode — dirty-read failure, sign-incompletion, submit error, listen timeout,
- * and resolver/decrypt rejection — returns a structured
+ * mode — pre-flight-read failure, sign-incompletion, submit error, listen
+ * timeout, and resolver/decrypt rejection — returns a structured
  * `{ ok: false, error, terminalIntent }`. A one-time entry whose fire threw
  * would otherwise get no terminalIntent and re-fire on the next tick.
  *
  * `simulate` mode surfaces build errors (zero signers, gas-station with no
- * signing key) as throws to the caller, but converts chain-side dirty-read
- * failures into structured results.
+ * signing key) as throws to the caller, but converts chain-side pre-submit-
+ * read failures into structured results.
  */
 export function executeCodexTransaction(
   definition: CodexTxDefinition,

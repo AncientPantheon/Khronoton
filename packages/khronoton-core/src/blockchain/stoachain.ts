@@ -1,4 +1,4 @@
-import type { ChainRuntime } from "../server/index.js";
+import type { ChainClient, ChainRuntime } from "../server/index.js";
 
 /**
  * `@ancientpantheon/khronoton-core/blockchain/stoachain` — the StoaChain edge.
@@ -21,6 +21,40 @@ import type { ChainRuntime } from "../server/index.js";
  * why this wraps it rather than reimplementing the arithmetic locally — that
  * reimplementation has already happened four times across the ecosystem.
  */
+
+/**
+ * Fallback block gas ceiling used by {@link ChainClient.getBlockGasLimit} on
+ * any failure (network, parse, non-2xx). Matches `server/seams.ts`'s
+ * `AUTO_GAS_CEILING` value — duplicated here rather than imported, since
+ * `blockchain/stoachain.ts` deliberately stays free of importing `server/*`
+ * internals it doesn't otherwise need.
+ */
+const AUTO_GAS_CEILING_FALLBACK = 2_000_000;
+
+/**
+ * Walk a JSON object for the first plausible block-gas-limit number (key
+ * match + sane range). Ported from OuronetUI's `gas-limits.ts:findBlockGasLimit`
+ * as a private local function (not imported across repos) — ranges/regex
+ * mirror that reference exactly.
+ */
+function findBlockGasLimit(obj: unknown, depth = 0): number | null {
+  if (depth > 8 || obj == null || typeof obj !== "object") return null;
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (
+      typeof v === "number" &&
+      /block.?gas.?limit|gas.?limit.?of.?block/i.test(k) &&
+      v >= 50_000 &&
+      v <= 50_000_000
+    ) {
+      return Math.floor(v);
+    }
+    if (v && typeof v === "object") {
+      const found = findBlockGasLimit(v, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 /**
  * Consumer-facing knobs for {@link createStoachainRuntime}. Every field is
@@ -81,7 +115,36 @@ export async function createStoachainRuntime(
 
   return {
     Pact: client.Pact as ChainRuntime["Pact"],
-    createClient: client.createClient as ChainRuntime["createClient"],
+    // The SDK client is no longer returned by identity: it's wrapped so the
+    // two new optional ChainClient capabilities (preflightRead,
+    // getBlockGasLimit) ride alongside the real dirtyRead/submit/listen,
+    // which stay byte-identical pass-throughs.
+    createClient: ((url: string) => {
+      const real = client.createClient(url) as ChainClient & {
+        local(tx: unknown, opts: unknown): Promise<unknown>;
+      };
+      return {
+        ...real,
+        preflightRead: (tx: unknown) =>
+          real.local(tx as never, {
+            preflight: true,
+            signatureVerification: false,
+          }),
+        getBlockGasLimit: async () => {
+          try {
+            const origin = url.replace(/\/chainweb\/.*$/, "");
+            const res = await fetch(`${origin}/config`, {
+              headers: { accept: "application/json" },
+            });
+            if (!res.ok) return AUTO_GAS_CEILING_FALLBACK;
+            const found = findBlockGasLimit(await res.json());
+            return found ?? AUTO_GAS_CEILING_FALLBACK;
+          } catch {
+            return AUTO_GAS_CEILING_FALLBACK;
+          }
+        },
+      };
+    }) as ChainRuntime["createClient"],
     isSignedTransaction:
       client.isSignedTransaction as ChainRuntime["isSignedTransaction"],
     universalSignTransaction:

@@ -22,6 +22,9 @@ function committableState(): BuilderState {
   const s = makeEmptyBuilderState();
   s.name = "Daily payout";
   s.gasPayer = { type: "gas-station", signingKey: "b".repeat(64) };
+  // "Committable out of the box" now requires an explicit manual override —
+  // AUTO gas (the new default) needs a Simulate first.
+  s.config = { ...s.config, autoGasLimit: false };
   return s;
 }
 
@@ -80,7 +83,7 @@ describe("makeEmptyBuilderState defaults", () => {
       chainId: "0",
       gasPriceBufferAnu: 0,
       gasLimit: 1500,
-      autoGasLimit: false,
+      autoGasLimit: true,
       ttl: 600,
     });
     expect(s.payload).toEqual({
@@ -320,7 +323,9 @@ describe("validateConfig", () => {
   });
 
   it("accepts a zero buffer", () => {
-    expect(validateConfig(makeEmptyBuilderState())).toEqual([]);
+    const s = makeEmptyBuilderState();
+    s.config.autoGasLimit = false;
+    expect(validateConfig(s)).toEqual([]);
   });
 
   it("rejects a NaN priority buffer — NaN < 0 is false, so this needs its own finiteness check", () => {
@@ -370,8 +375,16 @@ describe("validateConfig", () => {
     );
   });
 
-  it("passes the default manual config", () => {
-    expect(validateConfig(makeEmptyBuilderState())).toEqual([]);
+  it("the default AUTO-gas config requires a Simulate before it validates clean", () => {
+    expect(validateConfig(makeEmptyBuilderState())).toContain(
+      "AUTO gas requires a successful Simulate to calibrate, or switch to manual.",
+    );
+  });
+
+  it("a manual override still validates clean with no Simulate needed", () => {
+    const s = makeEmptyBuilderState();
+    s.config.autoGasLimit = false;
+    expect(validateConfig(s)).toEqual([]);
   });
 });
 
@@ -470,6 +483,7 @@ describe("canCommit", () => {
     expect(res.ok).toBe(false);
     expect(res.reasons).toEqual([
       "Name is required.",
+      "AUTO gas requires a successful Simulate to calibrate, or switch to manual.",
       "Select a key to sign the DALOS.GAS_PAYER capability.",
       "At least one signer is required.",
     ]);

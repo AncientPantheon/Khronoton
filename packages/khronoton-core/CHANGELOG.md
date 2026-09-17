@@ -4,6 +4,18 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.11.0 — 2026-09-17
+
+**MINOR — a discoverable edit-mode Save affordance, and auto self-calibrating gas as the default for every new cronoton.**
+
+Two independent handoffs, built and shipped together. **(1) Editor Save.** Editing an existing cronoton had no discoverable Save — the only save action was the "Commit Codex Cronoton" button on the last (Execute) tab, silently disabled under AUTO gas until a Simulate ran, with no explanation visible from any other tab. Adds an always-visible edit-mode **`SaveBar`** — Simulate, Save changes, and a live status line — rendered above the Pact editor/tabs on every tab, gated on the edited row having actually loaded (`editReady`) so it can never fire a Simulate against a blank default state during the load window. The Execute tab's own Commit button is now edit-aware ("Save changes" / "Saving…"); create mode is unaffected. A new shared `useCommitGate(state, sim)` hook (called once in `Builder.tsx`, threaded as props) keeps `SaveBar` and `ExecuteTab` reading the identical commit body and gate — no risk of two independent `builderToCommit`/`canCommit` call sites drifting apart, and no duplicate computation on every keystroke. `SaveBar`'s Save AND Simulate buttons are both `canMutate(access)`-gated in their click handlers, not just their `disabled` attribute.
+
+**(2) Auto self-calibrating gas.** Khronoton transactions defaulted to a fixed, manually-set gas limit, so fires over-reserved gas wildly (a real pool-payout fire measured 594 gas used against a 600,000 limit). `makeEmptyBuilderState()` now defaults `autoGasLimit` to `true`. `ChainClient` gains two new optional methods: `preflightRead` (the SDK's `local` with `{preflight:true, signatureVerification:false}` — accurate gas including the transaction-size charge that plain `dirtyRead` omits) and `getBlockGasLimit` (a live `/config` fetch, best-effort with the existing static fallback). AUTO-gas fires now calibrate from `preflightRead` instead of `dirtyRead`; a runtime missing it hard-throws on an AUTO-gas fire (mirroring the 0.9.0 `gasMeta` precedent) while a MANUAL-gas fire on the same runtime is completely unaffected. A new refuse-unmineable check returns a structured failure — never a silent cap or submit — when measured gas exceeds the resolved ceiling, for both AUTO and MANUAL fires. The ceiling itself is validated (`Number.isFinite && > 0`) before use, so a buggy adapter returning `NaN`/`0`/negative can never silently defeat the refuse check.
+
+Reviewed via nectar (2 rounds, 5 lenses then a targeted 2-lens re-pass, adversarial validation throughout): 9 CONFIRMED findings fixed — two initially-HIGH findings (SaveBar's pre-load readiness gap; its unguarded Simulate click) were validated down to MEDIUM once the actual blast radius was traced (Save itself stayed correctly disabled; the server has its own independent auth gate); the rest were MEDIUM/LOW test-coverage, duplication, and stale-doc gaps. Zero REFUTED, zero STYLISTIC. Full history in `docs/work/khronoton-editor-save-and-auto-gas/review.md`.
+
+**980 specs pass.**
+
 ## 0.10.0 — 2026-09-08
 
 **MINOR — the Builder's absolute "Gas Price (ANU)" field is gone; a cronoton now always pays the live network floor plus an optional priority buffer.**

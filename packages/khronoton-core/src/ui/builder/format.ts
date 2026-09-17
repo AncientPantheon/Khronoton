@@ -11,3 +11,19 @@
 export function formatThousands(n: number): string {
   return n.toLocaleString("en-US");
 }
+
+/**
+ * `"Simulation postponed"` + the optional planned-transaction-count detail,
+ * e.g. `"Simulation postponed — 3 planned transactions."`. `ExecuteTab.tsx`
+ * and `SaveBar.tsx` both surface a `SimulateView.postponed` result and used
+ * to each carry their own byte-identical copy of this pluralization — the
+ * same drift risk `formatThousands`'s own history (see the file doc above)
+ * already burned this package on once.
+ */
+export function postponedMessage(plannedCount?: number): string {
+  const detail =
+    typeof plannedCount === "number"
+      ? ` — ${plannedCount} planned transaction${plannedCount === 1 ? "" : "s"}`
+      : "";
+  return `Simulation postponed${detail}.`;
+}

@@ -4,12 +4,14 @@
  *
  * A CONTROLLED tab over the whole {@link BuilderState}: it renders a read-only
  * Transaction Summary, a Simulate control, the embedded schedule editor (or the
- * trigger-only notice), and the commit gate. Every derived figure comes from the
- * pure model in `builder-state.ts` — `builderToCommit` (the wire body + the
- * simulate envelope), `canCommit` (the blocking-reasons gate), `maxTxFee`,
- * `effectiveSignerCount`, and `isTriggerOnly` — and the human schedule line comes
- * from the shipped `summariseSchedule`. No commit/gate/fee math is re-derived
- * here.
+ * trigger-only notice), and the commit gate. The commit body and the blocking-
+ * reasons gate (`commit`/`gate` props) come from `Builder.tsx`'s single
+ * `useCommitGate(state, sim)` call — shared with the always-visible `SaveBar`
+ * so there is exactly one `builderToCommit`/`canCommit` evaluation per render,
+ * not two independent call sites that happen to agree. `maxTxFee`,
+ * `effectiveSignerCount`, and `isTriggerOnly` are still read directly from the
+ * pure model in `builder-state.ts`, and the human schedule line comes from the
+ * shipped `summariseSchedule`. No commit/gate/fee math is re-derived here.
  *
  * The tab never fires the commit itself: it renders the Commit button and calls
  * `onCommit` when it is clicked and the gate is open; the assembly runs
@@ -17,14 +19,13 @@
  * calibrated gas limit is written back into builder state via `onChange` (AUTO
  * on), which also opens the AUTO-gas gate for the commit.
  */
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 
 import { summariseSchedule } from "../../index.js";
+import type { CommitBody } from "../../handlers/index.js";
 import type { UseExecuteActionResult } from "../../hooks/index.js";
 import type { SimulateEnvelope, SimulateView } from "../../provider/index.js";
 import {
-  builderToCommit,
-  canCommit,
   effectiveSignerCount,
   isTriggerOnly,
   type BuilderState,
@@ -32,7 +33,7 @@ import {
 } from "../builder-state.js";
 import { Panel, Title } from "../primitives.js";
 import { ScheduleStep } from "./ScheduleStep.js";
-import { formatThousands } from "./format.js";
+import { formatThousands, postponedMessage } from "./format.js";
 
 export interface ExecuteTabProps {
   /** The whole builder form state (read-only here, save the calibrate write-back). */
@@ -63,6 +64,22 @@ export interface ExecuteTabProps {
    * line shows a loading placeholder in that state.
    */
   liveFloorAnu?: number | null;
+  /**
+   * True when this tab is rendered inside an edit (not create) flow — swaps
+   * the Commit button's label to "Save changes" / "Saving…", matching the
+   * always-visible edit-mode `SaveBar`. No other behavior changes: same gate,
+   * same disabled state, same access (none, as today).
+   */
+  isEdit?: boolean;
+  /**
+   * The commit body, computed once in `Builder.tsx` via `useCommitGate` and
+   * shared with the always-visible `SaveBar` — this tab no longer computes
+   * its own copy, so there is exactly ONE `builderToCommit` evaluation per
+   * render, not two independent ones that happen to agree.
+   */
+  commit: CommitBody;
+  /** The blocking-reasons gate, computed once in `Builder.tsx` via `useCommitGate`. */
+  gate: { ok: boolean; reasons: string[] };
 }
 
 const ROW_STYLE: CSSProperties = {
@@ -229,26 +246,13 @@ export function ExecuteTab({
   eventDrivenResolver,
   sim,
   liveFloorAnu,
+  isEdit,
+  commit,
+  gate,
 }: ExecuteTabProps): ReactNode {
   const [banner, setBanner] = useState<ReactNode>(null);
 
-  // Neither `commit` nor `gate` depends on `liveFloorAnu` (only `gasLine`
-  // below does) — memoized so the 30s gas-floor poll tick that re-renders
-  // this component with a changed `liveFloorAnu` prop doesn't re-run
-  // `builderToCommit`'s payload/signer mapping or `canCommit`'s payload
-  // JSON-parse + full-pactCode regex scan for no reason.
-  const commit = useMemo(() => builderToCommit(state), [state]);
   const payloadKeyCount = Object.keys(commit.envelope.payload ?? {}).length;
-
-  // A successful Simulate that calibrated the AUTO gas limit opens the AUTO-gas
-  // gate (the model waives it for server-resolver / trigger-only jobs on its own).
-  const simulateCalibrated = Boolean(
-    sim.result?.ok && typeof sim.result.calibratedGasLimit === "number",
-  );
-  const gate = useMemo(
-    () => canCommit(state, { simulateCalibrated }),
-    [state, simulateCalibrated],
-  );
 
   const triggerOnly = isTriggerOnly(state);
   // The scheduler is off — and the ScheduleStep swapped for a notice — for a
@@ -262,11 +266,7 @@ export function ExecuteTab({
       return;
     }
     if (view.postponed) {
-      const detail =
-        typeof view.plannedCount === "number"
-          ? ` — ${view.plannedCount} planned transaction${view.plannedCount === 1 ? "" : "s"}`
-          : "";
-      setBanner(renderBanner("var(--khr-accent)", `Simulation postponed${detail}.`));
+      setBanner(renderBanner("var(--khr-accent)", postponedMessage(view.plannedCount)));
       return;
     }
     if (view.ok) {
@@ -346,7 +346,7 @@ export function ExecuteTab({
           disabled={!commitEnabled}
           onClick={onCommitClick}
         >
-          Commit Codex Cronoton
+          {isEdit ? (committing ? "Saving…" : "Save changes") : "Commit Codex Cronoton"}
         </button>
         {!gate.ok ? (
           <ul style={REASONS_STYLE}>
