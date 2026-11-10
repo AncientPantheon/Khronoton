@@ -8,11 +8,57 @@ name: Publish to npmjs.org
 # Status line, README version history, CHANGELOG first heading) then
 # verify the docs shipped inside the npm artifact reference the version
 # being published.
+#
+# AUTHENTICATION IS OIDC TRUSTED PUBLISHING, NOT A TOKEN (as of
+# 2026-11-10, mirroring the Codex repo's 2026-10-14 migration). npmjs.com
+# trusts this repository + this exact workflow FILENAME (extension
+# included — renaming this file breaks the connection until it is
+# recreated to match) + this exact environment name directly, so there is
+# normally no long-lived secret to leak, rotate, or let expire. Four
+# things make this actually work, learned the hard way on sibling repos
+# and mirrored here rather than re-discovered:
+#
+#   1. `permissions: id-token: write` (job level, below) — without it
+#      there is no OIDC token to exchange at all.
+#   2. `actions/setup-node` MUST be given `registry-url:`. WITHOUT THIS
+#      npm never even attempts the OIDC exchange — it fails in ~1.5s with
+#      ENEEDAUTH, which reads exactly like "you forgot to log in" and
+#      sends you looking for a missing token that was never the problem.
+#   3. `npm` must be >= 11.5.1. `setup-node` still ships npm 10.x with
+#      Node 22, so the upgrade step below is REQUIRED, not hygiene.
+#   4. `npm publish` must run FROM THE PACKAGE'S OWN DIRECTORY
+#      (`working-directory:`), NOT via `npm publish --workspace=...` from
+#      the monorepo root — npm resolves which package it's authenticating
+#      AS for the OIDC exchange from the current working directory, and
+#      at a monorepo root that resolves to the private root manifest, not
+#      the package actually being published.
+#
+# `repository.url` in packages/khronoton-core/package.json must also
+# match this GitHub repo, or `--provenance` fails at upload (E422,
+# sigstore) AFTER the tarball is already built — confirmed already
+# correct.
+#
+# A brand-new npmjs.com Trusted Publisher connection reads "Pending
+# validation" until ONE publish actually lands through it — OIDC
+# exchanges 404 on every attempt before that first publish, which is
+# circular. The publish step below tries OIDC first, always, and only
+# falls back to the existing `NPM_PUBLISHER` token secret to break that
+# one-time bootstrap loop if OIDC genuinely fails. Once a release has
+# gone out via OIDC, the fallback branch is dead code — safe to delete
+# `NPM_PUBLISHER` from repo secrets, not required before.
+#
+# `workflow_dispatch` (below) exists ONLY to run the OIDC exchange probe
+# without publishing anything — the probe asks npm's own exchange
+# endpoint whether the trusted publisher actually matches, in ~40s,
+# instead of finding out six CI runs later on a real tag push. The probe
+# must live IN this file, because the OIDC claim names the workflow file
+# by path; a probe anywhere else proves nothing about this one.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -22,50 +68,101 @@ jobs:
 
     # The default GITHUB_TOKEN has read-only `contents` scope. Creating
     # a Release via `gh release create` requires `contents: write`.
-    # `id-token: write` is required for npm publish's `--provenance`
-    # flag — npm uses the OIDC token GitHub Actions issues via this
-    # permission to mint a SLSA attestation linking the published
-    # tarball to the exact workflow run that produced it.
+    # `id-token: write` does double duty: it is required for npm Trusted
+    # Publishing itself (`npm publish` exchanges this OIDC token for a
+    # short-lived npm credential) AND for the `--provenance` SLSA
+    # attestation linking the published tarball to the exact workflow run
+    # that produced it.
     permissions:
       contents: write
       id-token: write
 
+    # This name is load-bearing for Trusted Publishing, not just GitHub's
+    # own protection rules: npmjs.com's Trusted Publisher entry for
+    # @ancientpantheon/khronoton-core must have its "Environment name"
+    # field set to exactly `npm-publish` to match the OIDC claim this
+    # environment causes GitHub to issue. The `npm-publish` environment
+    # already exists in repo Settings → Environments (created to mirror
+    # the Codex repo's setup).
+    environment: npm-publish
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # No git-persisted token: the release step authenticates via
+          # GH_TOKEN env, and a token left in .git/config would be
+          # readable by every transitive lifecycle/test path — combined
+          # with tag-push publish that is a repo-write vector this job
+          # never needs.
+          persist-credentials: false
 
-      # Plain Node setup — no registry-url here so setup-node doesn't
-      # write its own scoped .npmrc. We write the root .npmrc ourselves
-      # in the next step.
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: 22
           cache: npm
+          # REQUIRED FOR OIDC, not cosmetic: this is what gives npm a
+          # registry context to attempt the token exchange against.
+          # Without it npm never tries OIDC at all and fails in ~1.5s
+          # with ENEEDAUTH, which reads exactly like "you forgot to log in".
+          registry-url: 'https://registry.npmjs.org'
 
-      # Explicit .npmrc for the publish — written at the repo root so
-      # npm picks it up regardless of working directory. `always-auth`
-      # + the registry-specific _authToken line is the canonical pattern
-      # npm itself documents for CI publishing. The token comes from the
-      # AncientPantheon org secret NPM_PUBLISHER and is never echoed — only
-      # the redacted structure is printed.
-      - name: Write .npmrc with auth token
+      # TRUSTED PUBLISHING NEEDS npm >= 11.5.1, and setup-node still ships
+      # npm 10.x with Node 22. Without this upgrade, `npm publish` falls
+      # back to looking for an auth token that no longer exists and fails
+      # with a 404 that reads like a missing package — this is not
+      # hygiene, it is a hard prerequisite. Pinned to an 11.x version, NOT
+      # `npm@latest` (see the Codex repo's publish.yml for the npm-12
+      # `allow-remote` lockdown story this sidesteps).
+      - name: Upgrade npm (OIDC trusted publishing support)
         run: |
-          cat > .npmrc <<EOF
-          //registry.npmjs.org/:_authToken=${{ secrets.NPM_PUBLISHER }}
-          @ancientpantheon:registry=https://registry.npmjs.org
-          always-auth=true
-          EOF
-          echo "--- .npmrc structure (token redacted) ---"
-          sed 's|=.*|=***|' .npmrc
+          npm install -g npm@11.21.0
+          echo "npm $(npm --version)"
 
-      # Fail fast: a missing or expired NPM_PUBLISHER should kill the run
-      # here, before any build minutes are spent. Bare `npm whoami`
-      # (no `|| echo` fallback) exits non-zero when auth is broken.
-      - name: Verify npm auth
-        run: npm whoami
+      - name: OIDC preflight (does this runner have an id-token to exchange?)
+        run: |
+          echo "npm            : $(npm --version)"
+          echo "ID token URL   : ${ACTIONS_ID_TOKEN_REQUEST_URL:+present}${ACTIONS_ID_TOKEN_REQUEST_URL:-ABSENT}"
+          echo "ID token value : ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+present}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-ABSENT}"
+          echo "repo           : ${GITHUB_REPOSITORY}"
+          echo "workflow ref   : ${GITHUB_WORKFLOW_REF}"
 
+      # Publishes NOTHING. Asks npm's own exchange endpoint whether
+      # @ancientpantheon/khronoton-core's trusted-publisher connection
+      # actually matches this repo + this workflow file + this
+      # environment. 201 Created (not 200) means the exchange SUCCEEDED
+      # and minted a token — checking for 200 alone reported a real match
+      # as a failure the first time this was built on a sibling repo,
+      # which is worse than no check at all because it is believed.
+      - name: OIDC exchange probe (does the trusted publisher actually match?)
+        run: |
+          set -o pipefail
+          TOK=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm%3Aregistry.npmjs.org" \
+                | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          CODE=$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+                 -H "Authorization: Bearer ${TOK}" -H "Content-Type: application/json" \
+                 "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@ancientpantheon%2fkhronoton-core")
+          echo "── @ancientpantheon/khronoton-core ── exchange HTTP ${CODE}"
+          sed -E 's/"token":"[^"]*"/"token":"***"/g' /tmp/exchange.json || true
+          echo
+          if [ "${CODE}" = "201" ] || [ "${CODE}" = "200" ]; then
+            echo "::notice::trusted publisher MATCHES — a real publish will go out over OIDC."
+          else
+            echo "::warning::trusted publisher did NOT match (HTTP ${CODE}). Compare the ref below"
+            echo "::warning::with the connection on npmjs.com, filename extension included:"
+            echo "::warning::  ${GITHUB_WORKFLOW_REF}"
+            echo "::warning::If the package page shows 'Pending validation', this 404 is expected"
+            echo "::warning::until one publish lands through it — see the publish step's bootstrap"
+            echo "::warning::fallback, not a sign the connection itself is wrong."
+          fi
+          rm -f /tmp/exchange.json
+
+      # Everything below here only runs for a real tag push — workflow_dispatch
+      # exists solely for the probe above and stops here.
       - name: Install dependencies
+        if: github.ref_type == 'tag'
         run: npm install --prefer-offline --no-audit --no-fund
 
       # Belt-and-suspenders: typecheck + build + tests gate the publish
@@ -86,16 +183,20 @@ jobs:
       # deterministic gate suite; the `*.real.test.ts` chain-SDK integration tests
       # are excluded (see packages/khronoton-core/vitest.config.ts).
       - name: Typecheck (khronoton-core)
+        if: github.ref_type == 'tag'
         run: npm run typecheck --workspace=@ancientpantheon/khronoton-core
       - name: Build (khronoton-core)
+        if: github.ref_type == 'tag'
         run: npm run build
       - name: Test (khronoton-core)
+        if: github.ref_type == 'tag'
         run: npm test --workspace=@ancientpantheon/khronoton-core
 
       # The tag IS the release version. It must equal the version in
       # packages/khronoton-core/package.json — otherwise the tag is
       # wrong and nothing publishes.
       - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
         id: version
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
@@ -116,6 +217,7 @@ jobs:
       # the version being published, or the published page lies about
       # what it contains.
       - name: Verify README + CHANGELOG mention the publish version
+        if: github.ref_type == 'tag'
         run: |
           TAG_VERSION="${{ steps.version.outputs.TAG_VERSION }}"
           PKG_DIR="packages/khronoton-core"
@@ -156,19 +258,54 @@ jobs:
       # NOTE: `--provenance` requires the GitHub repo to be public at
       # the time the first tag is pushed — provenance attestation on a
       # private repo fails the publish.
+      #
+      # RUNS FROM THE PACKAGE'S OWN DIRECTORY (`working-directory:`), NOT
+      # via `npm publish --workspace=...` from the monorepo root — npm
+      # resolves which package it authenticates AS for the OIDC exchange
+      # from the current directory; at the monorepo root that resolves to
+      # the private root manifest instead of khronoton-core.
+      #
+      # OIDC FIRST, ALWAYS. The token-based fallback below exists only to
+      # break the one-time "Pending validation" bootstrap loop a
+      # brand-new trusted-publisher connection starts in (OIDC 404s on
+      # every attempt until one publish has landed through it) — it is
+      # never the primary or silently preferred path, and only runs after
+      # OIDC has actually been tried and failed.
       - name: Publish @ancientpantheon/khronoton-core to npmjs.org
+        if: github.ref_type == 'tag'
+        working-directory: packages/khronoton-core
+        env:
+          NPM_PUBLISHER: ${{ secrets.NPM_PUBLISHER }}
         run: |
           TAG_VERSION="${{ steps.version.outputs.TAG_VERSION }}"
           if npm view @ancientpantheon/khronoton-core@${TAG_VERSION} version >/dev/null 2>&1; then
             echo "@ancientpantheon/khronoton-core@${TAG_VERSION} already on npm — skipping (idempotent)."
-          else
-            npm publish --workspace=@ancientpantheon/khronoton-core --access public --provenance
+            exit 0
           fi
+
+          if npm publish --access public --provenance; then
+            echo "published via OIDC trusted publishing."
+            exit 0
+          fi
+
+          if [ -z "${NPM_PUBLISHER}" ]; then
+            echo "::error::OIDC publish failed and no NPM_PUBLISHER secret is set."
+            echo "::error::If the trusted publisher still reads 'Pending validation', add a"
+            echo "::error::granular token as NPM_PUBLISHER once to validate it, then delete it."
+            exit 1
+          fi
+          echo "::warning::OIDC publish failed; falling back to the bootstrap token."
+          cat > "${RUNNER_TEMP}/.npmrc" <<EOF
+          //registry.npmjs.org/:_authToken=${NPM_PUBLISHER}
+          EOF
+          npm publish --access public --provenance --userconfig "${RUNNER_TEMP}/.npmrc"
+          rm -f "${RUNNER_TEMP}/.npmrc"
 
       # One Release per tag. The Release body is the annotated-tag
       # message; granular history lives in the package CHANGELOG and
       # on npmjs.com.
       - name: Create GitHub Release for the pushed tag
+        if: github.ref_type == 'tag'
         env:
           # Prefer a user-supplied PAT (RELEASE_TOKEN) when present —
           # bypasses any org-level "Workflow permissions" lockdown that
