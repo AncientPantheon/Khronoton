@@ -63,6 +63,8 @@ describe("installSchema", () => {
       "external_fireable",
       "runtime_arg_keys",
       "next_fire_at",
+      "public_token",
+      "public_observable",
     ]) {
       expect(cols).toContain(expected);
     }
@@ -154,5 +156,74 @@ describe("installSchema", () => {
       .prepare(`SELECT id FROM codex_cronotons WHERE id = ?`)
       .get("c4") as { id: string } | undefined;
     expect(row?.id).toBe("c4");
+  });
+
+  it("ensureColumn adds public_token/public_observable to a pre-existing table", () => {
+    const legacyDb = new Database(":memory:");
+    legacyDb.exec(`
+      CREATE TABLE codex_cronotons (
+        id                   TEXT PRIMARY KEY,
+        name                 TEXT NOT NULL,
+        pact_code            TEXT NOT NULL,
+        config_json          TEXT NOT NULL,
+        gas_payer_json       TEXT NOT NULL,
+        signers_json         TEXT NOT NULL,
+        schedule_mode        TEXT NOT NULL,
+        schedule_config_json TEXT NOT NULL,
+        status               TEXT NOT NULL DEFAULT 'active',
+        next_fire_at         TEXT,
+        last_fire_at         TEXT,
+        created_at           TEXT NOT NULL,
+        modified_at          TEXT NOT NULL,
+        created_by           TEXT NOT NULL
+      );
+    `);
+    legacyDb
+      .prepare(
+        `INSERT INTO codex_cronotons
+           (id, name, pact_code, config_json, gas_payer_json, signers_json,
+            schedule_mode, schedule_config_json, created_at, modified_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-1", "n", "(code)", "{}", "{}", "[]", "one-time", "{}", "t0", "t0", "op");
+
+    expect(() => installSchema(legacyDb)).not.toThrow();
+
+    const cols = legacyDb
+      .prepare(`PRAGMA table_info(codex_cronotons)`)
+      .all()
+      .map((c) => (c as { name: string }).name);
+    expect(cols).toContain("public_token");
+    expect(cols).toContain("public_observable");
+
+    const row = legacyDb
+      .prepare(`SELECT id, public_observable FROM codex_cronotons WHERE id = ?`)
+      .get("legacy-1") as { id: string; public_observable: number };
+    expect(row.id).toBe("legacy-1");
+    expect(row.public_observable).toBe(0);
+
+    legacyDb.close();
+  });
+
+  it("public_token has a unique index that still allows multiple NULLs", () => {
+    const freshDb = new Database(":memory:");
+    installSchema(freshDb);
+
+    const insert = (id: string, publicToken: string | null) =>
+      freshDb
+        .prepare(
+          `INSERT INTO codex_cronotons
+             (id, name, pact_code, config_json, gas_payer_json, signers_json,
+              schedule_mode, schedule_config_json, created_at, modified_at, created_by, public_token)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, "n", "(code)", "{}", "{}", "[]", "one-time", "{}", "t0", "t0", "op", publicToken);
+
+    expect(() => insert("n1", null)).not.toThrow();
+    expect(() => insert("n2", null)).not.toThrow();
+    expect(() => insert("n3", "tok-abc")).not.toThrow();
+    expect(() => insert("n4", "tok-abc")).toThrow(/UNIQUE constraint/i);
+
+    freshDb.close();
   });
 });

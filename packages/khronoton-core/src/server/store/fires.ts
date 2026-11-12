@@ -211,6 +211,31 @@ function parseTxKeys(json: string | null): FireTxKey[] {
   }
 }
 
+/**
+ * Parse the stored chain_response_json; tolerate null/malformed data by
+ * degrading to `null` rather than throwing. `chain_response_json` is only
+ * ever WRITTEN via `JSON.stringify` (recordFire/finalizeFire above), so a
+ * parse failure here can only come from pre-existing corrupted/legacy data —
+ * but letting that throw propagate is a real hazard for ANY caller: Node
+ * 20+'s V8 embeds a snippet of the actual malformed input text in a
+ * `JSON.parse` `SyntaxError`'s message (e.g. `Unexpected token 'x',
+ * "<snippet>"... is not valid JSON`), and this column can carry on-chain
+ * response data a caller may be obligated to keep confidential (the
+ * unauthenticated `handlers/public.ts` route is the sharpest edge of that —
+ * an uncaught throw here used to ride straight through `mapStoreError`'s
+ * generic `error.message` passthrough into a public 500 body, bypassing
+ * `toPublicCronotonView`'s sanitization entirely since the throw happened
+ * before the projector ever ran).
+ */
+function parseChainResponse(json: string | null): unknown {
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 /** Paginated fire history for a cronoton, newest-first (limit clamped 1..100, default 20). */
 export function listFires(
   id: string,
@@ -253,7 +278,7 @@ export function listFires(
       requestKey: r.request_key,
       chainId: r.chain_id,
       errorMessage: r.error_message,
-      chainResponse: r.chain_response_json ? JSON.parse(r.chain_response_json) : null,
+      chainResponse: parseChainResponse(r.chain_response_json),
       definitionFingerprint: r.definition_fingerprint,
       mode: r.mode === "live" ? "live" : "test",
       recoveredAt: r.recovered_at,

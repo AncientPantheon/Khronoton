@@ -82,3 +82,20 @@ export type { CreateManualBatchInput } from "./manual-batch.js";
 // store barrel is the single export site here (the Phase-1 server barrel drops
 // its own direct fingerprint export in favor of this one to avoid a duplicate).
 export { computeDefinitionFingerprint } from "../pure/fingerprint.js";
+
+// ── Public observability: token toggle, by-token read, counts, health, projector ──
+export {
+  getCodexCronotonByPublicToken,
+  setPublicObservable,
+  getCronotonFireCounts,
+  deriveCronotonHealth,
+  toPublicCronotonView,
+} from "./public.js";
+export type {
+  SetPublicObservableOpts,
+  CronotonFireCounts,
+  CronotonHealth,
+  PublicCronotonView,
+  PublicCronotonFireView,
+  PublicCronotonFiresPage,
+} from "./public.js";

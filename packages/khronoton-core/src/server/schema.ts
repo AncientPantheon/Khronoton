@@ -105,13 +105,48 @@ CREATE INDEX IF NOT EXISTS idx_codex_manual_batches_cronoton
 `;
 
 /**
+ * Idempotently ensures `column` exists on `table`, adding it via `ALTER TABLE
+ * ... ADD COLUMN` when absent. SQLite (3.53.2, bundled via better-sqlite3)
+ * does not support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (syntax error),
+ * so the check-then-add via `PRAGMA table_info` is the idiomatic idempotent
+ * pattern — this is the single mechanism both a fresh install (the column is
+ * absent from the `CREATE TABLE` literal, so this always adds it) and an
+ * already-provisioned database (a second call is a no-op) go through.
+ *
+ * @param db - Any handle satisfying the {@link Database} seam.
+ * @param table - The table to inspect/alter.
+ * @param column - The column name to ensure exists.
+ * @param columnDefSql - The column's type/constraint SQL (e.g. `"TEXT"`),
+ *   appended verbatim after the column name in the `ADD COLUMN` clause.
+ */
+function ensureColumn(db: Database, table: string, column: string, columnDefSql: string): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  const hasColumn = existing.some((c) => c.name === column);
+  if (!hasColumn) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${columnDefSql}`);
+  }
+}
+
+/**
  * Installs the three codex-cronoton tables and their indexes on the injected DB
  * handle in a single idempotent call. Safe to re-run: every statement is guarded
  * with `IF NOT EXISTS`.
+ *
+ * After the base DDL, ensures the `public_token`/`public_observable` columns
+ * on `codex_cronotons` via {@link ensureColumn} — this covers both a fresh
+ * install (absent from the `CREATE TABLE` literal) and an existing database
+ * that predates these columns, through the one code path. `public_token`
+ * then gets a unique index; SQLite's unique index already permits multiple
+ * `NULL`s, so non-observable rows with no token never collide.
  *
  * @param db - Any handle satisfying the {@link Database} seam (a real
  *   `better-sqlite3` instance qualifies). Only `db.exec` is used.
  */
 export function installSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+  ensureColumn(db, "codex_cronotons", "public_token", "TEXT");
+  ensureColumn(db, "codex_cronotons", "public_observable", "INTEGER NOT NULL DEFAULT 0");
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronotons_public_token ON codex_cronotons(public_token)`,
+  );
 }

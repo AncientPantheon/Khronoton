@@ -165,6 +165,19 @@ export interface CodexCronotonRow {
    * doubles (test fixtures) typecheck.
    */
   runtime_arg_keys?: string | null;
+  /**
+   * Stable, URL-safe public lookup token; null/absent until the row is first
+   * made observable. Optional so pre-migration row doubles (test fixtures)
+   * typecheck; real rows from `SELECT *` carry the column (value may be null).
+   */
+  public_token?: string | null;
+  /**
+   * When 1, this cronoton's sanitized state is readable via the public
+   * by-token endpoint, bypassing admin auth entirely. Optional so
+   * pre-migration row doubles (test fixtures) typecheck; real rows from
+   * `SELECT *` carry the column.
+   */
+  public_observable?: number;
   status: "active" | "paused" | "completed" | "error";
   next_fire_at: string | null;
   last_fire_at: string | null;

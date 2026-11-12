@@ -3,7 +3,7 @@
  * framework-agnostic route surface over the `/server` store + executor. A
  * consumer adapts its framework's request/response into {@link HandlerRequest} /
  * {@link HandlerResponse}, injects a {@link HandlerContext} (db + runtime +
- * resolver + an {@link AuthSeam}), and calls the seventeen handlers below.
+ * resolver + an {@link AuthSeam}), and calls the eighteen handlers below.
  *
  * The read handlers keep their contract names here (aliasing their module's
  * `*Handler` implementations), so the barrel exposes the exact route contract
@@ -38,6 +38,9 @@ export { simulateCodexTx, executeNow, triggerCronoton, recoverFire } from "./exe
 
 // ── Manual-batch handlers (TC.5) ──────────────────────────────────────────────
 export { startExecuteBatch, getExecuteBatch, cancelExecuteBatch } from "./batch.js";
+
+// ── Public observability (unauthenticated-by-design; bypasses ctx.auth) ──────
+export { publicCronotonHandler } from "./public.js";
 
 // ── Kernel contract (TC.1): normalized request/response + helpers ─────────────
 // The request/response shapes plus the response helpers a consumer needs to

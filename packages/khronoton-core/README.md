@@ -6,6 +6,8 @@ Khronoton is the "When do I act?" Constructor of the Pantheon architecture — t
 
 ## Status
 
+**`0.12.0` on public npmjs** — **MINOR.** Released 2026-11-11. Any codex-cronoton can now opt into a public, unauthenticated, token-gated observability view of its schedule, health, and fire history — the concrete driver being a UI that wants to embed a cronoton's next-fire time and recent executions on a public-facing page, without exposing the authenticated admin surface. New `public_token`/`public_observable` columns (added via a new `ensureColumn` upgrade helper — the first time `installSchema` has needed to add a column to an already-provisioned database, not just a fresh install); a new `server/store/public.ts` surface (`setPublicObservable`, `getCodexCronotonByPublicToken`, `getCronotonFireCounts`, `deriveCronotonHealth`, `toPublicCronotonView`); and a new `handlers/public.ts` `publicCronotonHandler` that deliberately never calls `ctx.auth` — gated purely on token validity plus the observable flag, with an unknown token and a known-but-non-observable token returning the identical 404. The sanitizing projector never includes `pact_code`, `payload_json`, `signers_json`, `gas_payer_json`, `server_resolver`, `created_by`, `config_json`, raw fire error text, or the internal row `id` — the public token is the only public identifier. **1027 specs pass.**
+
 **`0.11.0` on public npmjs** — **MINOR.** Released 2026-09-17. Two independent handoffs, shipped together. **Editor Save:** an always-visible edit-mode `SaveBar` (Simulate + Save changes + live status) now renders on every tab, gated on the edited row having actually loaded so it can never fire a Simulate against a blank default state; the Execute tab's own Commit button is edit-aware ("Save changes"); a new shared `useCommitGate(state, sim)` hook keeps both surfaces reading the identical commit body and gate, computed once. **Auto self-calibrating gas:** `autoGasLimit` now defaults to `true` for new cronotons; `ChainClient` gains optional `preflightRead` (accurate gas via the SDK's preflight mode, replacing `dirtyRead`'s execution-only measurement for AUTO fires) and `getBlockGasLimit` (a live block-ceiling fetch with a static fallback); a transaction whose measured gas exceeds the resolved ceiling is now refused with a structured error — never silently capped or submitted — for both AUTO and MANUAL fires, with the ceiling itself validated against `NaN`/non-finite/non-positive values before use. **980 specs pass.**
 
 **`0.10.0` on public npmjs** — **MINOR.** Released 2026-09-08. The Builder's absolute "Gas Price (ANU)" field is gone: the UI now shows a read-only, live-refreshing "Live Network Floor" plus an editable "Priority Buffer (ANU above floor)" (default 0), and every fire prices as `liveFloor(creationTime) + buffer`. New optional `CodexTxConfig.gasPriceBufferAnu` (absent/pre-migration rows default to 0, self-healing with no DB migration); `gasPrice` stays, `@deprecated`, for reading historical rows. `ChainRuntime.gasMeta` gains an optional 2nd `bufferAnu` param (non-breaking) — the adapter sums floor+buffer **in ANU** before the one conversion, not two summed STOA floats. A negative/non-finite buffer can never underprice a fire — enforced at three layers: client `validateConfig`, the store's `commitCodexCronoton`/`editCodexCronoton` (reject before any write), and the seam's own defensive clamp. New `useLiveGasFloor()` hook polls every 30s plus visibilitychange/focus. `BuilderConfig.gasPriceAnu` and `CommitGateOptions.minGasPriceAnu` are **removed** (not deprecated-in-place) — both lost all meaning once there's no absolute price to floor-check. **938 specs pass** (+5 real-runtime integration specs).
@@ -240,6 +242,112 @@ This bump ships the engine only. Framework-agnostic HTTP handlers (create/edit/l
 
 The `/server` subpath's CJS `require` condition relies on Node's `require(esm)` support (Node **≥ 20.19 / ≥ 22.12**), the same mechanism as the root's 0.1.1 `require` condition — so the effective Node floor for CommonJS consumers is ≥ 20.19. The package `engines` field stays `>=20` (unchanged), matching the root.
 
+## Public observability (`public_token` / `publicCronotonHandler`) — since 0.12.0
+
+Every cronoton can opt into a **public, unauthenticated, read-only** view of
+its own state — schedule, status, health, and complete fire history — for a
+host that wants to embed "next mint at…" + recent executions on a
+public-facing page without exposing its authenticated admin surface at all.
+**Off by default.** Nothing is public until an admin explicitly flips it on
+for that one cronoton.
+
+**1. Opt a cronoton in** (admin-side, through your own authenticated route —
+this call has no auth of its own, same as every other `/server` store
+function):
+
+```ts
+import { setPublicObservable } from '@ancientpantheon/khronoton-core/server';
+
+const { publicToken } = setPublicObservable(cronotonId, { observable: true }, { db });
+// publicToken is minted ONCE, the first time a row goes observable, and is
+// STABLE across later observable:false -> observable:true toggles (so an
+// embed URL built from it never has to be re-minted). Pass
+// { observable: true, regenerate: true } to force a fresh token instead
+// (e.g. if the old one leaked). { observable: false } hides the cronoton
+// again WITHOUT clearing the stored token, so re-enabling reuses it.
+```
+
+Build your public embed URL from `publicToken` — it's an opaque,
+160-bit (`crypto.randomBytes(20)`, base64url) string, not the cronoton's
+internal `id`. The internal `id` never appears anywhere in the public
+surface.
+
+**2. Mount the route** (host-side, any router — this one handler is the
+entire public surface):
+
+```ts
+import { publicCronotonHandler } from '@ancientpantheon/khronoton-core/handlers';
+
+// e.g. a Next.js API route: pages/api/public/cronoton/[token].ts
+export default async function handler(req, res) {
+  const result = await publicCronotonHandler(
+    { db, runtime, resolver, auth: yourAuthSeam }, // auth is REQUIRED by the
+                                                     // HandlerContext type but
+                                                     // is NEVER actually called
+                                                     // by this one handler —
+                                                     // any AuthSeam satisfies it
+    { params: { token: req.query.token }, query: req.query },
+  );
+  // YOUR responsibility, not this package's: Cache-Control + CORS.
+  res.setHeader('Cache-Control', 'public, max-age=30');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // or your embed's origin
+  res.status(result.status).json(result.body);
+}
+```
+
+Unlike every other handler in `/handlers`, `publicCronotonHandler`
+**deliberately never calls `ctx.auth`** — that's not an oversight, it's the
+whole point: this route's trust boundary is "does this token resolve to an
+observable row," entirely independent of whatever your admin `AuthSeam`
+would otherwise require. An unknown token and a known-but-currently-disabled
+token return the **identical** `404 { error: "not found" }` — the two cases
+are indistinguishable on purpose, so a probing request can never learn
+whether a given token ever existed.
+
+**3. The response**, for a known, currently-observable token:
+
+```jsonc
+{
+  "ok": true,
+  "name": "DailyStoicismMint",
+  "description": "Mints the daily Stoicism allotment",
+  "status": "active",                 // active | paused | completed | error
+  "schedule": { "mode": "daily-at-utc", "humanText": "Daily at 18:00 UTC" },
+  "triggerOnly": false,                // true = fires on demand (event/HMAC/runtime-arg), no timer
+  "nextFireAt": "2026-11-11T18:00:00.000Z",
+  "lastFireAt": "2026-11-10T18:00:00.000Z",
+  "isOverdue": false,                  // active + scheduled + nextFireAt already passed
+  "since": "2026-01-01T00:00:00.000Z", // row's created_at
+  "counts": {
+    "fired": 42, "succeeded": 41, "failed": 1,
+    "lastSuccessAt": "...", "lastFailureAt": "...",
+    "currentFailStreak": 0,            // consecutive failures ending at the most recent fire
+    "successRatePercent": 98
+  },
+  "health": "healthy",                 // healthy | degraded | down — derived traffic light
+  "fires": {
+    "page": [
+      { "firedAt": "...", "status": "success", "chainId": "0", "requestKey": "...", "txKeys": [], "recoveredAt": null, "mode": "live" }
+    ],
+    "total": 42, "limit": 50, "offset": 0  // ?limit=&offset= page the COMPLETE history, not just "last 20"
+  }
+}
+```
+
+**Never present, under any circumstances:** `pact_code`, `payload_json`,
+`signers_json`, `gas_payer_json`, `server_resolver`, `created_by`,
+`config_json`, a fire's raw `errorMessage`/`chainResponse`, or the internal
+row `id`. A fire's `status` already says `"failure"` when relevant — no raw
+error text ever ships alongside it. See
+`src/server/store/public.ts`'s `toPublicCronotonView` for the one place this
+guarantee is enforced (it builds the response field-by-field and never
+spreads the underlying row/fire objects).
+
+`health` is a simple derived traffic light, not a new source of truth:
+`"down"` once `currentFailStreak` hits 3, `"degraded"` at 1–2 or whenever
+`isOverdue` is true, `"healthy"` otherwise — call `deriveCronotonHealth`
+yourself if you need the same rule outside this response shape.
+
 ## Install
 
 ```bash
@@ -247,6 +355,8 @@ npm install @ancientpantheon/khronoton-core
 ```
 
 ## Version history
+
+**v0.12.0** — Opt-in public cronoton observability. A cronoton's state (schedule, status, fire history, success/fail counts) was previously visible only through the authenticated admin surface (`listHandler`/`getHandler`/`firesHandler` behind `withRead` + the host's `AuthSeam`) — nothing let a host expose one cronoton's state to an unauthenticated, cross-origin caller (the concrete driver: embedding a mint's next-fire time + recent executions in a public-facing page), and this is framed as a general capability, not a one-off. **Schema.** Two new `codex_cronotons` columns: `public_token TEXT` (unique, nullable) and `public_observable INTEGER NOT NULL DEFAULT 0` (off by default). SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so `installSchema` (`server/schema.ts`) gains a small reusable `ensureColumn(db, table, column, columnDefSql)` helper (`PRAGMA table_info` → conditional `ALTER TABLE ADD COLUMN`), called once for each new column, immediately after `CREATE TABLE IF NOT EXISTS` — the FIRST time this package has needed to add a column to an already-provisioned database rather than just a fresh install, since the same call handles both a brand-new DB (the columns are absent from the `CREATE TABLE` literal) and an existing host's DB identically. A `CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronotons_public_token` follows — SQLite's unique index already permits multiple `NULL`s, so non-observable rows with no token never collide. **Store (`server/store/public.ts`).** `setPublicObservable(id, { observable, regenerate? }, dep)` toggles `public_observable` and mints `public_token` lazily: once, the first time a row is made observable (`crypto.randomBytes(20).toString("base64url")`), and never again on a plain disable→re-enable toggle — stable, so an embed URL built from the token never needs re-minting; `regenerate: true` is the only way to force a new one. A call against an unknown id throws the existing `CodexCronotonValidationError("not found")` — no new error type. `getCodexCronotonByPublicToken(token, dep)` resolves a row with one query (`WHERE public_token = ? AND public_observable = 1`), so an unknown token and a known-but-non-observable token are **indistinguishable** — both `null` — matching the "never 403, never leak which" rule one layer up in the handler. `getCronotonFireCounts(id, dep)` computes whole-history aggregates independently of any paginated fires window (a page of 20 out of 150 fires would under-report every aggregate): one query for `fired`/`succeeded`/`failed`/`lastSuccessAt`/`lastFailureAt`, plus a DESC-ordered scan (capped at 1000 rows) counting leading `'failure'` statuses for `currentFailStreak` — the scan stops at the first non-failure, so a success anywhere further back in the history never dilutes the trailing streak count. `deriveCronotonHealth({ currentFailStreak, isOverdue })` is a pure, standalone traffic-light rule: `"down"` at a streak ≥ 3, `"degraded"` at 1–2 or when overdue, `"healthy"` otherwise. `toPublicCronotonView(row, counts, firesPage, now?)` is the sanitizing projector and the ONLY place the privacy guarantee is enforced — it builds the DTO field-by-field from the row/fires, never spreading either, so `pact_code`, `payload_json`, `signers_json`, `gas_payer_json`, `server_resolver`, `created_by`, `config_json`, a fire's raw `errorMessage`/`chainResponse`, and the internal row `id` can never ride along by accident; the public token is the only public identifier the view carries. The view includes `schedule.humanText` (via `summariseSchedule`) and `schedule.cron` only for a `cron-expression` row, `triggerOnly` (reusing `rowExternalFireable`), `isOverdue` (true only for an `active` row whose `next_fire_at` has passed — overdue only makes sense for a row the scheduler is actually ticking), and a `fires` page whose `total`/`limit`/`offset` are passed through from `listFires` verbatim, not recomputed. **Handler (`handlers/public.ts`).** `publicCronotonHandler(ctx, request)`, added to the barrel, is a framework-agnostic `GET /<token>` route that is **unauthenticated by design** — it never calls `ctx.auth`/`withRead`/`withConfirm` at all, a deliberately different trust tier than the admin gates, authorizing purely on token validity plus the `public_observable` flag. Returns `{ status: 404, body: { error: "not found" } }` for both an unknown token and a known-but-non-observable one (byte-identical, never distinguishable), `200` with the sanitized view otherwise. `limit`/`offset` are parsed from `request.query` with a local, file-private copy of `read.ts`'s `firesHandler` clamp (1..100, default 50) — `read.ts`'s own `clampInt`/`firstScalar` are module-private, so this is a deliberate duplicate rather than a cross-handler import — over the cronoton's **complete** fire history, not a fixed "last 20": a cronoton with 150 fires is fully reachable across repeated calls with increasing `offset`, and `fires.total` always reports 150 regardless of the requested window. Cache-Control and CORS stay entirely host-side, unchanged package convention (`HandlerResponse` carries no headers field). Entirely additive — no existing export, column default, or admin-surface response shape changes for a cronoton that never opts in. Reviewed via nectar across 4 rounds (correctness/conventions/security/tests lenses each round, adversarial validation throughout, 16 CONFIRMED findings total, zero REFUTED, zero STYLISTIC): round 1 (7 findings) caught the two most significant — a `triggerOnly` gap that missed a plain-`eventDriven` cronoton (no persisted column distinguishes it; fixed by gating on `next_fire_at === null` excluding terminal one-time rows) and a clamp-default mismatch (the handler's own doc comment and CHANGELOG claimed parity with the admin `firesHandler`'s default of 50 while actually defaulting to 20) — plus an `ORDER BY` tiebreak gap, a `modified_at` omission, and two test-coverage gaps; round 2 re-verified round 1's fixes and caught that the `triggerOnly` fix's own comment asserted a false invariant (`claimDueCodexCronoton` also nulls `next_fire_at` on an ordinary row, not just the terminal-intent writer), plus two more test gaps; round 3 found the round-1 `ORDER BY` tiebreak itself was wrong — it sorted on the fire row's random `crypto.randomUUID()` id instead of a chronological key, fixed to SQLite's implicit `rowid` — plus two more test-coverage gaps; round 4 added a `mapStoreError` safety net this one unauthenticated handler had been missing (every sibling handler gets it for free from `withRead`/`withConfirm`) and closed the last two test gaps (`health`'s wiring inside the projector, and the fail-streak's 1000-row cap); round 5 found that round 4's own safety net had a real (if narrow) hole — a malformed `chain_response_json` row's `JSON.parse` failure was uncaught in `server/store/fires.ts`'s shared `listFires` (unlike its sibling `parseTxKeys`, which already tolerated bad input), and Node 20+'s V8 embeds a snippet of the actual malformed input text in that error's message — which `mapStoreError`'s generic passthrough would then have forwarded verbatim into the public route's 500 body, bypassing `toPublicCronotonView`'s sanitization entirely. Fixed at the root (`fires.ts` gains the same try/catch-degrade-to-null guard as `parseTxKeys`, benefiting every current and future caller of `listFires`, not just this one route) rather than only patched at this one call site. Full history in `docs/work/public-cronoton-observability/review.md`. Released 2026-11-11. **1027 specs pass.**
 
 **v0.11.0** — Discoverable edit-mode Save + auto self-calibrating gas. Two independent handoffs built and shipped together. **Editor Save.** Editing an existing cronoton had no discoverable Save — the only action was the "Commit Codex Cronoton" button on the last (Execute) tab, silently disabled under AUTO gas until a Simulate ran, with the reason invisible from any other tab. Adds an always-visible edit-mode `SaveBar` (`ui/builder/SaveBar.tsx`) — Simulate, Save changes, and a live status line — rendered above the Pact editor/tabs on every tab, gated on `Builder.tsx`'s `editReady` (the edited row having actually finished loading) so it can never fire a Simulate against the blank default `makeEmptyBuilderState()` during the load window. The Execute tab's own Commit button is now edit-aware ("Save changes" / "Saving…"); create mode is byte-identical to before. A new shared `useCommitGate(state, sim)` hook (`ui/builder/use-commit-gate.ts`), extracted from `ExecuteTab.tsx`'s own prior inline logic, is called ONCE in `Builder.tsx` and threaded as `commit`/`gate` props to both `SaveBar` and `ExecuteTab` — no risk of two independent `builderToCommit`/`canCommit` call sites drifting apart, and no duplicate computation on every keystroke when both are mounted. Both of `SaveBar`'s buttons are `canMutate(access)`-gated in their CLICK HANDLERS, not just their `disabled` attribute (a directly-dispatched click event still reaches a React handler regardless of the DOM disabled state). **Auto self-calibrating gas.** Khronoton transactions defaulted to a fixed, manually-set gas limit, so fires over-reserved gas wildly — a real pool-payout fire measured 594 gas used against a 600,000 limit. `makeEmptyBuilderState()`'s `config.autoGasLimit` now defaults to `true`. `ChainClient` (`server/seams.ts`) gains two new optional methods: `preflightRead` — implemented in `blockchain/stoachain.ts` via the SDK's raw `local(tx, {preflight:true, signatureVerification:false})`, NOT its `.preflight` convenience alias (which also forces `signatureVerification:true`) — measures the TRUE gas including the transaction-size charge that plain `dirtyRead` omits; `getBlockGasLimit` does a best-effort `/config` fetch (mirroring OuronetUI's `gas-limits.ts`, ported without its browser-oriented module-level mutable-singleton cache — this package fetches fresh per fire instead, since a Node server core handling concurrent fires can't safely share that kind of global state) falling back to the existing static `AUTO_GAS_CEILING` on any failure. `executor.ts`'s `runSimulate`/`runFire` were reordered so the `ChainClient` is constructed BEFORE ceiling resolution (ceiling resolution needs it) — a real sequencing fix, not just an addition. AUTO-gas fires now calibrate from `preflightRead`; a runtime missing it hard-throws on an AUTO-gas fire only (mirroring the 0.9.0 `gasMeta` precedent — silent fallback would ship the exact over-reservation bug this exists to fix), while a MANUAL-gas fire on the same un-upgraded runtime is completely unaffected. A new refuse-unmineable check returns a structured `{ok:false, error}` — never a silent cap, never a submit — when measured gas exceeds the resolved ceiling, for BOTH AUTO and MANUAL fires. The ceiling itself (from either the live fetch or an explicit `Config.autoGasCeiling` override) is validated via a new `isSaneCeiling` check (`Number.isFinite && > 0`) before use — `NaN` in particular would otherwise silently defeat the refuse check entirely, since every `gasUsed > NaN` comparison is `false` in JS. Reviewed via nectar (2 rounds, 5 lenses then a targeted 2-lens re-pass, adversarial validation throughout): 9 CONFIRMED findings fixed, including two initially-HIGH findings (the `SaveBar` pre-load readiness gap; its originally-unguarded Simulate click) validated down to MEDIUM once the actual blast radius was traced against the code (Save itself stayed correctly disabled during the load window; the server independently re-authorizes via its own `withConfirm`/`auth.requireConfirm` gate regardless of what the UI allows). Full history in `docs/work/khronoton-editor-save-and-auto-gas/review.md`. Released 2026-09-17. **980 specs pass.**
 

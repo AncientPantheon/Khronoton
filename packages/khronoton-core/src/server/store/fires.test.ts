@@ -170,6 +170,43 @@ describe("appendFireTxKeys", () => {
   });
 });
 
+describe("listFires — chainResponse parsing", () => {
+  it("parses valid chain_response_json normally", () => {
+    recordFire(
+      { ...fireInput(), chainResponse: { result: "ok" } },
+      { db, resolveFireMode: () => "live" },
+    );
+    expect(listFires("cc-1", {}, { db }).fires[0]!.chainResponse).toEqual({ result: "ok" });
+  });
+
+  it("returns null for a missing chain_response_json", () => {
+    recordFire(fireInput(), { db, resolveFireMode: () => "live" });
+    expect(listFires("cc-1", {}, { db }).fires[0]!.chainResponse).toBeNull();
+  });
+
+  // Can only arise from pre-existing corrupted/legacy data — chain_response_json
+  // is only ever WRITTEN via JSON.stringify (recordFire/finalizeFire), which
+  // can never itself produce invalid JSON. Still a real hazard worth guarding:
+  // an uncaught JSON.parse SyntaxError on malformed input embeds a snippet of
+  // the actual (potentially sensitive) column content in its message (Node
+  // 20+'s V8 "contextual JSON.parse errors"), and that error used to propagate
+  // uncaught out of listFires, straight through handlers/public.ts's
+  // mapStoreError catch-all into an unauthenticated public 500 body, bypassing
+  // toPublicCronotonView's sanitization entirely.
+  it("degrades to null — never throws — for a malformed chain_response_json (pre-existing corrupted/legacy data)", () => {
+    db.prepare(
+      `INSERT INTO codex_cronoton_fires (id, codex_cronoton_id, fired_at, status, chain_response_json)
+       VALUES (?, 'cc-1', ?, 'success', ?)`,
+    ).run("fire-malformed", iso(), "SECRET_LEAK_not_valid_json");
+
+    let result: ReturnType<typeof listFires> | undefined;
+    expect(() => {
+      result = listFires("cc-1", {}, { db });
+    }).not.toThrow();
+    expect(result!.fires[0]!.chainResponse).toBeNull();
+  });
+});
+
 function iso(): string {
   return new Date().toISOString();
 }
