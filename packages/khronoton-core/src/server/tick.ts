@@ -48,6 +48,10 @@ import {
 import { getCodexCronoton } from "./store/cronoton.js";
 import { fireByServerResolver } from "./resolvers.js";
 import { TICK_BATCH_LIMIT } from "./seams.js";
+import { createRun } from "./store/runs.js";
+import { RunAlreadyInFlightError } from "./store/errors.js";
+import { listStepsForCronoton } from "./store/steps.js";
+import { driveRunOnce } from "./runs-driver.js";
 import type {
   ChainRuntime,
   Config,
@@ -105,6 +109,13 @@ export interface CodexTickResult {
   failedIds: string[];
   /** Rows skipped without firing (lost claim, or an orchestration error). */
   skippedIds: string[];
+  /**
+   * Chained-run ids created AND driven inline this pass (design.md §B).
+   * `loop.ts` passes this as `advanceInFlightRunsOnce`'s `excludeRunIds` so
+   * the sweep pass a moment later doesn't re-drive — and re-poll — a run
+   * this same tick pass already drove as far as it would synchronously go.
+   */
+  drivenRunIds: string[];
 }
 
 /**
@@ -119,6 +130,7 @@ export async function codexCronotonTickOnce(
   const firedIds: string[] = [];
   const failedIds: string[] = [];
   const skippedIds: string[] = [];
+  const drivenRunIds: string[] = [];
 
   const due = fetchDueCodexCronotons(now, ctx.config?.tickBatchLimit ?? TICK_BATCH_LIMIT, {
     db: ctx.db,
@@ -129,6 +141,52 @@ export async function codexCronotonTickOnce(
       const claimed = claimDueCodexCronoton(row, now, { db: ctx.db });
       if (!claimed) {
         skippedIds.push(row.id);
+        continue;
+      }
+
+      // Chained (≥1 codex_cronoton_steps row) vs plain — design.md §A/§B. A
+      // chained row never reaches the one-shot fire path below: its lifecycle
+      // lives in codex_cronoton_runs/..._run_legs, not codex_cronoton_fires.
+      const steps = listStepsForCronoton(row.id, { db: ctx.db });
+      if (steps.length > 0) {
+        try {
+          const runId = createRun(
+            { codexCronotonId: row.id, stepCount: steps.length },
+            { db: ctx.db },
+          );
+          // Drive the freshly created run forward synchronously in this SAME
+          // tick pass, so step 0's leg is built AND submitted without waiting
+          // a full tickIntervalMs for the next advanceInFlightRunsOnce pass.
+          await driveRunOnce(runId, now, ctx);
+          // onAudit before the firedIds/drivenRunIds pushes, mirroring the
+          // plain-fire path below: onAudit "may be sync or async" (seams.ts)
+          // and isn't guaranteed non-throwing — a throw here is caught by
+          // the outer per-row catch and lands row.id in skippedIds, so it
+          // must never ALSO already be in firedIds by that point.
+          await ctx.onAudit({
+            action: "codex_cronoton.run_started",
+            result: "success",
+            targetKind: "codex_cronoton",
+            targetId: row.id,
+            detail: {
+              codexCronotonId: row.id,
+              runId,
+              stepCount: steps.length,
+              actor: "scheduler",
+            },
+          });
+          firedIds.push(row.id);
+          drivenRunIds.push(runId);
+        } catch (err) {
+          if (err instanceof RunAlreadyInFlightError) {
+            // Self-blocked: an existing non-terminal run for this cronoton is
+            // already being driven by advanceInFlightRunsOnce every pass —
+            // the claim already advanced next_fire_at regardless (§C).
+            skippedIds.push(row.id);
+          } else {
+            throw err;
+          }
+        }
         continue;
       }
 
@@ -201,7 +259,7 @@ export async function codexCronotonTickOnce(
     }
   }
 
-  return { firedIds, failedIds, skippedIds };
+  return { firedIds, failedIds, skippedIds, drivenRunIds };
 }
 
 export interface CodexManualBatchTickResult {

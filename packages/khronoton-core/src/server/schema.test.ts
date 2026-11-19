@@ -2,7 +2,7 @@
  * schema — shape verification for the consolidated `installSchema(db)` DDL.
  *
  * This is an infrastructure (DDL) surface, so the test verifies the SHAPE the
- * installer produces rather than business logic: the three tables exist, the
+ * installer produces rather than business logic: the six tables exist, the
  * genericization deltas hold (no `jobs(id)` FK on `job_id`, no CHECK on
  * `fires.status`), the `ON DELETE CASCADE` from a cronoton reaches its fires and
  * manual batches, and a re-run is idempotent. A real `better-sqlite3` handle
@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 describe("installSchema", () => {
-  it("creates all three codex tables", () => {
+  it("creates all six codex tables", () => {
     const names = db
       .prepare(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'codex_%' ORDER BY name`,
@@ -47,6 +47,9 @@ describe("installSchema", () => {
     expect(names).toEqual([
       "codex_cronoton_fires",
       "codex_cronoton_manual_batches",
+      "codex_cronoton_run_legs",
+      "codex_cronoton_runs",
+      "codex_cronoton_steps",
       "codex_cronotons",
     ]);
   });
@@ -203,6 +206,84 @@ describe("installSchema", () => {
     expect(row.public_observable).toBe(0);
 
     legacyDb.close();
+  });
+
+  it("creates the three chained-run tables (codex_cronoton_steps, codex_cronoton_runs, codex_cronoton_run_legs)", () => {
+    const names = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      .all()
+      .map((r) => (r as { name: string }).name);
+
+    expect(names).toContain("codex_cronoton_steps");
+    expect(names).toContain("codex_cronoton_runs");
+    expect(names).toContain("codex_cronoton_run_legs");
+  });
+
+  it("enforces the partial unique self-block index: only one non-terminal run per cronoton", () => {
+    insertCronoton("c-run");
+    const insertRun = (id: string, status: string) =>
+      db
+        .prepare(
+          `INSERT INTO codex_cronoton_runs
+             (id, codex_cronoton_id, status, step_count, started_at, modified_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, "c-run", status, 3, "t0", "t0");
+
+    expect(() => insertRun("run-1", "awaiting")).not.toThrow();
+
+    expect(() => insertRun("run-2", "planning")).toThrow(/UNIQUE constraint/i);
+
+    db.prepare(`UPDATE codex_cronoton_runs SET status = ? WHERE id = ?`).run("failed", "run-1");
+
+    expect(() => insertRun("run-3", "awaiting")).not.toThrow();
+  });
+
+  it("enforces codex_cronoton_steps' mode-shape CHECK (single needs pact_code, planner needs planner_name)", () => {
+    insertCronoton("c-step");
+    const insertStep = (
+      id: string,
+      stepIndex: number,
+      mode: string,
+      pactCode: string | null,
+      plannerName: string | null,
+    ) =>
+      db
+        .prepare(
+          `INSERT INTO codex_cronoton_steps
+             (id, codex_cronoton_id, step_index, mode, pact_code, planner_name, created_at, modified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, "c-step", stepIndex, mode, pactCode, plannerName, "t0", "t0");
+
+    expect(() => insertStep("s1", 0, "single", "(code)", null)).not.toThrow();
+    expect(() => insertStep("s2", 1, "single", null, null)).toThrow(/CHECK constraint/i);
+    expect(() => insertStep("s3", 2, "planner", null, "evict-planner")).not.toThrow();
+    expect(() => insertStep("s4", 3, "planner", null, null)).toThrow(/CHECK constraint/i);
+  });
+
+  it("re-creates the three chained-run tables on installSchema when upgrading from a pre-this-change db", () => {
+    db.exec(`DROP TABLE codex_cronoton_run_legs`);
+    db.exec(`DROP TABLE codex_cronoton_runs`);
+    db.exec(`DROP TABLE codex_cronoton_steps`);
+
+    const namesBefore = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(namesBefore).not.toContain("codex_cronoton_steps");
+    expect(namesBefore).not.toContain("codex_cronoton_runs");
+    expect(namesBefore).not.toContain("codex_cronoton_run_legs");
+
+    expect(() => installSchema(db)).not.toThrow();
+
+    const namesAfter = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(namesAfter).toContain("codex_cronoton_steps");
+    expect(namesAfter).toContain("codex_cronoton_runs");
+    expect(namesAfter).toContain("codex_cronoton_run_legs");
   });
 
   it("public_token has a unique index that still allows multiple NULLs", () => {

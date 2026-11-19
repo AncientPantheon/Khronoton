@@ -24,6 +24,7 @@ export type {
   TerminalIntent,
   SimulateResult,
   FireResult,
+  SubmitResult,
   ExecutorResult,
   CodexCronotonRow,
   CodexCronotonListItem,
@@ -65,6 +66,8 @@ export {
   MANUAL_BATCH_MIN,
   MANUAL_BATCH_MAX,
   MANUAL_BATCH_INTERVAL_SECONDS,
+  RUN_STEP_DEADLINE_MS,
+  DEFAULT_MAX_REPLAN_ATTEMPTS,
 } from "./seams.js";
 
 // ── Pure helpers (T1.3 / T1.5) ───────────────────────────────────────────────
@@ -81,6 +84,8 @@ export {
   hashRuntimeArgs,
 } from "./pure/runtime-args.js";
 export type { RuntimeArgs, ValidateRuntimeArgsResult } from "./pure/runtime-args.js";
+export { advanceRun } from "./pure/run-advance.js";
+export type { StepMode, RunState, LegState, RunPolicy, RunAction } from "./pure/run-advance.js";
 
 // ── Consolidated schema installer (T1.6) ─────────────────────────────────────
 export { installSchema } from "./schema.js";
@@ -113,6 +118,29 @@ export * from "./store/index.js";
 // seam-defaults group above stays its single barrel source.
 export * from "./resolvers.js";
 
+// ── StepPlanner registry + the real `ouronet.aqp-evict`/`ouronet.aqp-inject`/
+// `ouronet.aqp-unstall`/`ouronet.stoa-wrap`/`ouronet.stoa-unwrap` planners
+// (Phase 4 / Phase 4.1 / Phase 4b: registerStepPlanner/getStepPlanner/
+// StepPlanner/PlannedLeg/PlannerCtx, plus `evictPlanner`/`injectPlanner`/
+// `unstallPlanner`/`stoaWrapPlanner`/`stoaUnwrapPlanner` themselves).
+// Collision-free: none re-exports anything already barrelled above.
+// Importing `./planners/evict.js`/`./planners/inject.js`/
+// `./planners/unstall.js`/`./planners/stoa-wrap.js`/`./planners/stoa-unwrap.js`
+// here is load-bearing, not cosmetic — their module-eval side effects
+// (`registerStepPlanner("ouronet.aqp-evict", evictPlanner)`,
+// `registerStepPlanner("ouronet.aqp-inject", injectPlanner)`,
+// `registerStepPlanner("ouronet.aqp-unstall", unstallPlanner)`,
+// `registerStepPlanner("ouronet.stoa-wrap", stoaWrapPlanner)`, and
+// `registerStepPlanner("ouronet.stoa-unwrap", stoaUnwrapPlanner)`) are what
+// make those planner names resolvable at all for a consumer who imports
+// anything from this package's `/server` entry point.
+export * from "./planners/registry.js";
+export * from "./planners/evict.js";
+export * from "./planners/inject.js";
+export * from "./planners/unstall.js";
+export * from "./planners/stoa-wrap.js";
+export * from "./planners/stoa-unwrap.js";
+
 // ── Server tick (Phase 4: select → claim → fire → record → finalize → audit).
 // `codexCronotonTickOnce` / `processDueManualBatchesOnce` + `TickCtx` + the two
 // tick result types. Collision-free: `TickCtx` and the result interfaces are
@@ -125,3 +153,9 @@ export * from "./tick.js";
 // Collision-free: it re-exports nothing already barrelled — it only imports the
 // two tick fns (via `./tick.js`) as its injectable defaults.
 export * from "./loop.js";
+
+// ── Chained-run driver (Phase 3: executes Phase 2's pure `advanceRun`
+// decision function against the real store/chain). `driveRunOnce` +
+// `advanceInFlightRunsOnce` + `RunsDriverCtx` + `PlannerNotRegisteredError`.
+// Collision-free: it re-exports nothing already barrelled.
+export * from "./runs-driver.js";

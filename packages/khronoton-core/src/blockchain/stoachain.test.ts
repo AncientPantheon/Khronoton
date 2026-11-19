@@ -13,11 +13,18 @@ const mockLocal = vi.fn(async () => ({
   result: { status: "success" },
   gas: 900,
 }));
+// The real SDK's `IClient.getStatus` — a single `/poll` call across however
+// many request keys, returning an object keyed by requestKey with only the
+// LANDED ones present (Kadena's own documented /poll contract). Default
+// resolves empty; individual tests queue `mockResolvedValueOnce`/
+// `mockRejectedValueOnce` for their own scenario.
+const mockGetStatus = vi.fn(async () => ({}) as Record<string, unknown>);
 const mockCreateClient = vi.fn((url: string) => ({
   dirtyRead: mockDirtyRead,
   submit: mockSubmit,
   listen: mockListen,
   local: mockLocal,
+  getStatus: mockGetStatus,
   url,
 }));
 const mockIsSignedTransaction = vi.fn((_tx: unknown) => true);
@@ -320,5 +327,41 @@ describe("createStoachainRuntime — createClient wrapper (preflightRead + getBl
     expect(client.dirtyRead).toBe(mockDirtyRead);
     expect(client.submit).toBe(mockSubmit);
     expect(client.listen).toBe(mockListen);
+  });
+
+  it("pollRequestKeys(keys, chainId) returns only the LANDED keys, keyed by request key — a still-pending key is absent, not null/undefined", async () => {
+    // Regression this guards: a caller doing `result["key-b"]` to check "is it
+    // done yet" must see `undefined` (absent key), never a present-but-null
+    // entry that could be mistaken for a terminal (if falsy-but-defined) state.
+    mockGetStatus.mockResolvedValueOnce({
+      "key-a": {
+        reqKey: "key-a",
+        result: { status: "success", data: 1 },
+        gas: 50,
+      },
+    });
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    const out = await client.pollRequestKeys!(["key-a", "key-b"], "0");
+    expect(out).toEqual({
+      "key-a": { result: { status: "success", data: 1 }, reqKey: "key-a" },
+    });
+    expect(Object.prototype.hasOwnProperty.call(out, "key-b")).toBe(false);
+    // One HTTP call covers BOTH keys — the property the design doc calls out
+    // as mattering (a multi-leg step costs one request per chain, not one per
+    // leg), proven by asserting the SDK's own batch primitive was given every
+    // key in a single call rather than being invoked once per key.
+    expect(mockGetStatus).toHaveBeenCalledTimes(1);
+    expect(mockGetStatus).toHaveBeenCalledWith([
+      { requestKey: "key-a", chainId: "0", networkId: mockNetwork },
+      { requestKey: "key-b", chainId: "0", networkId: mockNetwork },
+    ]);
+  });
+
+  it("pollRequestKeys(keys, chainId) resolves to {} (never throws) when the underlying poll call rejects — every key reads as still-pending", async () => {
+    mockGetStatus.mockRejectedValueOnce(new Error("network down"));
+    const rt = await createStoachainRuntime();
+    const client = rt.createClient("https://node.example/chainweb/0.0/mainnet01/chain/0/pact");
+    await expect(client.pollRequestKeys!(["key-a", "key-b"], "0")).resolves.toEqual({});
   });
 });

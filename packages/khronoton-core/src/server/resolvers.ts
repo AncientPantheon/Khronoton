@@ -194,21 +194,59 @@ function postponed(error: string): FireResult {
 }
 
 /**
+ * Coerce a batch's `ok` field (typed `unknown` — the orchestrator's return
+ * shape is consumer-defined, see `MultiTxResolver.run`'s own doc) to a real
+ * boolean, or `undefined` for "does not meaningfully report." A strict
+ * `typeof === "boolean"` check alone would silently treat a batch reporting
+ * failure via a non-boolean value (the string `"false"`, `0`) as "didn't
+ * report," defeating the whole point of honoring `ok` — but `Boolean(value)`
+ * alone is ALSO wrong here, because `Boolean("false")` is `true` (any
+ * non-empty string is truthy in JS). Recognized: real booleans, the
+ * case-insensitive strings `"true"`/`"false"`, and numbers (`0` is `false`,
+ * anything else `true`). Anything else (`null`, an object, an unrecognized
+ * string) is treated as "does not report," falling back to the pre-existing
+ * `ok`-less behavior for that one batch.
+ */
+function toReportedOk(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const lower = value.toLowerCase();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+  }
+  return undefined;
+}
+
+/**
  * Adapt a multi-tx orchestrator's run summary to a {@link FireResult} so the tick
- * records one observable fire row for the run. A returned summary always means
- * the run COMPLETED (`ok:true`); the summary is stashed in `rawResult` and the
- * first batch's request key (when present) is surfaced so the fire row links to
- * the on-chain batch.
+ * records one observable fire row for the run. The summary is stashed in
+ * `rawResult` and the first batch's request key (when present) is surfaced so the
+ * fire row links to the on-chain batch.
+ *
+ * Strictly-additive, opt-in contract on `ok`: a batch that carries no
+ * meaningfully-reporting `ok` value behaves exactly as before — it's assumed
+ * to have completed, so a summary whose batches are all `ok`-less (or there
+ * are no batches at all) adapts to `ok:true`. A batch that DOES report `ok`
+ * (via {@link toReportedOk}) is honored: the adapted result is `ok:true`
+ * only if every reporting batch reports `true`; otherwise it's `ok:false`
+ * with a descriptive error naming how many of the reporting batches failed.
  */
 function adaptMultiTxSummary(summary: unknown): FireResult {
-  const s = (summary ?? {}) as { batches?: Array<{ requestKey?: string }> };
-  const firstBatchKey =
-    Array.isArray(s.batches) && s.batches.length > 0 ? s.batches[0]?.requestKey : undefined;
+  const s = (summary ?? {}) as { batches?: Array<{ requestKey?: string; ok?: unknown }> };
+  const batches = Array.isArray(s.batches) ? s.batches : [];
+  const firstBatchKey = batches.length > 0 ? batches[0]?.requestKey : undefined;
+  const reported = batches
+    .map((b) => toReportedOk(b.ok))
+    .filter((v): v is boolean => v !== undefined);
+  const ok = reported.length === 0 ? true : reported.every((v) => v === true);
+  const failedCount = reported.filter((v) => v === false).length;
   return {
-    ok: true,
+    ok,
     mode: "fire",
     requestKey: firstBatchKey,
     rawResult: summary,
+    error: ok ? undefined : `${failedCount} of ${reported.length} reporting batch(es) failed`,
     terminalIntent: null,
   };
 }

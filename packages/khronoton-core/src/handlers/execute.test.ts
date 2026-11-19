@@ -16,6 +16,9 @@ import {
   getCodexCronoton,
   recordFire,
   registerServerResolver,
+  insertStep,
+  listRunLegs,
+  getStepPlanner,
   type CodexTxConfig,
 } from "../server/index.js";
 import {
@@ -30,6 +33,11 @@ import {
   triggerCronoton,
   recoverFire,
 } from "./execute.js";
+// Triggers evict.ts's own module-eval `registerStepPlanner("ouronet.aqp-evict",
+// evictPlanner)` side effect — regression test for a confirmed MEDIUM
+// cross-phase-review finding: executeNow's chained-row branch was only ever
+// tested with a `mode:'single'` step, never `mode:'planner'`.
+import { evictPlanner } from "../server/planners/evict.js";
 
 // A gas payer that self-heals to a signable set (codex address → one pure
 // signer), so a fire runs green through the mock runtime without a gas-station
@@ -114,6 +122,23 @@ describe("simulateCodexTx", () => {
     expect(res).toEqual({ status: 401, body: { error: "admin_confirm_required" } });
   });
 });
+
+/** Seed a single `mode:'single'` step for a chained cronoton, mirroring `runs-driver.test.ts`'s `insertSingleStep` fixture — a signable definition the real executor can build without throwing. */
+function seedSingleStep(h: TestHarness, cronotonId: string): void {
+  insertStep(
+    {
+      codexCronotonId: cronotonId,
+      stepIndex: 0,
+      mode: "single",
+      pactCode: '(coin.transfer "a" "b" 1.0)',
+      config: CONFIG,
+      payload: {},
+      gasPayer: CODEX_GAS_PAYER,
+      signers: [],
+    },
+    { db: h.db },
+  );
+}
 
 describe("executeNow", () => {
   let h: TestHarness;
@@ -209,6 +234,103 @@ describe("executeNow", () => {
     h.db.prepare("UPDATE codex_cronotons SET status = 'paused' WHERE id = ?").run(id);
     const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
     expect(res.status).toBe(400);
+  });
+
+  it("starts a real run for a chained row (>=1 step) instead of firing inline or 202-queuing", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { gasPayer: CODEX_GAS_PAYER });
+    seedSingleStep(h, id);
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; runId?: string; status?: string };
+    expect(body.ok).toBe(true);
+    expect(typeof body.runId).toBe("string");
+    expect(body.runId?.length).toBeGreaterThan(0);
+    // The mock chain client has no pollRequestKeys, so a single-step run's
+    // one leg lands in 'submitted' and stays non-terminal at 'planning' —
+    // driveRunOnce never flips status itself (only markRunTerminal does);
+    // 'awaiting'/'advancing' are documented status values (schema.ts,
+    // design.md §A) this driver pass just doesn't reach in this fixture.
+    expect(["planning", "awaiting", "advancing", "succeeded", "failed"]).toContain(body.status);
+
+    // Proves driveRunOnce actually ran (not just createRun): at least one leg
+    // was built and inserted for the run.
+    const legs = listRunLegs(body.runId as string, { db: h.db });
+    expect(legs.length).toBeGreaterThan(0);
+  });
+
+  it("returns 409 with a clear error when a run is already in flight for the chained cronoton, never throwing out of the handler", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { gasPayer: CODEX_GAS_PAYER });
+    seedSingleStep(h, id);
+
+    // The mock runtime's client has no pollRequestKeys, so driveRunOnce's leg
+    // never confirms — the first call's run is left non-terminal.
+    const first = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+    expect(first.status).toBe(200);
+
+    const second = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(second.status).toBe(409);
+    expect((second.body as { error: string }).error).toMatch(/already in flight/);
+  });
+
+  it("audits codex_cronoton.run_started exactly once for a chained row's executeNow", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { gasPayer: CODEX_GAS_PAYER });
+    seedSingleStep(h, id);
+
+    await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    const runStartedCalls = h.onAudit.mock.calls.filter(
+      (call: unknown[]) => (call[0] as { action: string }).action === "codex_cronoton.run_started",
+    );
+    expect(runStartedCalls).toHaveLength(1);
+  });
+
+  it("starts a real run for a chained row whose step is mode:'planner' (wired to the REAL ouronet.aqp-evict planner), not just the simpler mode:'single' case", async () => {
+    expect(getStepPlanner("ouronet.aqp-evict")).toBe(evictPlanner);
+
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db, { gasPayer: CODEX_GAS_PAYER });
+    const PUB_A = "aa".repeat(32);
+    insertStep(
+      {
+        codexCronotonId: id,
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "ouronet.aqp-evict",
+        plannerParams: { fvtId: "fvt-executenow-planner", patronAccount: "k:patron-executenow-planner" },
+        config: CONFIG,
+        payload: {},
+        gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
+        signers: [{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }],
+      },
+      { db: h.db },
+    );
+    // evictPlanner's own two-probe sequence: plan-read (one entry), then the
+    // full-evict probe, comfortably under the gas ceiling.
+    h.runtime.dirtyRead
+      .mockResolvedValueOnce({
+        result: {
+          status: "success",
+          data: [{ beneficiary: "k:ben-x", scoreEntityType: 1, scoreEntityId: "se-1", rewardDptfId: "dptf-1" }],
+        },
+      })
+      .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 50_000 });
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; runId?: string };
+    expect(body.ok).toBe(true);
+    const legs = listRunLegs(body.runId as string, { db: h.db });
+    expect(legs).toHaveLength(1);
+    expect(legs[0].status).toBe("submitted");
+    const definition = JSON.parse(legs[0].definition_json) as { pactCode: string };
+    expect(definition.pactCode).toContain("CC_FullEvictRewards");
   });
 });
 

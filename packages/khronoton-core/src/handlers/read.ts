@@ -25,7 +25,11 @@ import {
   getCodexCronoton,
   listFires,
   listServerResolvers,
+  listRunsForCronoton,
+  listRunLegs,
+  getRun,
   type CodexCronotonRow,
+  type CodexCronotonRunLegRow,
 } from "../server/index.js";
 
 // ── Defensive query parsing ───────────────────────────────────────────────────
@@ -145,5 +149,77 @@ export async function firesHandler(
     const offset = clampInt(query.offset, { def: 0, min: 0 });
     const { fires, total } = listFires(id, { limit, offset }, { db: ctx.db });
     return json(200, { ok: true, fires, total, limit, offset });
+  });
+}
+
+/** `GET /[id]/runs?limit&offset` — paginated chained-run history for
+ * one cronoton. Page size defaults to 20 (matching listRunsForCronoton's
+ * own default), distinct from fires' 50-default (REQ-G08 is fires-specific). */
+export async function runsHandler(
+  ctx: HandlerContext,
+  request: HandlerRequest,
+): Promise<HandlerResponse> {
+  return withRead(ctx, request, async () => {
+    const id = request.params?.id ?? "";
+    const query = request.query ?? {};
+    const limit = clampInt(query.limit, { def: 20, min: 1, max: 100 });
+    const offset = clampInt(query.offset, { def: 0, min: 0 });
+    const { runs, total } = listRunsForCronoton(id, { limit, offset }, { db: ctx.db });
+    return json(200, { ok: true, runs, total, limit, offset });
+  });
+}
+
+/**
+ * Strip `signers` from a leg's stored `definition_json` before it's exposed
+ * through the READ tier (not CONFIRM) — a leg's `signers` array can carry a
+ * literal Pact CAPABILITY line baked with a real account identifier and a
+ * live-balance-derived amount (`stoa-wrap.ts`/`stoa-unwrap.ts`'s own
+ * `coin.TRANSFER` capability construction), which is exactly the category of
+ * data this codebase otherwise consistently withholds from a weaker-than-
+ * confirm gate: `handlers/steps.ts`'s own CONFIRM-gated standalone-fire
+ * preview already omits `signers` from its response; `store/fires.ts`'s
+ * `listFires` column-allowlists its SELECT and never returns a definition/
+ * signer field at all; `store/public.ts`'s `toPublicCronotonView` explicitly
+ * documents that `signers_json`/`gas_payer_json` "can never leak through
+ * it." `pactCode`/`payload`/`config`/`gasPayer` stay visible — this route's
+ * purpose is genuine operational visibility into a stuck or failed run
+ * (what a leg DOES), not the literal capability grant backing it.
+ *
+ * Fails closed, not open: a `definition_json` that doesn't even parse as
+ * JSON (never produced by this codebase's own `JSON.stringify` writers, but
+ * defensive regardless) returns `"{}"` rather than the raw, unredacted
+ * string — suppressing on a redaction failure, never leaking on one.
+ */
+function redactLegRow(leg: CodexCronotonRunLegRow): CodexCronotonRunLegRow {
+  let definitionJson = "{}";
+  try {
+    const parsed = JSON.parse(leg.definition_json) as Record<string, unknown>;
+    const { signers, ...rest } = parsed;
+    definitionJson = JSON.stringify(rest);
+  } catch {
+    // Malformed definition_json — fail closed (see doc comment above).
+  }
+  return { ...leg, definition_json: definitionJson };
+}
+
+/** `GET /[id]/runs/[runId]/legs` — every leg of one specific run,
+ * scoped so a runId belonging to a DIFFERENT cronoton 404s rather
+ * than leaking that cronoton's leg history. Unpaginated — a single
+ * run's legs are bounded by the gas-ceiling-pack algorithm, never
+ * realistically more than a few dozen. Each leg's `definition_json` is
+ * redacted via {@link redactLegRow} before it leaves this handler. */
+export async function runLegsHandler(
+  ctx: HandlerContext,
+  request: HandlerRequest,
+): Promise<HandlerResponse> {
+  return withRead(ctx, request, async () => {
+    const id = request.params?.id ?? "";
+    const runId = request.params?.runId ?? "";
+    const run = getRun(runId, { db: ctx.db });
+    if (!run || run.codex_cronoton_id !== id) {
+      return err(404, "not found");
+    }
+    const legs = listRunLegs(runId, { db: ctx.db }).map(redactLegRow);
+    return json(200, { ok: true, legs });
   });
 }

@@ -1,5 +1,8 @@
 /**
- * The consolidated DDL installer for the three codex-cronoton tables.
+ * The consolidated DDL installer for the six codex-cronoton tables: the
+ * original three (`codex_cronotons`, `codex_cronoton_fires`,
+ * `codex_cronoton_manual_batches`) plus the chained-runs tables
+ * (`codex_cronoton_steps`, `codex_cronoton_runs`, `codex_cronoton_run_legs`).
  *
  * This folds the Hub's incremental migration chain (base tables + a dozen later
  * ALTERs) into the FINAL column shapes, emitted in a single idempotent call.
@@ -102,6 +105,71 @@ CREATE INDEX IF NOT EXISTS idx_codex_manual_batches_due
 
 CREATE INDEX IF NOT EXISTS idx_codex_manual_batches_cronoton
   ON codex_cronoton_manual_batches(codex_cronoton_id);
+
+CREATE TABLE IF NOT EXISTS codex_cronoton_steps (
+  id                  TEXT PRIMARY KEY,
+  codex_cronoton_id   TEXT NOT NULL REFERENCES codex_cronotons(id) ON DELETE CASCADE,
+  step_index          INTEGER NOT NULL,
+  mode                TEXT NOT NULL CHECK (mode IN ('single', 'planner')),
+  pact_code           TEXT,
+  config_json         TEXT,
+  payload_json        TEXT,
+  gas_payer_json      TEXT,
+  signers_json        TEXT,
+  planner_name        TEXT,
+  planner_params_json TEXT,
+  idempotent          INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL,
+  modified_at         TEXT NOT NULL,
+  CHECK (
+    (mode = 'single' AND pact_code IS NOT NULL) OR
+    (mode = 'planner' AND planner_name IS NOT NULL)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronoton_steps_order
+  ON codex_cronoton_steps(codex_cronoton_id, step_index);
+
+CREATE TABLE IF NOT EXISTS codex_cronoton_runs (
+  id                TEXT PRIMARY KEY,
+  codex_cronoton_id TEXT NOT NULL REFERENCES codex_cronotons(id) ON DELETE CASCADE,
+  fire_id           TEXT REFERENCES codex_cronoton_fires(id),
+  status            TEXT NOT NULL DEFAULT 'planning' CHECK (status IN (
+    'planning', 'awaiting', 'advancing', 'succeeded', 'failed', 'abandoned'
+  )),
+  step_index        INTEGER NOT NULL DEFAULT 0,
+  step_count        INTEGER NOT NULL,
+  started_at        TEXT NOT NULL,
+  modified_at       TEXT NOT NULL,
+  deadline_at       TEXT,
+  attempt           INTEGER NOT NULL DEFAULT 0,
+  context_json      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cronoton_runs_due
+  ON codex_cronoton_runs(status, modified_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronoton_runs_self_block
+  ON codex_cronoton_runs(codex_cronoton_id)
+  WHERE status IN ('planning', 'awaiting', 'advancing');
+
+CREATE TABLE IF NOT EXISTS codex_cronoton_run_legs (
+  id              TEXT PRIMARY KEY,
+  run_id          TEXT NOT NULL REFERENCES codex_cronoton_runs(id) ON DELETE CASCADE,
+  step_index      INTEGER NOT NULL,
+  leg_index       INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending', 'submitted', 'confirmed', 'failed'
+  )),
+  request_key     TEXT,
+  chain_id        TEXT,
+  definition_json TEXT NOT NULL,
+  error_message   TEXT,
+  submitted_at    TEXT,
+  confirmed_at    TEXT,
+  attempt         INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronoton_run_legs_slot
+  ON codex_cronoton_run_legs(run_id, step_index, leg_index);
+CREATE INDEX IF NOT EXISTS idx_codex_cronoton_run_legs_barrier
+  ON codex_cronoton_run_legs(run_id, step_index, status);
 `;
 
 /**
@@ -128,7 +196,7 @@ function ensureColumn(db: Database, table: string, column: string, columnDefSql:
 }
 
 /**
- * Installs the three codex-cronoton tables and their indexes on the injected DB
+ * Installs the six codex-cronoton tables and their indexes on the injected DB
  * handle in a single idempotent call. Safe to re-run: every statement is guarded
  * with `IF NOT EXISTS`.
  *
@@ -149,4 +217,11 @@ export function installSchema(db: Database): void {
   db.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronotons_public_token ON codex_cronotons(public_token)`,
   );
+  // Phase 5 fix: a real claim-before-submit marker for `codex_cronoton_run_legs`,
+  // closing the concurrency gap `runs-driver.ts`'s `handleSubmitLeg` doc
+  // previously deferred ("adding one changes the leg status enum, which is
+  // schema scope beyond this phase") — additive via `ensureColumn`, NOT a new
+  // status enum value, so the existing CHECK constraint is untouched. See
+  // `store/runs.ts`'s `claimLegForSubmit`/`releaseLegClaim`.
+  ensureColumn(db, "codex_cronoton_run_legs", "claimed_at", "TEXT");
 }

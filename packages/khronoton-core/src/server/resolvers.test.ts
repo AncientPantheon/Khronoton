@@ -350,6 +350,90 @@ describe("fireByServerResolver: kind-routing fire dispatcher", () => {
     expect(result.requestKey).toBe("batch-rk-1");
   });
 
+  it("adapts a summary whose batches ALL report ok:false to a failed fire with a descriptive error", async () => {
+    const summary = {
+      batches: [
+        { requestKey: "rk1", ok: false },
+        { requestKey: "rk2", ok: false },
+      ],
+    };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-all-false", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-all-false" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/2 of 2.*failed/);
+  });
+
+  it("adapts a summary with MIXED batch outcomes (some ok:true, some ok:false) to a failed fire", async () => {
+    const summary = {
+      batches: [
+        { requestKey: "rk1", ok: true },
+        { requestKey: "rk2", ok: false },
+      ],
+    };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-mixed", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-mixed" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/1 of 2.*failed/);
+  });
+
+  it("adapts a summary whose batches ALL report ok:true to a successful fire (explicit, not just the absent-field default)", async () => {
+    const summary = { batches: [{ requestKey: "rk1", ok: true }] };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-all-true", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-all-true" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("adapts a summary whose batches report failure via a non-boolean value (the string \"false\") to ok:false — not silently treated as ok-less, regression test for toReportedOk", async () => {
+    const summary = { batches: [{ requestKey: "rk1", ok: "false" }, { requestKey: "rk2", ok: "false" }] };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-string-false", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-string-false" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    // Naive Boolean("false") coercion would wrongly read this as truthy/ok —
+    // confirming the fix recognizes the STRING "false" specifically, not
+    // just real booleans.
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/2 of 2.*failed/);
+  });
+
+  it("adapts a summary whose batches report success via the non-boolean values true-string and a nonzero number, both honored as ok:true", async () => {
+    const summary = { batches: [{ requestKey: "rk1", ok: "TRUE" }, { requestKey: "rk2", ok: 1 }] };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-nonbool-true", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-nonbool-true" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("treats a batch's unrecognized ok value (an object) as non-reporting, falling back to the ok-less default for that batch", async () => {
+    const summary = { batches: [{ requestKey: "rk1", ok: { nested: true } }] };
+    const run = vi.fn().mockResolvedValue(summary);
+    registerServerResolver("by-multi-unrecognized-ok", { kind: "multi-tx", run });
+    const def = { ...baseDef, serverResolver: "by-multi-unrecognized-ok" };
+
+    const result = await fireByServerResolver(def, {}, { exec: vi.fn() });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("adapts a THROWING multi-tx run to ok:false WITHOUT throwing out of the dispatcher", async () => {
     const run = vi.fn().mockRejectedValue(new Error("boom in payout"));
     registerServerResolver("by-multi-throw", { kind: "multi-tx", run });

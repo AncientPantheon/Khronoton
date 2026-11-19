@@ -53,6 +53,7 @@ import type {
   ExecutorResult,
   FireResult,
   SimulateResult,
+  SubmitResult,
 } from "./types.js";
 
 /** Listen (confirmation) timeout default: 5 minutes. Overridable via `ctx.config.listenTimeoutMs`. */
@@ -84,17 +85,60 @@ function isSaneCeiling(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
 }
 
+/**
+ * Live block-gas-limit cache, keyed by chain id — closes a cross-phase-
+ * review-found performance gap: `resolveCeiling` used to re-fetch on EVERY
+ * simulate/fire/submit call with no caching at all, including every leg of
+ * a fanned-out step (`ouronet.aqp-evict`/`ouronet.aqp-unstall` can produce
+ * dozens) and every probe of `split-plan.ts`'s own multi-probe sizing pass
+ * (up to ~7 per planning pass) — all serially (`driveRunOnce`'s own
+ * `for...of`+`await` submit loop is deliberate, never `Promise.all`), within
+ * ONE tick pass that `loop.ts`'s single `running` boolean gates for EVERY
+ * other in-flight run and due cronoton that tick. The block gas limit
+ * changes rarely, so a SHORT TTL (not a permanent cache, which could serve
+ * a stale value indefinitely in a long-running process) eliminates the
+ * redundant network chatter within one pass without that risk.
+ */
+const CEILING_CACHE_TTL_MS = 30_000;
+const ceilingCache = new Map<string, { value: number; expiresAt: number }>();
+
+/**
+ * TEST-ONLY: clears the live ceiling cache. A test suite that exercises
+ * multiple scenarios against the SAME chain id with DIFFERENT mocked
+ * `getBlockGasLimit` return values (e.g. `executor.test.ts`'s own
+ * "live block gas limit" cases) would otherwise leak a cached value from
+ * an earlier test into a later one, since the cache above is genuine
+ * module-level state that persists across test cases within one file run.
+ * Not part of the public `/server` surface (not re-exported from
+ * `server/index.ts`) — import it directly from `./executor.js` in a test's
+ * own `beforeEach`.
+ */
+export function __clearCeilingCacheForTests(): void {
+  ceilingCache.clear();
+}
+
 /** Resolves the effective simulate/fire ceiling: an explicit config override
- * wins outright (no network call); else a best-effort live fetch off the
- * ALREADY-CONSTRUCTED client for this fire's own chain; else the static
- * fallback. Never throws — `getBlockGasLimit` failures are absorbed by the
- * adapter itself (see `blockchain/stoachain.ts`), and an out-of-range value
- * from EITHER source falls back to `AUTO_GAS_CEILING` rather than being
- * trusted verbatim. */
-async function resolveCeiling(ctx: ExecutorCtx, client: ChainClient): Promise<number> {
+ * wins outright (no network call, no cache lookup); else a cached recent
+ * value for this chain when still fresh; else a best-effort live fetch off
+ * the ALREADY-CONSTRUCTED client for this fire's own chain, cached for
+ * {@link CEILING_CACHE_TTL_MS}; else the static fallback. Never throws —
+ * `getBlockGasLimit` failures are absorbed by the adapter itself (see
+ * `blockchain/stoachain.ts`), and an out-of-range value from EITHER source
+ * falls back to `AUTO_GAS_CEILING` rather than being trusted verbatim (and
+ * is never cached as a sane value in that case — `AUTO_GAS_CEILING` itself
+ * IS cached, so a chain whose adapter keeps failing doesn't re-attempt the
+ * live fetch on every single call either). */
+async function resolveCeiling(ctx: ExecutorCtx, client: ChainClient, chainId: string): Promise<number> {
   if (isSaneCeiling(ctx.config?.autoGasCeiling)) return ctx.config.autoGasCeiling;
+
+  const now = Date.now();
+  const cached = ceilingCache.get(chainId);
+  if (cached && cached.expiresAt > now) return cached.value;
+
   const live = await client.getBlockGasLimit?.();
-  return isSaneCeiling(live) ? live : AUTO_GAS_CEILING;
+  const resolved = isSaneCeiling(live) ? live : AUTO_GAS_CEILING;
+  ceilingCache.set(chainId, { value: resolved, expiresAt: now + CEILING_CACHE_TTL_MS });
+  return resolved;
 }
 
 /** The mutable Pact builder surface `buildTransaction` drives. */
@@ -240,6 +284,20 @@ function dirtyReadError(result: { error?: { message?: string } }): string {
   return result.error?.message || "Transaction simulation failed on-chain.";
 }
 
+/**
+ * Describe a caught throw for a structured `{ ok: false, error }` result —
+ * shared by the `submit` and `fire` catch branches of
+ * {@link executeCodexTransaction} so a future change to how a thrown error is
+ * rendered (e.g. handling `AggregateError`) is made once, not twice.
+ * `fallbackLabel` names the mode for the truly-no-message case only.
+ */
+function describeThrown(e: unknown, fallbackLabel: string): string {
+  return (
+    (e instanceof Error ? e.message : String(e)) ||
+    (e instanceof Error ? `${e.name} (no message)` : `unknown ${fallbackLabel} error`)
+  );
+}
+
 /** Listen with a timeout (`Promise.race`, `clearTimeout` cleanup). */
 async function listenWithTimeout(
   listen: (descriptor: unknown) => Promise<ListenResult>,
@@ -277,7 +335,7 @@ async function runSimulate(
   const { runtime, resolver } = ctx;
   const { autoGasLimit } = definition.config;
   const client = runtime.createClient(runtime.getPactUrl(definition.config.chainId));
-  const ceiling = await resolveCeiling(ctx, client);
+  const ceiling = await resolveCeiling(ctx, client, definition.config.chainId);
 
   const tx = buildTransaction(
     runtime,
@@ -335,16 +393,27 @@ async function runSimulate(
   };
 }
 
-async function runFire(
+/**
+ * The build-through-submit outcome shared by `fire` and `submit`: build
+ * (ceiling-limited if `autoGasLimit`), sign, the `preflightRead`-availability
+ * throw-check, the preflight/refuse-unmineable checks, the AUTO-gas
+ * rebuild+resign, request-key derivation, and the submit-with-504-recovery
+ * try/catch (REQ-23). NOT exported — `runFire`/`runSubmit` are the only
+ * callers, and each maps this onto its own result shape.
+ */
+type SubmitOutcome =
+  | { ok: true; chainId: string; requestKey: string; networkId?: string }
+  | { ok: false; chainId: string; error: string; rawResult?: unknown; gasUsed?: number };
+
+async function submitTransaction(
   ctx: ExecutorCtx,
   definition: CodexTxDefinition,
   signers: CodexTxDefinition["signers"],
-): Promise<FireResult> {
+  client: ChainClient,
+  ceiling: number,
+): Promise<SubmitOutcome> {
   const { runtime, resolver } = ctx;
-  const listenMs = ctx.config?.listenTimeoutMs ?? LISTEN_TIMEOUT_MS;
   const { chainId, autoGasLimit } = definition.config;
-  const client = runtime.createClient(runtime.getPactUrl(chainId));
-  const ceiling = await resolveCeiling(ctx, client);
 
   // Build + sign for the pre-flight read.
   let tx = buildTransaction(
@@ -375,11 +444,9 @@ async function runFire(
   if (preflight.result.status === "failure") {
     return {
       ok: false,
-      mode: "fire",
       chainId,
       error: dirtyReadError(preflight.result),
       rawResult: preflight.result,
-      terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", false),
     };
   }
 
@@ -390,11 +457,10 @@ async function runFire(
   if (gasUsed > ceiling) {
     return {
       ok: false,
-      mode: "fire",
       chainId,
       error: `Transaction needs ${gasUsed} gas, over the block limit of ${ceiling} — no gas setting can mine it. Reduce the transaction's size or complexity.`,
       rawResult: preflight.result,
-      terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", false),
+      gasUsed,
     };
   }
 
@@ -440,18 +506,53 @@ async function runFire(
     submitResult = descriptor as { requestKey: string };
   }
 
+  return {
+    ok: true,
+    chainId,
+    requestKey: submitResult.requestKey,
+    networkId: derivedNetworkId,
+  };
+}
+
+async function runFire(
+  ctx: ExecutorCtx,
+  definition: CodexTxDefinition,
+  signers: CodexTxDefinition["signers"],
+): Promise<FireResult> {
+  const { runtime } = ctx;
+  const listenMs = ctx.config?.listenTimeoutMs ?? LISTEN_TIMEOUT_MS;
+  const { chainId } = definition.config;
+  const client = runtime.createClient(runtime.getPactUrl(chainId));
+  const ceiling = await resolveCeiling(ctx, client, chainId);
+
+  const outcome = await submitTransaction(ctx, definition, signers, client, ceiling);
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      mode: "fire",
+      chainId: outcome.chainId,
+      error: outcome.error,
+      rawResult: outcome.rawResult,
+      terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", false),
+    };
+  }
+
   // Listen, but NEVER let a timeout/error throw the request key away — a tx
   // whose confirmation we couldn't observe may still be on-chain, so return a
   // failure that PRESERVES the key for recovery instead of recording it NULL.
   let result: ListenResult;
   try {
-    result = await listenWithTimeout(client.listen, submitResult, listenMs);
+    result = await listenWithTimeout(
+      client.listen,
+      { requestKey: outcome.requestKey, chainId: outcome.chainId, networkId: outcome.networkId },
+      listenMs,
+    );
   } catch (listenErr) {
     return {
       ok: false,
       mode: "fire",
-      chainId,
-      requestKey: submitResult.requestKey,
+      chainId: outcome.chainId,
+      requestKey: outcome.requestKey,
       error:
         listenErr instanceof Error
           ? listenErr.message
@@ -464,8 +565,8 @@ async function runFire(
     return {
       ok: false,
       mode: "fire",
-      chainId,
-      requestKey: result.reqKey || submitResult.requestKey,
+      chainId: outcome.chainId,
+      requestKey: result.reqKey || outcome.requestKey,
       error: result.result.error?.message || "Transaction failed on-chain.",
       rawResult: result.result,
       terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", false),
@@ -475,10 +576,45 @@ async function runFire(
   return {
     ok: true,
     mode: "fire",
-    chainId,
-    requestKey: result.reqKey || submitResult.requestKey,
+    chainId: outcome.chainId,
+    requestKey: result.reqKey || outcome.requestKey,
     rawResult: result.result,
     terminalIntent: computeTerminalIntent(definition.scheduleKind, "fire", true),
+  };
+}
+
+/**
+ * `submit` builds, signs, pre-flights, and submits — exactly what `fire` does
+ * up through the submit-with-504-recovery step — but NEVER calls `listen`.
+ * Confirmation is a separate poll (Phase 3's driver), not this call's job.
+ */
+async function runSubmit(
+  ctx: ExecutorCtx,
+  definition: CodexTxDefinition,
+  signers: CodexTxDefinition["signers"],
+): Promise<SubmitResult> {
+  const { runtime } = ctx;
+  const { chainId } = definition.config;
+  const client = runtime.createClient(runtime.getPactUrl(chainId));
+  const ceiling = await resolveCeiling(ctx, client, chainId);
+
+  const outcome = await submitTransaction(ctx, definition, signers, client, ceiling);
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      mode: "submit",
+      chainId: outcome.chainId,
+      error: outcome.error,
+      rawResult: outcome.rawResult,
+    };
+  }
+
+  return {
+    ok: true,
+    mode: "submit",
+    requestKey: outcome.requestKey,
+    chainId: outcome.chainId,
+    networkId: outcome.networkId,
   };
 }
 
@@ -511,6 +647,11 @@ export function executeCodexTransaction(
   mode: "fire",
   ctx: ExecutorCtx,
 ): Promise<FireResult>;
+export function executeCodexTransaction(
+  definition: CodexTxDefinition,
+  mode: "submit",
+  ctx: ExecutorCtx,
+): Promise<SubmitResult>;
 export async function executeCodexTransaction(
   definition: CodexTxDefinition,
   mode: ExecutorMode,
@@ -531,6 +672,30 @@ export async function executeCodexTransaction(
     return runSimulate(ctx, definition, signers);
   }
 
+  if (mode === "submit") {
+    // Submit NEVER throws, same F-002 guarantee `fire` has: it's a step
+    // toward on-chain submission, not a dry-run like `simulate`, so it
+    // inherits `fire`'s never-throws contract rather than `simulate`'s
+    // surface-build-errors contract.
+    try {
+      const signers = effectiveSigners(definition, runtime.namespace);
+      if (signers.length === 0) {
+        throw new Error(
+          "At least one signer is required to build a codex transaction.",
+        );
+      }
+      return await runSubmit(ctx, definition, signers);
+    } catch (e) {
+      const error = describeThrown(e, "submit");
+      return {
+        ok: false,
+        mode: "submit",
+        chainId: definition.config.chainId,
+        error,
+      };
+    }
+  }
+
   // Fire NEVER throws (F-002): every failure — including a gas-station signer
   // contract violation — returns a structured result so a one-time entry's spent
   // attempt is recorded instead of silently re-firing on the next tick.
@@ -543,9 +708,7 @@ export async function executeCodexTransaction(
     }
     return await runFire(ctx, definition, signers);
   } catch (e) {
-    const error =
-      (e instanceof Error ? e.message : String(e)) ||
-      (e instanceof Error ? `${e.name} (no message)` : "unknown fire error");
+    const error = describeThrown(e, "fire");
     return {
       ok: false,
       mode: "fire",

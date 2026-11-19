@@ -7,6 +7,7 @@ import type {
   ManualBatchView,
 } from '../types.js';
 import { AutoGasGateError, CodexCronotonValidationError } from './errors.js';
+import type { CodexCronotonStepRow } from './steps.js';
 
 function parseJson<T>(json: string | null, fallback: T): T {
   if (json == null) return fallback;
@@ -29,6 +30,27 @@ export function rowToDefinition(row: CodexCronotonRow): CodexTxDefinition {
     signers: parseJson<CodexTxDefinition['signers']>(row.signers_json, []),
     scheduleKind: row.schedule_mode === 'one-time' ? 'one-time' : 'recurring',
     serverResolver: row.server_resolver ?? undefined,
+  };
+}
+
+/**
+ * Mirrors {@link rowToDefinition} for a `codex_cronoton_steps` row — the
+ * STATIC per-step definition a `mode: 'single'` step carries. Omits
+ * `scheduleKind`/`serverResolver` entirely, since a step row has neither
+ * column (those two fields belong to the cronoton's own schedule, not a
+ * step inside a chained run). `pact_code` falls back to `""` when `null`
+ * — only ever non-null for a `mode: 'single'` step, the only mode any
+ * current caller passes to this function.
+ */
+export function stepRowToDefinition(step: CodexCronotonStepRow): CodexTxDefinition {
+  return {
+    pactCode: step.pact_code ?? '',
+    config: parseJson<CodexTxConfig>(step.config_json, {} as CodexTxConfig),
+    payload: parseJson<Record<string, unknown>>(step.payload_json, {}),
+    gasPayer: parseJson<CodexTxDefinition['gasPayer']>(step.gas_payer_json, {
+      type: 'gas-station',
+    }),
+    signers: parseJson<CodexTxDefinition['signers']>(step.signers_json, []),
   };
 }
 

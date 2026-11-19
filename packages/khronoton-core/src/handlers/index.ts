@@ -21,6 +21,8 @@ export {
   signersHandler as fetchSigners,
   firesHandler as fetchFires,
   resolversHandler as listResolvers,
+  runsHandler as fetchRuns,
+  runLegsHandler as fetchRunLegs,
 } from "./read.js";
 
 // ── Cronoton-lifecycle handlers (TC.3) ────────────────────────────────────────
@@ -35,6 +37,10 @@ export type { CommitBody, CommitEnvelope, CommitSchedule } from "./cronoton.js";
 
 // ── Execution handlers (TC.4) ─────────────────────────────────────────────────
 export { simulateCodexTx, executeNow, triggerCronoton, recoverFire } from "./execute.js";
+
+// ── Per-step standalone fire (Phase 5) — same execution tier as TC.4, scoped
+// to one stored step by index rather than a whole committed row ─────────────
+export { simulateStep, fireStep } from "./steps.js";
 
 // ── Manual-batch handlers (TC.5) ──────────────────────────────────────────────
 export { startExecuteBatch, getExecuteBatch, cancelExecuteBatch } from "./batch.js";

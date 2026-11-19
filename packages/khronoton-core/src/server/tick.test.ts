@@ -32,6 +32,10 @@ import * as cronotonStore from "./store/cronoton.js";
 import * as resolvers from "./resolvers.js";
 import * as executor from "./executor.js";
 import { registerServerResolver } from "./resolvers.js";
+import * as runsStore from "./store/runs.js";
+import * as stepsStore from "./store/steps.js";
+import * as runsDriver from "./runs-driver.js";
+import { RunAlreadyInFlightError } from "./store/errors.js";
 
 import { codexCronotonTickOnce, processDueManualBatchesOnce } from "./tick.js";
 import type { TickCtx } from "./tick.js";
@@ -48,6 +52,7 @@ import type {
   CodexTxDefinition,
   FireResult,
 } from "./types.js";
+import type { CodexCronotonStepRow } from "./store/steps.js";
 
 const NOW = new Date("2026-06-08T12:00:00.000Z");
 
@@ -90,6 +95,26 @@ function makeRow(over: Partial<CodexCronotonRow> = {}): CodexCronotonRow {
     created_at: NOW.toISOString(),
     modified_at: NOW.toISOString(),
     created_by: "ancient@example.com",
+    ...over,
+  };
+}
+
+function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonStepRow {
+  return {
+    id: "step-1",
+    codex_cronoton_id: "cc-1",
+    step_index: 0,
+    mode: "single",
+    pact_code: '(coin.transfer "a" "b" 1.0)',
+    config_json: '{"chainId":"0"}',
+    payload_json: null,
+    gas_payer_json: '{"type":"gas-station"}',
+    signers_json: "[]",
+    planner_name: null,
+    planner_params_json: null,
+    idempotent: 0,
+    created_at: NOW.toISOString(),
+    modified_at: NOW.toISOString(),
     ...over,
   };
 }
@@ -156,6 +181,9 @@ let fetchBatchSpy: ReturnType<typeof vi.spyOn>;
 let claimBatchSpy: ReturnType<typeof vi.spyOn>;
 let cancelBatchSpy: ReturnType<typeof vi.spyOn>;
 let getCronotonSpy: ReturnType<typeof vi.spyOn>;
+let listStepsSpy: ReturnType<typeof vi.spyOn>;
+let createRunSpy: ReturnType<typeof vi.spyOn>;
+let driveRunOnceSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -178,6 +206,13 @@ beforeEach(() => {
   getCronotonSpy = vi.spyOn(cronotonStore, "getCodexCronoton").mockReturnValue(null);
 
   fireSpy = vi.spyOn(resolvers, "fireByServerResolver").mockResolvedValue(fireOk());
+
+  // Default to "plain" (no steps) so every pre-existing test keeps taking the
+  // existing one-shot fire path unmodified; only the new chained-path tests
+  // override these.
+  listStepsSpy = vi.spyOn(stepsStore, "listStepsForCronoton").mockReturnValue([]);
+  createRunSpy = vi.spyOn(runsStore, "createRun").mockReturnValue("run-mock-id");
+  driveRunOnceSpy = vi.spyOn(runsDriver, "driveRunOnce").mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -383,6 +418,80 @@ describe("codexCronotonTickOnce", () => {
       expect.anything(),
     );
     expect(advanceSpy).not.toHaveBeenCalled();
+  });
+
+  it("routes a due row with at least one codex_cronoton_steps row through the chained create-run-and-drive path, never the plain fire pipeline", async () => {
+    fetchSpy.mockReturnValue([makeRow({ id: "cc-chained" })]);
+    listStepsSpy.mockReturnValue([makeStepRow({ codex_cronoton_id: "cc-chained" })]);
+    createRunSpy.mockReturnValue("run-abc");
+    const onAudit = vi.fn();
+    const ctx = makeCtx({ onAudit });
+
+    const result = await codexCronotonTickOnce(NOW, ctx);
+
+    expect(claimSpy).toHaveBeenCalledTimes(1);
+    expect(listStepsSpy).toHaveBeenCalledWith("cc-chained", expect.objectContaining({ db: ctx.db }));
+    expect(createRunSpy).toHaveBeenCalledWith(
+      { codexCronotonId: "cc-chained", stepCount: 1 },
+      expect.objectContaining({ db: ctx.db }),
+    );
+    expect(driveRunOnceSpy).toHaveBeenCalledTimes(1);
+    expect(driveRunOnceSpy).toHaveBeenCalledWith("run-abc", NOW, ctx);
+    // the chained path never touches the one-shot fire bookkeeping.
+    expect(fireSpy).not.toHaveBeenCalled();
+    expect(recordSpy).not.toHaveBeenCalled();
+    expect(applyTerminalSpy).not.toHaveBeenCalled();
+    expect(onAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "codex_cronoton.run_started",
+        result: "success",
+        targetKind: "codex_cronoton",
+        targetId: "cc-chained",
+        detail: expect.objectContaining({
+          codexCronotonId: "cc-chained",
+          runId: "run-abc",
+          stepCount: 1,
+          actor: "scheduler",
+        }),
+      }),
+    );
+    expect(result.firedIds).toEqual(["cc-chained"]);
+    expect(result.skippedIds).toEqual([]);
+    expect(result.failedIds).toEqual([]);
+    // drivenRunIds lets loop.ts exclude this run from the SAME pass's
+    // advanceInFlightRunsOnce sweep, so it isn't driven (and re-polled) twice.
+    expect(result.drivenRunIds).toEqual(["run-abc"]);
+  });
+
+  it("self-blocks a chained row whose createRun throws RunAlreadyInFlightError — lands in skippedIds (not failedIds), driveRunOnce is never called, and the claim (next_fire_at advance) already happened", async () => {
+    fetchSpy.mockReturnValue([makeRow({ id: "cc-chained-blocked" })]);
+    listStepsSpy.mockReturnValue([makeStepRow({ codex_cronoton_id: "cc-chained-blocked" })]);
+    createRunSpy.mockImplementation(() => {
+      throw new RunAlreadyInFlightError("cc-chained-blocked");
+    });
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(claimSpy).toHaveBeenCalledTimes(1);
+    expect(driveRunOnceSpy).not.toHaveBeenCalled();
+    expect(result.skippedIds).toEqual(["cc-chained-blocked"]);
+    expect(result.firedIds).toEqual([]);
+    expect(result.failedIds).toEqual([]);
+  });
+
+  it("leaves a due row with ZERO codex_cronoton_steps rows on the existing plain-fire path, unaffected by the new chained branch", async () => {
+    fetchSpy.mockReturnValue([makeRow({ id: "cc-plain-checked" })]);
+    listStepsSpy.mockReturnValue([]);
+    fireSpy.mockResolvedValue(fireOk());
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(listStepsSpy).toHaveBeenCalledWith("cc-plain-checked", expect.objectContaining({ db: expect.anything() }));
+    expect(createRunSpy).not.toHaveBeenCalled();
+    expect(driveRunOnceSpy).not.toHaveBeenCalled();
+    expect(fireSpy).toHaveBeenCalledTimes(1);
+    expect(recordSpy).toHaveBeenCalledTimes(1);
+    expect(result.firedIds).toEqual(["cc-plain-checked"]);
   });
 });
 

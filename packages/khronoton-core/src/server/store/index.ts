@@ -21,11 +21,19 @@ export {
   AutoGasGateError,
   TerminalCronotonError,
   ManualBatchActiveError,
+  RunAlreadyInFlightError,
+  LegAlreadySubmittedError,
+  LegNotSubmittedError,
+  StepAlreadyExistsError,
+  RunLegAlreadyExistsError,
+  RunStepMismatchError,
+  RunAlreadyTerminalError,
 } from "./errors.js";
 
 // ── Pure mappers / gates ─────────────────────────────────────────────────────
 export {
   rowToDefinition,
+  stepRowToDefinition,
   rowExternalFireable,
   rowRuntimeArgKeys,
   assertAutoGasGate,
@@ -99,3 +107,27 @@ export type {
   PublicCronotonFireView,
   PublicCronotonFiresPage,
 } from "./public.js";
+
+// ── Chained-run step definitions: insert / list ──────────────────────────────
+export { insertStep, listStepsForCronoton } from "./steps.js";
+export type { InsertStepInput, CodexCronotonStepRow } from "./steps.js";
+
+// ── Chained runs + legs: create / read / leg lifecycle ────────────────────────
+export {
+  createRun,
+  getRun,
+  listRunLegs,
+  listRunsForCronoton,
+  insertRunLeg,
+  claimLegForSubmit,
+  releaseLegClaim,
+  markLegSubmitted,
+  markLegConfirmed,
+  markLegFailed,
+  listInFlightRuns,
+  advanceRunStep,
+  markRunTerminal,
+  bumpRunAttempt,
+  touchRunDeadline,
+} from "./runs.js";
+export type { CreateRunInput, CodexCronotonRunRow, CodexCronotonRunLegRow } from "./runs.js";

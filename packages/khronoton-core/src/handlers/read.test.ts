@@ -9,7 +9,13 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 
-import { recordFire, registerServerResolver, type KeyResolver } from "../server/index.js";
+import {
+  recordFire,
+  registerServerResolver,
+  createRun,
+  insertRunLeg,
+  type KeyResolver,
+} from "../server/index.js";
 
 import {
   buildTestCtx,
@@ -25,6 +31,8 @@ import {
   signersHandler,
   firesHandler,
   resolversHandler,
+  runsHandler,
+  runLegsHandler,
 } from "./read.js";
 
 let h: TestHarness;
@@ -170,6 +178,133 @@ describe("firesHandler — read-tier fire history (default 50 / offset paging)",
     const res = await firesHandler(h.ctx, req({ params: { id }, query: { limit: "not-a-number" } }));
 
     expect((res.body as { limit: number }).limit).toBe(50);
+  });
+});
+
+describe("runsHandler — read-tier chained-run history (default 20 / offset paging)", () => {
+  it("returns paginated runs newest-first with the correct total, mirroring listRunsForCronoton's own tested behavior", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const run1 = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    h.db
+      .prepare(`UPDATE codex_cronoton_runs SET status = 'succeeded', started_at = ? WHERE id = ?`)
+      .run("2026-01-01T00:00:01.000Z", run1);
+    const run2 = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    h.db
+      .prepare(`UPDATE codex_cronoton_runs SET status = 'succeeded', started_at = ? WHERE id = ?`)
+      .run("2026-01-01T00:00:02.000Z", run2);
+    const run3 = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    h.db
+      .prepare(`UPDATE codex_cronoton_runs SET started_at = ? WHERE id = ?`)
+      .run("2026-01-01T00:00:03.000Z", run3);
+
+    const res = await runsHandler(h.ctx, req({ params: { id }, query: { limit: "2" } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; runs: Array<{ id: string }>; total: number };
+    expect(body.ok).toBe(true);
+    expect(body.runs).toHaveLength(2);
+    expect(body.runs.map((r) => r.id)).toEqual([run3, run2]);
+    expect(body.total).toBe(3);
+  });
+});
+
+describe("runLegsHandler — every leg of one specific run, scoped to its owning cronoton", () => {
+  it("returns every leg for that run", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const runId = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    insertRunLeg({ runId, stepIndex: 0, legIndex: 0, definitionJson: "{}" }, { db: h.db });
+    insertRunLeg({ runId, stepIndex: 0, legIndex: 1, definitionJson: "{}" }, { db: h.db });
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id, runId } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; legs: Array<{ id: string }> };
+    expect(body.ok).toBe(true);
+    expect(body.legs).toHaveLength(2);
+  });
+
+  it("strips `signers` from each leg's definition_json before returning it, regression test for a confirmed HIGH security finding (a leg's capabilities string can carry a literal account + amount, e.g. stoa-wrap/unwrap's coin.TRANSFER capability line)", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const runId = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    const sensitiveLeg = JSON.stringify({
+      pactCode: "(coin.TRANSFER)",
+      config: { chainId: "0" },
+      payload: { patron: "k:real-patron-account", amount: "262613.4" },
+      gasPayer: { type: "gas-station" },
+      signers: [
+        {
+          publicKey: "aa".repeat(32),
+          capabilityMode: "scoped",
+          // A distinct marker (never present in payload/pactCode/config/
+          // gasPayer) so its absence from the response is an unambiguous
+          // proof of redaction, not an artifact of some OTHER field also
+          // happening to omit it.
+          capabilities: '(coin.TRANSFER "k:real-patron-account" "c:LIQUIDPOT-SECRET-MARKER" 262613.4)',
+        },
+      ],
+    });
+    insertRunLeg({ runId, stepIndex: 0, legIndex: 0, definitionJson: sensitiveLeg }, { db: h.db });
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id, runId } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; legs: Array<{ definition_json: string }> };
+    const returned = JSON.parse(body.legs[0].definition_json) as Record<string, unknown>;
+    // `signers` (and the literal capability line/LIQUIDPOT marker embedded
+    // inside it) is gone entirely — not just truncated or partially masked.
+    expect(returned).not.toHaveProperty("signers");
+    expect(JSON.stringify(returned)).not.toContain("LIQUIDPOT-SECRET-MARKER");
+    // `pactCode`/`payload`/`config`/`gasPayer` stay visible — this route's
+    // purpose is genuine operational visibility, not a full lockdown; the
+    // SAME patron account legitimately still appears here, in `payload`
+    // (what the leg actually reads via read-string), just not re-asserted
+    // inside a literal signed capability grant.
+    expect(returned.pactCode).toBe("(coin.TRANSFER)");
+    expect(returned.payload).toEqual({ patron: "k:real-patron-account", amount: "262613.4" });
+  });
+
+  it("returns 404 when runId belongs to a DIFFERENT cronoton than :id, never leaking that cronoton's legs", async () => {
+    h = buildTestCtx();
+    const { id: cronotonA } = seedCronoton(h.db, { name: "a" });
+    const { id: cronotonB } = seedCronoton(h.db, { name: "b" });
+    createRun({ codexCronotonId: cronotonA, stepCount: 1 }, { db: h.db });
+    const runB = createRun({ codexCronotonId: cronotonB, stepCount: 1 }, { db: h.db });
+    const legB = insertRunLeg(
+      { runId: runB, stepIndex: 0, legIndex: 0, definitionJson: '{"marker":"cronoton-b-leg"}' },
+      { db: h.db },
+    );
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id: cronotonA, runId: runB } }));
+
+    expect(res.status).toBe(404);
+    // The real proof of no-leak: a 404 response has no `legs` key AT ALL —
+    // `listRunLegs` is never reached once the ownership check fails, so
+    // there is no code path where leg content and a 404 status coexist.
+    // (A `toContain` check on the stringified body would be a DEAD
+    // assertion here — the handler's `err(404, ...)` body shape can never
+    // contain leg data regardless of whether the ownership check is
+    // correct or broken, so it can never independently catch a
+    // regression; this structural check on the body's own shape can.)
+    expect(res.body).not.toHaveProperty("legs");
+    expect(res.body).toEqual({ error: "not found" });
+    // legB/cronotonB's leg genuinely exists in the DB and IS retrievable
+    // through the correct (same-cronoton) route — proven by the sibling
+    // "returns every leg for that run" test above using the identical
+    // insertRunLeg/runLegsHandler pair; confirming it exists here too
+    // would be redundant with that test, not an independent leak-proof.
+    expect(legB).toBeTruthy();
+  });
+
+  it("returns 404 for a runId that doesn't exist at all", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id, runId: "does-not-exist" } }));
+
+    expect(res.status).toBe(404);
   });
 });
 

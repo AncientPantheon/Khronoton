@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-import { executeCodexTransaction } from "./executor.js";
+import { executeCodexTransaction, __clearCeilingCacheForTests } from "./executor.js";
 import type { ExecutorCtx } from "./executor.js";
 import type { ChainRuntime, ChainClient, KeyResolver } from "./seams.js";
 import { AUTO_GAS_CEILING } from "./seams.js";
@@ -168,6 +168,7 @@ function findCall(method: string): BuilderCall | undefined {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __clearCeilingCacheForTests();
   builderCalls = [];
   lastSignerCaps = [];
   calculateAutoGasLimit.mockImplementation((g: number) => g * 2);
@@ -833,6 +834,58 @@ describe("executeCodexTransaction — live block gas limit", () => {
     expect(firstMeta.gasLimit).toBe(1_600_000);
   });
 
+  it("caches the resolved ceiling per chain id — a second call on the SAME chain within the TTL never calls getBlockGasLimit a second time, regression test for a confirmed HIGH performance finding (a fanned-out step or a multi-probe planning pass used to re-fetch on EVERY single call)", async () => {
+    const getBlockGasLimit = vi.fn(async () => 1_600_000);
+    const liveRuntime: ChainRuntime = {
+      ...mockRuntime,
+      createClient: vi.fn(() => ({ dirtyRead, submit, listen, preflightRead, getBlockGasLimit })),
+    };
+    const def = baseDef({
+      config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+    });
+
+    await executeCodexTransaction(def, "simulate", { runtime: liveRuntime, resolver: mockResolver });
+    await executeCodexTransaction(def, "simulate", { runtime: liveRuntime, resolver: mockResolver });
+
+    expect(getBlockGasLimit).toHaveBeenCalledTimes(1);
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    // Both calls still used the (cached) live value, not a stale/wrong one.
+    expect((metas[0].args[0] as { gasLimit: number }).gasLimit).toBe(1_600_000);
+    expect((metas[metas.length - 1].args[0] as { gasLimit: number }).gasLimit).toBe(1_600_000);
+  });
+
+  it("resolves a DIFFERENT chain id's ceiling independently — caching one chain never serves its value for another", async () => {
+    const getBlockGasLimitChain0 = vi.fn(async () => 1_600_000);
+    const getBlockGasLimitChain1 = vi.fn(async () => 2_400_000);
+    const liveRuntime: ChainRuntime = {
+      ...mockRuntime,
+      createClient: vi.fn((url: string) => ({
+        dirtyRead,
+        submit,
+        listen,
+        preflightRead,
+        getBlockGasLimit: url.includes("/1") ? getBlockGasLimitChain1 : getBlockGasLimitChain0,
+      })),
+    };
+
+    await executeCodexTransaction(
+      baseDef({ config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 } }),
+      "simulate",
+      { runtime: liveRuntime, resolver: mockResolver },
+    );
+    await executeCodexTransaction(
+      baseDef({ config: { chainId: "1", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 } }),
+      "simulate",
+      { runtime: liveRuntime, resolver: mockResolver },
+    );
+
+    expect(getBlockGasLimitChain0).toHaveBeenCalledTimes(1);
+    expect(getBlockGasLimitChain1).toHaveBeenCalledTimes(1);
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    expect((metas[0].args[0] as { gasLimit: number }).gasLimit).toBe(1_600_000);
+    expect((metas[1].args[0] as { gasLimit: number }).gasLimit).toBe(2_400_000);
+  });
+
   it("falls back to AUTO_GAS_CEILING when getBlockGasLimit is absent", async () => {
     // The file's shared mockRuntime/createClient fixture predates
     // getBlockGasLimit — a regression pin that an un-upgraded runtime's
@@ -989,5 +1042,61 @@ describe("executeCodexTransaction — AUTO-gas fire on a runtime WITHOUT preflig
     const res = await executeCodexTransaction(baseDef(), "fire", legacyCtx());
     expect(res.ok).toBe(true);
     expect(dirtyRead).toHaveBeenCalled();
+  });
+});
+
+// ── Phase 0 (khronoton-chained-runs): the non-blocking "submit" mode ───────
+// `submit` builds, signs, pre-flights, and submits — exactly what `fire` does
+// up through the submit-with-504-recovery step — but NEVER calls `listen`.
+// These pin that `submitTransaction`'s extraction didn't change `fire`'s own
+// behavior (the describe blocks above stay unmodified) while proving `submit`
+// inherits the SAME pre-submit safety net (preflight gate, refuse-unmineable,
+// REQ-23 504 recovery) fire already has.
+describe("executeCodexTransaction — submit mode", () => {
+  it("(a) successful submit → { ok: true, mode: 'submit', requestKey, chainId }, listen never invoked", async () => {
+    listen.mockImplementation(() => {
+      throw new Error("listen must never be called in submit mode");
+    });
+    const res = await executeCodexTransaction(baseDef(), "submit", ctx);
+    expect(res.ok).toBe(true);
+    expect(res.mode).toBe("submit");
+    expect(res.mode === "submit" && res.requestKey).toBe("RK-1");
+    expect(res.mode === "submit" && res.chainId).toBe("0");
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it("(b) preflight failure → { ok: false, mode: 'submit', error }, client.submit never called", async () => {
+    dirtyRead.mockResolvedValue({
+      result: { status: "failure", error: { message: "preflight rejected" } },
+    });
+    const res = await executeCodexTransaction(baseDef(), "submit", ctx);
+    expect(res.ok).toBe(false);
+    expect(res.mode).toBe("submit");
+    expect(res.error).toMatch(/preflight rejected/);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("(c) gas-over-ceiling preflight → { ok: false, mode: 'submit' } with the SAME over-the-block-limit error fire produces, client.submit never called", async () => {
+    dirtyRead.mockResolvedValue({ result: { status: "success" }, gas: 3_000_000 });
+    const res = await executeCodexTransaction(baseDef(), "submit", ctx);
+    expect(res.ok).toBe(false);
+    expect(res.mode).toBe("submit");
+    expect(res.error).toMatch(
+      /Transaction needs 3000000 gas, over the block limit/,
+    );
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("(d) REQ-23 ambiguous submit (504, but a derivable hash) → ok: true with the derived key as requestKey", async () => {
+    universalSignTransaction.mockResolvedValue({
+      cmd: JSON.stringify({ networkId: "stoa" }),
+      hash: "DERIVED-RK",
+      sigs: [{ sig: "x" }],
+    });
+    submit.mockRejectedValue(new Error("gateway 504"));
+    const res = await executeCodexTransaction(baseDef(), "submit", ctx);
+    expect(res.ok).toBe(true);
+    expect(res.mode === "submit" && res.requestKey).toBe("DERIVED-RK");
+    expect(listen).not.toHaveBeenCalled();
   });
 });

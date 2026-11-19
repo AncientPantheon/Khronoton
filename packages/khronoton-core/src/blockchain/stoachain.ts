@@ -1,4 +1,4 @@
-import type { ChainClient, ChainRuntime } from "../server/index.js";
+import type { ChainClient, ChainRuntime, ListenResult } from "../server/index.js";
 
 /**
  * `@ancientpantheon/khronoton-core/blockchain/stoachain` — the StoaChain edge.
@@ -108,9 +108,15 @@ export async function createStoachainRuntime(
   // default resolver stands. `nodeBaseUrl` is captured in a const so its
   // truthiness narrows to `string` inside the closure.
   const nodeBaseUrl = config?.nodeBaseUrl;
+  // `encodeURIComponent` on the one caller-supplied segment (`chainId` is a
+  // plain, unvalidated `string` on `CodexTxConfig`) — defense in depth, not a
+  // response to a reachable exploit: every current and designed caller of
+  // this path is an already-authenticated admin with confirm-gated commit
+  // access (the same actor who already controls pactCode/payload/gasPayer),
+  // so this closes the URL-path-injection class rather than a live threat.
   const getPactUrl: (chainId: string) => string = nodeBaseUrl
     ? (chainId: string) =>
-        `${nodeBaseUrl}/chainweb/0.0/${networkId}/chain/${chainId}/pact`
+        `${nodeBaseUrl}/chainweb/0.0/${networkId}/chain/${encodeURIComponent(chainId)}/pact`
     : constants.getPactUrl;
 
   return {
@@ -122,6 +128,31 @@ export async function createStoachainRuntime(
     createClient: ((url: string) => {
       const real = client.createClient(url) as ChainClient & {
         local(tx: unknown, opts: unknown): Promise<unknown>;
+        // `IClient.getStatus` — the real SDK's own batch-poll primitive
+        // (`@stoachain/kadena-stoic-legacy/client`'s `createClient(url)`
+        // return type): "Gets the result of one or more submitted requests.
+        // If the result is not ready, it returns an empty object. Calls the
+        // '/poll' endpoint only once." That "absent key = not ready yet, one
+        // call covers every key" contract is exactly `pollRequestKeys`'s own
+        // documented shape (`seams.ts`'s `ChainClient.pollRequestKeys` doc
+        // comment), so this wraps it rather than hand-rolling a raw `fetch`
+        // to `/poll` the way `getBlockGasLimit` has to for `/config` (which
+        // the SDK has no client-side primitive for at all). Verified against
+        // `@stoachain/kadena-stoic-legacy`'s and `@kadena/chainweb-node-
+        // client`'s own shipped `.d.cts`/`.d.ts` in this environment's
+        // `node_modules`, not guessed: `getStatus` takes
+        // `{ requestKey, chainId, networkId }[]` and resolves an
+        // `IPollResponse` (`{ [requestKey]: ICommandResult }`), where
+        // `ICommandResult` is `{ reqKey, result: { status, data } |
+        // { status, error: { message, ... } }, gas, ... }` — a superset of
+        // `ListenResult`'s `{ result: { status, error? }, reqKey? }`.
+        getStatus?(
+          descriptors: Array<{
+            requestKey: string;
+            chainId: string;
+            networkId: string;
+          }>,
+        ): Promise<Record<string, { reqKey?: string; result: ListenResult["result"] }>>;
       };
       return {
         ...real,
@@ -141,6 +172,25 @@ export async function createStoachainRuntime(
             return found ?? AUTO_GAS_CEILING_FALLBACK;
           } catch {
             return AUTO_GAS_CEILING_FALLBACK;
+          }
+        },
+        pollRequestKeys: async (keys: string[], chainId: string) => {
+          // Best-effort, same degrade-to-fallback contract as
+          // `getBlockGasLimit` above — here the fallback is `{}` (every key
+          // reads "still pending") rather than a numeric ceiling, since a
+          // caller polling an absent key just tries again next tick.
+          try {
+            if (!real.getStatus || keys.length === 0) return {};
+            const raw = await real.getStatus(
+              keys.map((requestKey) => ({ requestKey, chainId, networkId })),
+            );
+            const out: Record<string, ListenResult> = {};
+            for (const [key, entry] of Object.entries(raw ?? {})) {
+              out[key] = { result: entry.result, reqKey: entry.reqKey };
+            }
+            return out;
+          } catch {
+            return {};
           }
         },
       };

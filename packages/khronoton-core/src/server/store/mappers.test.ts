@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   rowToDefinition,
+  stepRowToDefinition,
   rowExternalFireable,
   rowRuntimeArgKeys,
   assertAutoGasGate,
@@ -13,6 +14,7 @@ import {
   CodexCronotonValidationError,
   TerminalCronotonError,
 } from './errors.js';
+import type { CodexCronotonStepRow } from './steps.js';
 import type {
   CodexCronotonRow,
   CodexManualBatchRow,
@@ -49,6 +51,34 @@ function baseRow(overrides: Partial<CodexCronotonRow> = {}): CodexCronotonRow {
     created_at: '2026-01-01T00:00:00.000Z',
     modified_at: '2026-01-01T00:00:00.000Z',
     created_by: 'admin@x',
+    ...overrides,
+  };
+}
+
+function baseStepRow(overrides: Partial<CodexCronotonStepRow> = {}): CodexCronotonStepRow {
+  return {
+    id: 'step-1',
+    codex_cronoton_id: 'cc-1',
+    step_index: 0,
+    mode: 'single',
+    pact_code: '(coin.transfer "a" "b" 1.0)',
+    config_json: JSON.stringify({
+      chainId: '0',
+      gasPrice: 1,
+      gasLimit: 1500,
+      autoGasLimit: false,
+      ttl: 600,
+    }),
+    payload_json: JSON.stringify({ amount: '1.0' }),
+    gas_payer_json: JSON.stringify({ type: 'gas-station' }),
+    signers_json: JSON.stringify([
+      { publicKey: 'a'.repeat(64), capabilityMode: 'scoped', capabilities: '(coin.GAS)' },
+    ]),
+    planner_name: null,
+    planner_params_json: null,
+    idempotent: 0,
+    created_at: '2026-01-01T00:00:00.000Z',
+    modified_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -111,6 +141,27 @@ describe('rowToDefinition', () => {
       'stoicism-mint',
     );
     expect(rowToDefinition(baseRow({ server_resolver: null })).serverResolver).toBeUndefined();
+  });
+});
+
+describe('stepRowToDefinition', () => {
+  it('parses the five JSON columns into the CodexTxDefinition shape, omitting scheduleKind/serverResolver entirely', () => {
+    const def = stepRowToDefinition(baseStepRow());
+    expect(def.pactCode).toBe('(coin.transfer "a" "b" 1.0)');
+    expect(def.config.chainId).toBe('0');
+    expect(def.config.gasLimit).toBe(1500);
+    expect(def.payload).toEqual({ amount: '1.0' });
+    expect(def.gasPayer.type).toBe('gas-station');
+    expect(def.signers).toHaveLength(1);
+    expect(def.signers[0]!.publicKey).toBe('a'.repeat(64));
+    expect('scheduleKind' in def).toBe(false);
+    expect('serverResolver' in def).toBe(false);
+  });
+
+  it('treats a null payload_json as an empty object and a null signers_json as an empty array', () => {
+    const def = stepRowToDefinition(baseStepRow({ payload_json: null, signers_json: null }));
+    expect(def.payload).toEqual({});
+    expect(def.signers).toEqual([]);
   });
 });
 

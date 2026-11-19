@@ -38,9 +38,16 @@ import {
   computeDefinitionFingerprint,
   validateRuntimeArgs,
   applyRuntimeArgs,
+  listStepsForCronoton,
+  createRun,
+  getRun,
+  driveRunOnce,
+  defaultOnAudit,
+  RunAlreadyInFlightError,
   type CodexCronotonRow,
   type CodexTxDefinition,
   type FireResult,
+  type RunsDriverCtx,
 } from "../server/index.js";
 
 /** A landed on-chain request key: 40–48 URL-safe base64 chars. */
@@ -180,10 +187,18 @@ export const simulateCodexTx: Handler = (ctx, req) =>
   });
 
 /**
- * Fire a committed cronoton on demand, outside its schedule. A multi-tx
- * server-resolved row is queued (202) rather than fired inline (REQ-H06); every
- * other row fires + records exactly one fire row and returns HTTP 200 with the
- * fire outcome in the body (`ok:false` still 200 — REQ-H04).
+ * Fire a committed cronoton on demand, outside its schedule. A CHAINED row
+ * (>=1 `codex_cronoton_steps` row) starts a real run instead — mirroring
+ * `tick.ts`'s own branch (design.md §A) rather than reinventing it: it never
+ * reaches the flat-definition/multi-tx paths below, since a chained row
+ * doesn't carry a meaningful `server_resolver`. Unlike the scheduler's tick
+ * (which silently skips a self-blocked cronoton to retry next pass), this is
+ * an explicit on-demand request — a non-terminal run already in flight for
+ * the SAME cronoton surfaces as a real 409, not a silent no-op. A multi-tx
+ * server-resolved PLAIN row is queued (202) rather than fired inline
+ * (REQ-H06); every other plain row fires + records exactly one fire row and
+ * returns HTTP 200 with the fire outcome in the body (`ok:false` still
+ * 200 — REQ-H04).
  */
 export const executeNow: Handler = (ctx, req) =>
   withConfirm(ctx, req, async () => {
@@ -195,6 +210,38 @@ export const executeNow: Handler = (ctx, req) =>
     if (row.status === "paused") return err(400, "cannot execute a paused cronoton");
     if (TERMINAL_STATUSES.has(row.status)) {
       return err(400, "cannot execute a terminal cronoton");
+    }
+
+    const steps = listStepsForCronoton(row.id, { db: ctx.db });
+    if (steps.length > 0) {
+      try {
+        const runId = createRun(
+          { codexCronotonId: row.id, stepCount: steps.length },
+          { db: ctx.db },
+        );
+        const driverCtx: RunsDriverCtx = {
+          db: ctx.db,
+          runtime: ctx.runtime,
+          resolver: ctx.resolver,
+          config: ctx.config,
+          onAudit: ctx.onAudit ?? defaultOnAudit,
+        };
+        await driveRunOnce(runId, new Date(), driverCtx);
+        await ctx.onAudit?.({
+          action: "codex_cronoton.run_started",
+          result: "success",
+          targetKind: "codex_cronoton",
+          targetId: row.id,
+          detail: { codexCronotonId: row.id, runId, stepCount: steps.length, actor: "ancient" },
+        });
+        const run = getRun(runId, { db: ctx.db });
+        return json(200, { ok: true, runId, status: run?.status ?? null });
+      } catch (e) {
+        if (e instanceof RunAlreadyInFlightError) {
+          return err(409, "a run is already in flight for this cronoton");
+        }
+        throw e;
+      }
     }
 
     const resolverName = row.server_resolver ?? undefined;

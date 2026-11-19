@@ -115,6 +115,28 @@ export interface ChainClient {
    * on any failure or absence, matching OuronetUI's own documented choice here.
    */
   getBlockGasLimit?(): Promise<number>;
+  /**
+   * Poll many request keys on ONE chain in a single call. Returns a map keyed
+   * by requestKey; a key ABSENT from the map means "still pending" (Kadena's
+   * /poll endpoint only returns landed transactions), a key PRESENT means a
+   * definite {@link ListenResult}. Declared optional for Phase 0's own
+   * single-fire executor, which never calls it. What matters there is that a
+   * multi-leg step costs one request per chain per tick, not one request per
+   * leg — see `blockchain/stoachain.ts` for the implementation, which always
+   * provides it.
+   *
+   * CAVEAT (Phase 3): `runs-driver.ts`'s `handlePoll` is this method's only
+   * consumer, and it does NOT fall back to polling one key at a time via
+   * `listen` when this is absent — a `ChainClient` that omits it will never
+   * observe a chained run's submitted legs land, stalling every step until
+   * its deadline fails the run outright (even one that actually succeeded
+   * on-chain). In practice this is a theoretical gap, not a live bug: the
+   * only shipped adapter (`blockchain/stoachain.ts`) always implements this
+   * method. Treat it as effectively REQUIRED for a `ChainClient` meant to
+   * back chained runs, not merely a performance optimization, despite the
+   * `?` in its signature.
+   */
+  pollRequestKeys?(keys: string[], chainId: string): Promise<Record<string, ListenResult>>;
   submit(tx: unknown): Promise<{ requestKey: string }>;
   listen(desc: unknown): Promise<ListenResult>;
 }
@@ -282,6 +304,8 @@ export interface Config {
   singleTxGasGuard: number;
   tickBatchLimit: number;
   manualBatch: { min: number; max: number; intervalSeconds: number };
+  runStepDeadlineMs?: number;
+  maxReplanAttempts?: number;
 }
 
 /** Default tick cadence (30s) — {@link Config.tickIntervalMs}. */
@@ -300,3 +324,7 @@ export const MANUAL_BATCH_MIN = 2;
 export const MANUAL_BATCH_MAX = 60;
 /** Default manual-batch inter-fire interval (seconds) — {@link Config.manualBatch}.intervalSeconds. */
 export const MANUAL_BATCH_INTERVAL_SECONDS = 60;
+/** Default per-step barrier deadline (10 minutes) — {@link Config.runStepDeadlineMs}. */
+export const RUN_STEP_DEADLINE_MS = 600_000;
+/** Default max replan attempts — {@link Config.maxReplanAttempts}. */
+export const DEFAULT_MAX_REPLAN_ATTEMPTS = 3;

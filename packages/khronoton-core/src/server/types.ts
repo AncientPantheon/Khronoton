@@ -20,8 +20,14 @@ import type { ScheduleMode } from "../schedule.js";
  */
 export type ChainId = string;
 
-/** Run mode: `simulate` signs + dirty-reads but never submits; `fire` submits. */
-export type ExecutorMode = "simulate" | "fire";
+/**
+ * Run mode: `simulate` signs + dirty-reads but never submits; `fire` submits
+ * AND awaits confirmation (listen); `submit` submits but does NOT await
+ * confirmation — the caller polls it separately (see {@link SubmitResult}
+ * and `ChainClient.pollRequestKeys`), which is what lets a chained,
+ * multi-leg run avoid blocking the scheduler on a 5-minute listen per leg.
+ */
+export type ExecutorMode = "simulate" | "fire" | "submit";
 
 /** One-time entries terminate after a single fire; recurring re-fire on schedule. */
 export type ScheduleKind = "one-time" | "recurring";
@@ -134,7 +140,41 @@ export interface FireResult {
   readonly terminalIntent: TerminalIntent | null;
 }
 
-export type ExecutorResult = SimulateResult | FireResult;
+/**
+ * Result of a `submit` run. Builds, signs, pre-flights, and submits — never
+ * calls `listenWithTimeout`. `ok: true` with a `requestKey` means "submitted,"
+ * not "confirmed"; confirmation is a separate poll (Phase 3), not this result.
+ * No `terminalIntent`: submit never resolves a one-time row's terminal state.
+ *
+ * A SHARPER caveat than "not confirmed yet": `ok: true` is not even proof the
+ * transaction reached the chain. The shared build-through-submit helper
+ * (`executor.ts`'s `submitTransaction`) treats ANY throw from the chain
+ * client's submit call as the ambiguous "lost the HTTP response, but the node
+ * may have already accepted it" case (REQ-23) whenever a request key can be
+ * derived from the signed command — which is unconditional, since that key is
+ * just the signed command's own hash, computed before the network call ever
+ * happens. For `fire` mode this is safe because the subsequent `listen` call
+ * eventually distinguishes a genuine rejection from a real confirmation; for
+ * `submit` mode there is no such follow-up inside this call. A caller polling
+ * a `requestKey` this result returns must be prepared for it to never
+ * confirm — that is an expected outcome requiring a bounded deadline + re-plan
+ * or fail-the-run response (see the chained-runs design's §5.5/§5.7), not a
+ * bug to work around by re-submitting (re-submitting a leg that already has a
+ * request key is exactly the unsafe case the "never re-submit, only poll"
+ * invariant exists to forbid).
+ */
+export interface SubmitResult {
+  readonly ok: boolean;
+  readonly mode: "submit";
+  readonly requestKey?: string;
+  readonly chainId?: string;
+  readonly networkId?: string;
+  /** The preflight read, present on a pre-submit failure. */
+  readonly rawResult?: unknown;
+  readonly error?: string;
+}
+
+export type ExecutorResult = SimulateResult | FireResult | SubmitResult;
 
 /** The raw `codex_cronotons` row shape (JSON columns are still strings here). */
 export interface CodexCronotonRow {
