@@ -19,8 +19,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { installSchema } from "./schema.js";
 import { insertStep } from "./store/steps.js";
-import { createRun, getRun, insertRunLeg, listRunLegs, markLegSubmitted, advanceRunStep } from "./store/runs.js";
+import {
+  createRun,
+  getRun,
+  insertRunLeg,
+  listRunLegs,
+  markLegSubmitted,
+  advanceRunStep,
+  bumpRunAttempt,
+} from "./store/runs.js";
 import { RunLegAlreadyExistsError } from "./store/errors.js";
+import { getYieldPool, upsertYield } from "./store/yields.js";
+import { YieldNotFoundError } from "./pure/yields.js";
 import * as executorModule from "./executor.js";
 import * as runAdvanceModule from "./pure/run-advance.js";
 import { RUN_STEP_DEADLINE_MS } from "./seams.js";
@@ -44,6 +54,10 @@ import { unstallPlanner } from "./planners/unstall.js";
 // cross-phase-review finding: no test anywhere drove a multi-step cronoton
 // through two different real planners before).
 import { injectPlanner } from "./planners/inject.js";
+// Same reasoning, same pattern, for `ouronet.stoa-wrap` — needed by the
+// real drain->wrap->inject yield-carry capstone test below (Wave 3's T5),
+// so that test drives through the REAL registered planner, not a stand-in.
+import { stoaWrapPlanner } from "./planners/stoa-wrap.js";
 
 let db: Database.Database;
 
@@ -1240,5 +1254,353 @@ describe("advanceInFlightRunsOnce — per-run isolation", () => {
     // The included run WAS driven (this is the control, proving the skip is
     // specific to the excluded id, not a blanket no-op).
     expect(listRunLegs(includedRunId, { db })[0]?.status).toBe("submitted");
+  });
+});
+
+describe("driveRunOnce — step-to-step yield carry (docs/work/khronoton-step-yield-carry)", () => {
+  it("a mode:'planner' step with yield_as writes its planner's returned yield into the pool, and a LATER mode:'planner' step's {\"$yield\":...} placeholder resolves to that exact value before its own planner is invoked", async () => {
+    registerStepPlanner("rd-yield-producer", async () => ({
+      legs: [makePlannedLeg("(+ 1 1)")],
+      yield: "123.45",
+    }));
+    registerStepPlanner("rd-yield-consumer", async (step) => {
+      const params = JSON.parse(step.planner_params_json ?? "{}") as { amount?: unknown };
+      return [{ ...makePlannedLeg("(+ 2 2)"), payload: { amount: params.amount } }];
+    });
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "rd-yield-producer",
+        yieldAs: "drainedAmount",
+      },
+      { db },
+    );
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 1,
+        mode: "planner",
+        plannerName: "rd-yield-consumer",
+        plannerParams: { amount: { $yield: "drainedAmount" } },
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 2 }, { db });
+
+    submit.mockResolvedValue({ requestKey: "RK-1" });
+    pollRequestKeys.mockResolvedValue({ "RK-1": { result: { status: "success" } } });
+    currentClient = { dirtyRead, submit, listen, pollRequestKeys };
+
+    await driveRunOnce(runId, NOW, makeCtx());
+
+    expect(getRun(runId, { db })!.status).toBe("succeeded");
+    const legs = listRunLegs(runId, { db }).sort((a, b) => a.step_index - b.step_index);
+    expect(legs).toHaveLength(2);
+    const step1Definition = JSON.parse(legs[1].definition_json) as { payload: { amount: unknown } };
+    // The literal resolved value, never the placeholder text.
+    expect(step1Definition.payload.amount).toBe("123.45");
+    expect(legs[1].definition_json).not.toContain("$yield");
+  });
+
+  it("a mode:'single' step with yield_as captures the confirmed leg's real on-chain return value under that name, readable by a later step's {\"$yield\":...} placeholder", async () => {
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "single",
+        pactCode: "(+ 1 1)",
+        config: { chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: false, ttl: 600 },
+        payload: {},
+        gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
+        signers: [{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }],
+        yieldAs: "collected",
+      },
+      { db },
+    );
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 1,
+        mode: "single",
+        pactCode: "(+ 1 1)",
+        config: { chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: false, ttl: 600 },
+        payload: { amount: { $yield: "collected" } },
+        gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
+        signers: [{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }],
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 2 }, { db });
+
+    submit.mockResolvedValue({ requestKey: "RK-1" });
+    pollRequestKeys.mockResolvedValue({ "RK-1": { result: { status: "success", data: 77 } } });
+    currentClient = { dirtyRead, submit, listen, pollRequestKeys };
+
+    await driveRunOnce(runId, NOW, makeCtx());
+
+    expect(getRun(runId, { db })!.status).toBe("succeeded");
+    expect(getYieldPool(runId, { db })).toEqual({ collected: 77 });
+    const legs = listRunLegs(runId, { db }).sort((a, b) => a.step_index - b.step_index);
+    const step1Definition = JSON.parse(legs[1].definition_json) as { payload: { amount: unknown } };
+    expect(step1Definition.payload.amount).toBe(77);
+  });
+
+  it("a step referencing a yield name no earlier step ever produced throws YieldNotFoundError, propagating through the existing handleReplanStep catch (same path PlannerNotRegisteredError already uses) and terminalizing the run", async () => {
+    registerStepPlanner("rd-test-missing-yield", async () => []);
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "rd-test-missing-yield",
+        plannerParams: { amount: { $yield: "neverProduced" } },
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 1 }, { db });
+
+    await expect(driveRunOnce(runId, NOW, makeCtx())).rejects.toThrow(YieldNotFoundError);
+
+    expect(getRun(runId, { db })!.status).toBe("failed");
+  });
+
+  it("a replanned step's second attempt overwrites the pool entry with its freshest value — nothing downstream ever observes the first, superseded attempt's value", async () => {
+    const plannerSpy = vi
+      .fn()
+      .mockResolvedValueOnce({ legs: [makePlannedLeg("(+ 1 1)")], yield: "first" })
+      .mockResolvedValueOnce({ legs: [makePlannedLeg("(+ 2 2)")], yield: "second" });
+    registerStepPlanner("rd-test-yield-replan", plannerSpy);
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "rd-test-yield-replan",
+        yieldAs: "x",
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 1 }, { db });
+    const ctx = makeCtx({ config: { maxReplanAttempts: 3 } });
+
+    // Pass 1: plans + submits leg 0 (planner call #1, yields "first") — no
+    // poll progress yet (pollRequestKeys not wired), so the pool already
+    // shows "first" once this pass stops.
+    submit.mockResolvedValueOnce({ requestKey: "RK-1" }).mockResolvedValueOnce({ requestKey: "RK-2" });
+    await driveRunOnce(runId, NOW, ctx);
+
+    expect(getYieldPool(runId, { db })).toEqual({ x: "first" });
+    expect(plannerSpy).toHaveBeenCalledTimes(1);
+
+    // Pass 2: leg 0 (RK-1) fails, forcing a genuine re-plan — the SAME
+    // planner's second invocation returns a DIFFERENT yield value ("second").
+    pollRequestKeys.mockImplementation(async (keys: string[]) => {
+      const out: Record<string, { result: { status: string; error?: { message: string } } }> = {};
+      for (const k of keys) {
+        out[k] =
+          k === "RK-1"
+            ? { result: { status: "failure", error: { message: "chain rejected" } } }
+            : { result: { status: "success" } };
+      }
+      return out;
+    });
+    currentClient = { dirtyRead, submit, listen, pollRequestKeys };
+
+    await driveRunOnce(runId, NOW, ctx);
+
+    expect(plannerSpy).toHaveBeenCalledTimes(2);
+    // ONLY the second attempt's value is visible — never the first's,
+    // superseded one.
+    expect(getYieldPool(runId, { db })).toEqual({ x: "second" });
+    expect(getRun(runId, { db })!.status).toBe("succeeded");
+  });
+
+  it("the REAL ouronet.stoa-wrap -> ouronet.aqp-inject chain genuinely carries wrap's amount into inject's amount (the motivating case), not independently re-probed or statically pre-set", async () => {
+    expect(getStepPlanner("ouronet.stoa-wrap")).toBe(stoaWrapPlanner); // this file's import triggered the real self-registration, not a test stand-in
+
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "ouronet.stoa-wrap",
+        plannerParams: { patronAccount: "k:patron-wrap-inject", amountOverride: "50.0" },
+        config: { chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: false, ttl: 600 },
+        payload: {},
+        gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
+        signers: [{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }],
+        yieldAs: "wrappedAmount",
+      },
+      { db },
+    );
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 1,
+        mode: "planner",
+        plannerName: "ouronet.aqp-inject",
+        plannerParams: {
+          fvtId: "fvt-wrap-inject",
+          patronAccount: "k:patron-wrap-inject",
+          rewardDptfId: "dptf-wrap-inject",
+          amount: { $yield: "wrappedAmount" },
+        },
+        config: { chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: false, ttl: 600 },
+        payload: {},
+        gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
+        signers: [{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }],
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 2 }, { db });
+
+    // Pass 1 — step 0 (stoa-wrap): amountOverride is set, so NO coin.get-balance
+    // probe runs at all (Wave 1's T3) — build + submit leg 0 directly.
+    await driveRunOnce(runId, NOW, makeCtx());
+
+    let legs = listRunLegs(runId, { db }).sort((a, b) => a.step_index - b.step_index);
+    expect(legs).toHaveLength(1);
+    expect(legs[0].status).toBe("submitted");
+    expect(getRun(runId, { db })!.step_index).toBe(0);
+    expect(getYieldPool(runId, { db })).toEqual({ wrappedAmount: "50.0" });
+
+    // Pass 2 — polling confirms step 0's leg, advancing to step 1, whose
+    // planner_params_json's {"$yield":"wrappedAmount"} placeholder is
+    // resolved to "50.0" BEFORE injectPlanner ever runs; its own
+    // CC_InjectFinalize probe succeeds, so its leg is built/submitted/
+    // confirmed all within this one call (driveRunOnce's own internal
+    // "drive as far as it will synchronously go" loop).
+    pollRequestKeys.mockResolvedValue({ "RK-1": { result: { status: "success" } } });
+    currentClient = { dirtyRead, submit, listen, pollRequestKeys };
+    dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 50_000 });
+
+    await driveRunOnce(runId, NOW, makeCtx());
+
+    legs = listRunLegs(runId, { db }).sort((a, b) => a.step_index - b.step_index);
+    expect(legs).toHaveLength(2);
+    expect(legs[0].status).toBe("confirmed");
+    expect(legs[1].status).toBe("confirmed");
+    const injectDef = JSON.parse(legs[1].definition_json) as { pactCode: string; payload: Record<string, unknown> };
+    expect(injectDef.pactCode).toContain("CC_InjectFinalize");
+    // The exact motivating case: inject's amount genuinely carried from
+    // wrap's actual used amount, not independently re-probed or statically
+    // pre-set.
+    expect(injectDef.payload.amount).toBe("50.0");
+    expect(getRun(runId, { db })!.status).toBe("succeeded");
+  });
+
+  it("REGRESSION (terminal-pass finding): a planner returning { legs: [], yield } on a step with yield_as still persists the yield, even though the step's own barrier clears with zero legs", async () => {
+    registerStepPlanner("rd-test-empty-legs-yield", async () => ({
+      legs: [],
+      yield: "nothing-to-drain-this-pass",
+    }));
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "rd-test-empty-legs-yield",
+        yieldAs: "drainResult",
+      },
+      { db },
+    );
+    const runId = createRun({ codexCronotonId: "cc-1", stepCount: 1 }, { db });
+
+    await driveRunOnce(runId, NOW, makeCtx());
+
+    // The step is trivially satisfied (zero legs, matching the existing
+    // "nothing owed" convention) AND its reported yield is still readable —
+    // before the fix, the early `return handleAdvanceStep(...)` for the
+    // empty-legs case skipped the yield-write entirely.
+    expect(getRun(runId, { db })!.status).toBe("succeeded");
+    expect(getYieldPool(runId, { db })).toEqual({ drainResult: "nothing-to-drain-this-pass" });
+  });
+
+  it("REGRESSION (terminal-pass finding): a concurrent loser's yield is never written — the yield upsert only runs after this caller's OWN legs have actually been inserted, not before", async () => {
+    let concurrentRunId = "";
+    registerStepPlanner("rd-test-yield-race", async () => {
+      // Simulates a DIFFERENT concurrent `driveRunOnce` caller having
+      // already won this exact leg-index slot AND already recorded its
+      // own (different) yield value — mirroring the existing
+      // "REGRESSION GUARD #2" concurrent-race test's own simulation
+      // pattern above, extended to also cover the yield pool.
+      insertRunLeg({ runId: concurrentRunId, stepIndex: 0, legIndex: 0, definitionJson: "{}" }, { db });
+      upsertYield({ runId: concurrentRunId, name: "x", value: "winning-value", stepIndex: 0 }, { db });
+      return { legs: [makePlannedLeg("(+ 1 1)")], yield: "losing-value" };
+    });
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "rd-test-yield-race",
+        yieldAs: "x",
+      },
+      { db },
+    );
+    concurrentRunId = createRun({ codexCronotonId: "cc-1", stepCount: 1 }, { db });
+
+    await expect(driveRunOnce(concurrentRunId, NOW, makeCtx())).rejects.toThrow(RunLegAlreadyExistsError);
+
+    // The losing caller's `insertRunLeg` throws BEFORE its own `upsertYield`
+    // call is ever reached (legs are inserted first, per the fix) — the
+    // pool must still show the concurrent winner's value, never the
+    // loser's, regardless of which caller's planner invocation happened to
+    // finish computing its yield last.
+    expect(getYieldPool(concurrentRunId, { db })).toEqual({ x: "winning-value" });
+  });
+
+  it("REGRESSION (round-3 terminal-pass finding): a concurrent genuine-replan racer's bumpRunAttempt is never double-counted — the loser's insertRunLeg collision happens BEFORE its own bumpRunAttempt/touchRunDeadline calls, not after", async () => {
+    let concurrentRunId = "";
+    const plannerSpy = vi
+      .fn()
+      .mockResolvedValueOnce([makePlannedLeg("(+ 1 1)")]) // pass 1: plans leg 0 (first entry, not a replan)
+      .mockImplementationOnce(async () => {
+        // Pass 2 is a GENUINE re-plan for this caller too (a prior leg
+        // already exists for this step) — simulate a DIFFERENT concurrent
+        // `driveRunOnce` caller having already won this exact re-plan
+        // generation: its own bumpRunAttempt + insertRunLeg already landed,
+        // between THIS call's own (now-stale) allRunLegs read and this
+        // call's insertRunLeg write below.
+        bumpRunAttempt(concurrentRunId, { db });
+        insertRunLeg(
+          { runId: concurrentRunId, stepIndex: 0, legIndex: 1, definitionJson: "{}", attempt: 1 },
+          { db },
+        );
+        return [makePlannedLeg("(+ 2 2)")];
+      });
+    registerStepPlanner("rd-test-attempt-race", plannerSpy);
+    insertStep(
+      { codexCronotonId: "cc-1", stepIndex: 0, mode: "planner", plannerName: "rd-test-attempt-race" },
+      { db },
+    );
+    concurrentRunId = createRun({ codexCronotonId: "cc-1", stepCount: 1 }, { db });
+    const ctx = makeCtx({ config: { maxReplanAttempts: 3 } });
+
+    // Pass 1: plans + submits leg 0 normally (first entry, isReplan=false).
+    submit.mockResolvedValueOnce({ requestKey: "RK-1" });
+    await driveRunOnce(concurrentRunId, NOW, ctx);
+    expect(getRun(concurrentRunId, { db })!.attempt).toBe(0);
+
+    // Pass 2: leg 0 fails on poll, forcing THIS caller into a genuine
+    // re-plan (isReplan=true) — whose own planner invocation triggers the
+    // simulated concurrent winner above, which collides on leg_index 1.
+    pollRequestKeys.mockResolvedValue({
+      "RK-1": { result: { status: "failure", error: { message: "chain rejected" } } },
+    });
+    currentClient = { dirtyRead, submit, listen, pollRequestKeys };
+
+    await expect(driveRunOnce(concurrentRunId, NOW, ctx)).rejects.toThrow(RunLegAlreadyExistsError);
+
+    // Only ONE bump ever happened — the simulated concurrent winner's,
+    // executed inside the planner mock above. This (losing) caller's OWN
+    // insertRunLeg call threw before it ever reached its own
+    // bumpRunAttempt/touchRunDeadline calls, which now run strictly AFTER
+    // the leg-insert loop. Before the fix, this caller's bump would have
+    // already landed (making attempt 2), double-counting a single re-plan
+    // generation and burning the maxReplanAttempts budget twice as fast.
+    expect(getRun(concurrentRunId, { db })!.attempt).toBe(1);
   });
 });

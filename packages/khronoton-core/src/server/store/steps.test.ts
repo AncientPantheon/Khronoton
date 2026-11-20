@@ -9,7 +9,7 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { insertStep, listStepsForCronoton } from "./steps.js";
+import { getStepByIndex, insertStep, listStepsForCronoton } from "./steps.js";
 import { StepAlreadyExistsError } from "./errors.js";
 import { installSchema } from "../schema.js";
 
@@ -157,6 +157,53 @@ describe("insertStep — idempotent flag", () => {
   });
 });
 
+describe("insertStep — yieldAs", () => {
+  it("persists yield_as on a mode:'single' step, readable via listStepsForCronoton", () => {
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "single",
+        pactCode: "(drain-miner)",
+        yieldAs: "drainedAmount",
+      },
+      { db },
+    );
+
+    const steps = listStepsForCronoton("cc-1", { db });
+
+    expect(steps[0].yield_as).toBe("drainedAmount");
+  });
+
+  it("persists yield_as on a mode:'planner' step, readable via listStepsForCronoton", () => {
+    insertStep(
+      {
+        codexCronotonId: "cc-1",
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "ouronet.stoa-wrap",
+        yieldAs: "wrappedAmount",
+      },
+      { db },
+    );
+
+    const steps = listStepsForCronoton("cc-1", { db });
+
+    expect(steps[0].yield_as).toBe("wrappedAmount");
+  });
+
+  it("leaves yield_as null when omitted (backward compatible with every existing insertStep call)", () => {
+    insertStep(
+      { codexCronotonId: "cc-1", stepIndex: 0, mode: "single", pactCode: "(no-yield)" },
+      { db },
+    );
+
+    const steps = listStepsForCronoton("cc-1", { db });
+
+    expect(steps[0].yield_as).toBeNull();
+  });
+});
+
 describe("insertStep — UNIQUE (codex_cronoton_id, step_index)", () => {
   it("throws the typed StepAlreadyExistsError (not a raw SqliteError) on a second insert for the same (codexCronotonId, stepIndex) pair", () => {
     insertStep(
@@ -173,5 +220,33 @@ describe("insertStep — UNIQUE (codex_cronoton_id, step_index)", () => {
 
     // The first row is untouched — exactly one step exists at step_index 0.
     expect(listStepsForCronoton("cc-1", { db })).toHaveLength(1);
+  });
+});
+
+describe("getStepByIndex", () => {
+  it("returns the step row at the given (codexCronotonId, stepIndex) slot via a direct lookup, not a full-list scan", () => {
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 0, mode: "single", pactCode: "(zero)" }, { db });
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 1, mode: "single", pactCode: "(one)" }, { db });
+
+    const step = getStepByIndex("cc-1", 1, { db });
+
+    expect(step).not.toBeNull();
+    expect(step?.pact_code).toBe("(one)");
+    expect(step?.step_index).toBe(1);
+  });
+
+  it("returns null for a step_index that does not exist for the cronoton", () => {
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 0, mode: "single", pactCode: "(zero)" }, { db });
+
+    expect(getStepByIndex("cc-1", 7, { db })).toBeNull();
+  });
+
+  it("never returns a different cronoton's step at the same index (scoped by codexCronotonId, not step_index alone)", () => {
+    seedCronoton("cc-2");
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 0, mode: "single", pactCode: "(cc-1 step 0)" }, { db });
+    insertStep({ codexCronotonId: "cc-2", stepIndex: 0, mode: "single", pactCode: "(cc-2 step 0)" }, { db });
+
+    expect(getStepByIndex("cc-1", 0, { db })?.pact_code).toBe("(cc-1 step 0)");
+    expect(getStepByIndex("cc-2", 0, { db })?.pact_code).toBe("(cc-2 step 0)");
   });
 });

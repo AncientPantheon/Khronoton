@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
+import { normalizePlannerResult } from "./registry.js";
 import { stoaWrapPlanner } from "./stoa-wrap.js";
 
 const PUB_A = "aa".repeat(32);
@@ -87,6 +88,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     signers_json: JSON.stringify([{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }]),
     planner_name: "ouronet.stoa-wrap",
     planner_params_json: JSON.stringify({ patronAccount: "k:patron" }),
+    yield_as: null,
     idempotent: 0,
     created_at: "t0",
     modified_at: "t0",
@@ -106,7 +108,8 @@ describe("stoaWrapPlanner", () => {
   it("reads the live balance via coin.get-balance (no namespace prefix) and builds exactly one LQD|C_WrapStoa leg with the exact namespaced pact code and payload, amount formatted as a decimal with a '.'", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const result = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs, yield: y } = normalizePlannerResult(result);
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).toBe(
@@ -128,14 +131,15 @@ describe("stoaWrapPlanner", () => {
       ttl: 600,
     });
     expect(legs[0].gasPayer).toEqual({ type: "gas-station", gasStationSignerKey: PUB_GASSTATION });
+    expect(y).toBe("5.0");
   });
 
-  it("returns [] without building any leg when the live balance is 0, and never calls dirtyRead a second time", async () => {
+  it("returns a bare [] (no yield field) without building any leg when the live balance is 0, and never calls dirtyRead a second time", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 0 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const result = await stoaWrapPlanner(makeStepRow(), makeCtx());
 
-    expect(legs).toEqual([]);
+    expect(result).toEqual([]);
     expect(dirtyRead).toHaveBeenCalledTimes(1);
   });
 
@@ -147,7 +151,7 @@ describe("stoaWrapPlanner", () => {
       gas_payer_json: JSON.stringify({ type: "gas-station", gasStationSignerKey: PUB_A }),
     });
 
-    const legs = await stoaWrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(coin.TRANSFER "k:patron" "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" 5.0)\n' +
@@ -159,7 +163,7 @@ describe("stoaWrapPlanner", () => {
   it("does NOT append a GAS_PAYER capability when signer 0's key differs from the gas-station's signing key (the ordinary, non-colliding case)", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(coin.TRANSFER "k:patron" "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" 5.0)',
@@ -174,7 +178,7 @@ describe("stoaWrapPlanner", () => {
       ]),
     });
 
-    const legs = await stoaWrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(some.OTHER-CAP "x")\n(coin.TRANSFER "k:patron" "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" 5.0)',
@@ -185,7 +189,7 @@ describe("stoaWrapPlanner", () => {
   it('formats an integer balance (5) as "5.0", not "5", so Pact\'s read-decimal accepts it', async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].payload.amount).toBe("5.0");
   });
@@ -232,7 +236,7 @@ describe("stoaWrapPlanner", () => {
   it("formats a fractional balance with trailing zeros stripped down to at least one digit after the decimal point", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5.100000000000 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].payload.amount).toBe("5.1");
   });
@@ -240,7 +244,7 @@ describe("stoaWrapPlanner", () => {
   it("formats a balance that already has a clean fractional part unchanged", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5.25 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].payload.amount).toBe("5.25");
   });
@@ -254,7 +258,7 @@ describe("stoaWrapPlanner", () => {
   it("formats a realistic measured balance (262613.4, from the source handoff's own measurement) WITHOUT binary-floating-point representation noise — regression test for a real bug a behavioral smoke test against the built artifact found: toFixed(12) on this exact value produces \"262613.400000000023\"", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 262613.4 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].payload.amount).toBe("262613.4");
     expect(legs[0].signers[0].capabilities).toBe(
@@ -265,7 +269,7 @@ describe("stoaWrapPlanner", () => {
   it("expands a sub-1e-6-magnitude dust balance to plain decimal form, never scientific notation, since Pact decimal literals have no exponent syntax", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 1e-7 } });
 
-    const legs = await stoaWrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].payload.amount).toBe("0.0000001");
   });
@@ -286,9 +290,69 @@ describe("stoaWrapPlanner", () => {
       ]),
     });
 
-    const legs = await stoaWrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaWrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers).toHaveLength(2);
     expect(legs[0].signers[1]).toEqual(otherSigner);
+  });
+
+  it("builds the leg using amountOverride directly WITHOUT calling coin.get-balance (dirtyRead) at all, proving the probe is genuinely skipped", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({ patronAccount: "k:patron", amountOverride: "50.0" }),
+    });
+
+    const { legs, yield: y } = normalizePlannerResult(await stoaWrapPlanner(step, makeCtx()));
+
+    expect(dirtyRead).not.toHaveBeenCalled();
+    expect(legs).toHaveLength(1);
+    expect(legs[0].payload.amount).toBe("50.0");
+    expect(y).toBe("50.0");
+  });
+
+  it("returns a bare [] (no leg, no yield) for a zero amountOverride, mirroring the live-probe path's own zero-balance short-circuit — regression: previously built a real zero-value wrap leg instead", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({ patronAccount: "k:patron", amountOverride: "0.0" }),
+    });
+
+    const result = await stoaWrapPlanner(step, makeCtx());
+
+    expect(result).toEqual([]);
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("rejects an amountOverride that is not a non-negative decimal string (bare integer '5'), before building any leg or probing the chain", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({ patronAccount: "k:patron", amountOverride: "5" }),
+    });
+
+    await expect(stoaWrapPlanner(step, makeCtx())).rejects.toThrow(
+      /amountOverride must be a non-negative decimal string/,
+    );
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("rejects an amountOverride that isn't numeric at all ('abc'), before building any leg or probing the chain", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({ patronAccount: "k:patron", amountOverride: "abc" }),
+    });
+
+    await expect(stoaWrapPlanner(step, makeCtx())).rejects.toThrow(
+      /amountOverride must be a non-negative decimal string/,
+    );
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("returns { legs, yield } — not a bare PlannedLeg[] — in the live-probe path too, with yield equal to the exact amount string used to build the leg", async () => {
+    dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5 } });
+
+    const result = await stoaWrapPlanner(makeStepRow(), makeCtx());
+
+    expect(Array.isArray(result)).toBe(false);
+    if (Array.isArray(result)) {
+      throw new Error("unreachable — asserted above that result is not an array");
+    }
+    expect(result).toHaveProperty("legs");
+    expect(result).toHaveProperty("yield", "5.0");
+    expect(result.legs[0].payload.amount).toBe(result.yield);
   });
 });

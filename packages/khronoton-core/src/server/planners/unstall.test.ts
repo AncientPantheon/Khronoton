@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
+import { normalizePlannerResult } from "./registry.js";
 import { unstallPlanner } from "./unstall.js";
 
 const PUB_A = "aa".repeat(32);
@@ -81,6 +82,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     signers_json: JSON.stringify([{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }]),
     planner_name: "ouronet.aqp-unstall",
     planner_params_json: JSON.stringify({ fvtId: "fvt-1", patronAccount: "k:patron", rewardDptfId: "dptf-1" }),
+    yield_as: null,
     idempotent: 0,
     created_at: "t0",
     modified_at: "t0",
@@ -100,7 +102,7 @@ describe("unstallPlanner", () => {
   it("returns [] when URH_FvtStalePresentUsers reads zero stale users — step trivially satisfied, no further chain calls", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
 
-    const legs = await unstallPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await unstallPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toEqual([]);
     expect(dirtyRead).toHaveBeenCalledTimes(1);
@@ -113,7 +115,7 @@ describe("unstallPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 1_000 }) // probe(1 item)
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 3_000 }); // probe(all 3 items)
 
-    const legs = await unstallPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await unstallPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).toBe(
@@ -137,7 +139,7 @@ describe("unstallPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 3_000_000 }) // confirm probe at modeled capacity (50 items) — refused, over ceiling
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 1_500_000 }); // confirm probe at shrunk capacity (34 items) — succeeds
 
-    const legs = await unstallPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await unstallPlanner(makeStepRow(), makeCtx()));
 
     // Pins the EXACT shape the shrink-and-retry loop must produce from these
     // mocked gas values (traced by hand against `pure/split-plan.ts`'s real

@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
+import { normalizePlannerResult } from "./registry.js";
 import { stoaUnwrapPlanner } from "./stoa-unwrap.js";
 
 const PUB_A = "aa".repeat(32);
@@ -86,6 +87,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     signers_json: JSON.stringify([{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }]),
     planner_name: "ouronet.stoa-unwrap",
     planner_params_json: JSON.stringify({ patronAccount: "k:patron", amount: "5.0" }),
+    yield_as: null,
     idempotent: 0,
     created_at: "t0",
     modified_at: "t0",
@@ -107,7 +109,7 @@ describe("stoaUnwrapPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "success", data: "k:target123abc" } })
       .mockResolvedValueOnce({ result: { status: "success", data: 50 } });
 
-    const legs = await stoaUnwrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).toBe(
@@ -138,7 +140,7 @@ describe("stoaUnwrapPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "success", data: "k:target123abc" } })
       .mockResolvedValueOnce({ result: { status: "success", data: false } });
 
-    const legs = await stoaUnwrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).toBe(
@@ -163,7 +165,7 @@ describe("stoaUnwrapPlanner", () => {
       gas_payer_json: JSON.stringify({ type: "gas-station", gasStationSignerKey: PUB_A }),
     });
 
-    const legs = await stoaUnwrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(coin.TRANSFER "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" "k:target123abc" 5.0)\n' +
@@ -177,7 +179,7 @@ describe("stoaUnwrapPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "success", data: "k:target123abc" } })
       .mockResolvedValueOnce({ result: { status: "success", data: 50 } });
 
-    const legs = await stoaUnwrapPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(makeStepRow(), makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(coin.TRANSFER "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" "k:target123abc" 5.0)',
@@ -194,7 +196,7 @@ describe("stoaUnwrapPlanner", () => {
       ]),
     });
 
-    const legs = await stoaUnwrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers[0].capabilities).toBe(
       '(some.OTHER-CAP "x")\n(coin.TRANSFER "c:ZNfuj3iZI83n7MUSKGuoXoSxFg1cyMxCzB3szUHVvrI" "k:target123abc" 5.0)',
@@ -298,7 +300,7 @@ describe("stoaUnwrapPlanner", () => {
       ]),
     });
 
-    const legs = await stoaUnwrapPlanner(step, makeCtx());
+    const { legs } = normalizePlannerResult(await stoaUnwrapPlanner(step, makeCtx()));
 
     expect(legs[0].signers).toHaveLength(2);
     expect(legs[0].signers[1]).toEqual(otherSigner);

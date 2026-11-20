@@ -2,7 +2,7 @@
  * schema — shape verification for the consolidated `installSchema(db)` DDL.
  *
  * This is an infrastructure (DDL) surface, so the test verifies the SHAPE the
- * installer produces rather than business logic: the six tables exist, the
+ * installer produces rather than business logic: the seven tables exist, the
  * genericization deltas hold (no `jobs(id)` FK on `job_id`, no CHECK on
  * `fires.status`), the `ON DELETE CASCADE` from a cronoton reaches its fires and
  * manual batches, and a re-run is idempotent. A real `better-sqlite3` handle
@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 describe("installSchema", () => {
-  it("creates all six codex tables", () => {
+  it("creates all seven codex tables", () => {
     const names = db
       .prepare(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'codex_%' ORDER BY name`,
@@ -48,6 +48,7 @@ describe("installSchema", () => {
       "codex_cronoton_fires",
       "codex_cronoton_manual_batches",
       "codex_cronoton_run_legs",
+      "codex_cronoton_run_yields",
       "codex_cronoton_runs",
       "codex_cronoton_steps",
       "codex_cronotons",
@@ -284,6 +285,56 @@ describe("installSchema", () => {
     expect(namesAfter).toContain("codex_cronoton_steps");
     expect(namesAfter).toContain("codex_cronoton_runs");
     expect(namesAfter).toContain("codex_cronoton_run_legs");
+  });
+
+  it("creates codex_cronoton_run_yields with the expected columns and a UNIQUE index on (run_id, name), on both a fresh install and a re-run", () => {
+    const expectedColumns = ["id", "run_id", "name", "value_json", "step_index", "created_at"];
+
+    const assertShape = (handle: Database.Database) => {
+      const cols = handle
+        .prepare(`PRAGMA table_info(codex_cronoton_run_yields)`)
+        .all()
+        .map((c) => (c as { name: string }).name);
+      for (const expected of expectedColumns) {
+        expect(cols).toContain(expected);
+      }
+
+      const indexes = handle
+        .prepare(`PRAGMA index_list(codex_cronoton_run_yields)`)
+        .all() as Array<{ name: string; unique: number }>;
+      const nameIndex = indexes.find((idx) => {
+        const indexCols = handle
+          .prepare(`PRAGMA index_info(${idx.name})`)
+          .all()
+          .map((c) => (c as { name: string }).name);
+        return indexCols.includes("run_id") && indexCols.includes("name");
+      });
+      expect(nameIndex).toBeDefined();
+      expect(nameIndex?.unique).toBe(1);
+    };
+
+    // Fresh install (already installed in beforeEach).
+    assertShape(db);
+
+    // Re-run against an already-provisioned DB is idempotent.
+    expect(() => installSchema(db)).not.toThrow();
+    assertShape(db);
+  });
+
+  it("adds a nullable yield_as TEXT column to codex_cronoton_steps, on both a fresh install and a re-run", () => {
+    const assertHasYieldAs = (handle: Database.Database) => {
+      const cols = handle
+        .prepare(`PRAGMA table_info(codex_cronoton_steps)`)
+        .all() as Array<{ name: string; notnull: number }>;
+      const yieldAs = cols.find((c) => c.name === "yield_as");
+      expect(yieldAs).toBeDefined();
+      expect(yieldAs?.notnull).toBe(0);
+    };
+
+    assertHasYieldAs(db);
+
+    expect(() => installSchema(db)).not.toThrow();
+    assertHasYieldAs(db);
   });
 
   it("public_token has a unique index that still allows multiple NULLs", () => {

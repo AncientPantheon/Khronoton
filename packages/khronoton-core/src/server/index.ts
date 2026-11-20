@@ -87,6 +87,16 @@ export type { RuntimeArgs, ValidateRuntimeArgsResult } from "./pure/runtime-args
 export { advanceRun } from "./pure/run-advance.js";
 export type { StepMode, RunState, LegState, RunPolicy, RunAction } from "./pure/run-advance.js";
 
+// ── Step-to-step yield carry (docs/work/khronoton-step-yield-carry) ──────────
+// Only the typed error is public — `resolveYieldRefs`/`resolveSingleStepPayload`
+// are internal resolution mechanics (consulted transparently by
+// `resolvePlannerFor`/`runs-driver.ts`/`handlers/steps.ts`, never something an
+// external caller builds a step against directly), matching every OTHER
+// typed error this package throws (`RunAlreadyInFlightError`,
+// `PlannerNotRegisteredError`, etc.) being public so a host can `instanceof`-
+// check it from its own error handling.
+export { YieldNotFoundError } from "./pure/yields.js";
+
 // ── Consolidated schema installer (T1.6) ─────────────────────────────────────
 export { installSchema } from "./schema.js";
 

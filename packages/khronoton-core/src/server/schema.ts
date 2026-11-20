@@ -1,8 +1,9 @@
 /**
- * The consolidated DDL installer for the six codex-cronoton tables: the
+ * The consolidated DDL installer for the seven codex-cronoton tables: the
  * original three (`codex_cronotons`, `codex_cronoton_fires`,
  * `codex_cronoton_manual_batches`) plus the chained-runs tables
- * (`codex_cronoton_steps`, `codex_cronoton_runs`, `codex_cronoton_run_legs`).
+ * (`codex_cronoton_steps`, `codex_cronoton_runs`, `codex_cronoton_run_legs`)
+ * plus the step-to-step yield carry table (`codex_cronoton_run_yields`).
  *
  * This folds the Hub's incremental migration chain (base tables + a dozen later
  * ALTERs) into the FINAL column shapes, emitted in a single idempotent call.
@@ -170,6 +171,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronoton_run_legs_slot
   ON codex_cronoton_run_legs(run_id, step_index, leg_index);
 CREATE INDEX IF NOT EXISTS idx_codex_cronoton_run_legs_barrier
   ON codex_cronoton_run_legs(run_id, step_index, status);
+
+CREATE TABLE IF NOT EXISTS codex_cronoton_run_yields (
+  id         TEXT PRIMARY KEY,
+  run_id     TEXT NOT NULL REFERENCES codex_cronoton_runs(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_cronoton_run_yields_name
+  ON codex_cronoton_run_yields(run_id, name);
 `;
 
 /**
@@ -196,7 +208,7 @@ function ensureColumn(db: Database, table: string, column: string, columnDefSql:
 }
 
 /**
- * Installs the six codex-cronoton tables and their indexes on the injected DB
+ * Installs the seven codex-cronoton tables and their indexes on the injected DB
  * handle in a single idempotent call. Safe to re-run: every statement is guarded
  * with `IF NOT EXISTS`.
  *
@@ -224,4 +236,9 @@ export function installSchema(db: Database): void {
   // status enum value, so the existing CHECK constraint is untouched. See
   // `store/runs.ts`'s `claimLegForSubmit`/`releaseLegClaim`.
   ensureColumn(db, "codex_cronoton_run_legs", "claimed_at", "TEXT");
+  // Step-to-step yield carry: the NAME a step's confirmed on-chain return
+  // value (mode:'single') or planner-returned yield (mode:'planner') gets
+  // stored under in `codex_cronoton_run_yields`. Additive via `ensureColumn`,
+  // covering both a fresh install and an already-provisioned database.
+  ensureColumn(db, "codex_cronoton_steps", "yield_as", "TEXT");
 }

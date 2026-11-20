@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
+import { normalizePlannerResult } from "./registry.js";
 import { injectPlanner } from "./inject.js";
 
 const PUB_A = "aa".repeat(32);
@@ -85,6 +86,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
       rewardDptfId: "dptf-1",
       amount: "12.345",
     }),
+    yield_as: null,
     idempotent: 0,
     created_at: "t0",
     modified_at: "t0",
@@ -104,7 +106,7 @@ describe("injectPlanner", () => {
   it("returns exactly one leg (CC_InjectFinalize) when the finalize simulation succeeds, with amount flowing through payload unmodified", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 50000 });
 
-    const legs = await injectPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await injectPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     // The FULL namespaced pact code — `ouronet-ns.AQP-FVT`, built from
@@ -130,7 +132,7 @@ describe("injectPlanner", () => {
       .mockResolvedValueOnce({ result: { status: "failure", error: { message: "stale stakers remain" } } })
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 50000 });
 
-    const legs = await injectPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await injectPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     // Exact match (not a `toContain("CC_Inject")` substring check, which

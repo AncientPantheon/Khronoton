@@ -19,6 +19,7 @@
 import type { CodexGasPayer, CodexSigner, CodexTxConfig } from "../types.js";
 import type { ChainRuntime, Config, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
+import { resolveYieldRefs } from "../pure/yields.js";
 
 /**
  * The seams a step planner runs against — the same three injectable
@@ -52,14 +53,51 @@ export interface PlannedLeg {
  * A step planner: given the step row + the injected seams, decides the legs
  * to build for the step's current pass. An empty array means "nothing to do
  * this pass" — `handleReplanStep` treats that like a cleared barrier.
+ *
+ * A planner may ALSO return `{ legs, yield? }` instead of a bare array, to
+ * additionally report a value for `runs-driver.ts` to store into the run's
+ * yield pool (`docs/work/khronoton-step-yield-carry/design.md`'s "Producing
+ * a yield") — see `normalizePlannerResult` below. The bare-array return
+ * stays valid forever; none of the 5 existing built-ins that don't produce a
+ * yield (`evict`/`inject`/`unstall`/`stoa-unwrap`) are forced to change.
+ * Deliberately a bare, unnamed `yield` value here — the NAME a yield is
+ * stored under always comes from the consuming step's own `step.yield_as`,
+ * decided by whoever wrote the step, never by the planner itself.
  */
 export type StepPlanner = (
   step: CodexCronotonStepRow,
   ctx: PlannerCtx,
-) => Promise<PlannedLeg[]>;
+) => Promise<PlannedLeg[] | { legs: PlannedLeg[]; yield?: unknown }>;
 
-/** Registry of step planners keyed by `planner_name`. */
-const STEP_PLANNERS: Record<string, StepPlanner> = {};
+/**
+ * Normalize a `StepPlanner`'s return value to the `{ legs, yield? }` shape
+ * regardless of which form the planner actually returned — the SINGLE
+ * shared normalizer `runs-driver.ts` and `handlers/steps.ts` both call, so
+ * neither hand-rolls its own array-vs-object check.
+ */
+export function normalizePlannerResult(
+  result: Awaited<ReturnType<StepPlanner>>,
+): { legs: PlannedLeg[]; yield?: unknown } {
+  if (Array.isArray(result)) return { legs: result };
+  return result;
+}
+
+/**
+ * Registry of step planners keyed by `planner_name`. Built via
+ * `Object.create(null)`, NOT a `{}` literal — `planner_name` is unconstrained
+ * free-form `TEXT` (schema.ts only enforces NOT NULL for a planner-mode
+ * step, no enum/whitelist), so a step row naming
+ * `"constructor"`/`"toString"`/`"hasOwnProperty"`/etc. would otherwise make a
+ * `{}`-based lookup return a truthy inherited `Object.prototype` member
+ * instead of `undefined`, bypassing every caller's "undefined means not
+ * registered" contract (`resolvePlannerFor` below, and
+ * `runs-driver.ts`'s/`handlers/steps.ts`'s "planner not registered" branches)
+ * and failing downstream with an unrelated `TypeError` instead of the
+ * intended clean `PlannerNotRegisteredError`/404. Mirrors the identical fix
+ * already applied to the sibling yield pool (`store/yields.ts`'s
+ * `getYieldPool`) for the same class of bug.
+ */
+const STEP_PLANNERS: Record<string, StepPlanner> = Object.create(null);
 
 /**
  * Register (or replace) a named step planner. A module that owns a planner
@@ -70,7 +108,9 @@ export function registerStepPlanner(name: string, planner: StepPlanner): void {
   STEP_PLANNERS[name] = planner;
 }
 
-/** Read a registered step planner by name, or `undefined`. */
+/** Read a registered step planner by name, or `undefined` — including for a
+ * name colliding with an `Object.prototype` member, since `STEP_PLANNERS` is
+ * prototype-less (see its own doc comment above). */
 export function getStepPlanner(name: string): StepPlanner | undefined {
   return STEP_PLANNERS[name];
 }
@@ -86,13 +126,32 @@ export function getStepPlanner(name: string): StepPlanner | undefined {
  * Returns `undefined` for an unregistered `planner_name` — callers decide
  * how to report that (a thrown `PlannerNotRegisteredError` for the real
  * driver, a 404 for the standalone-fire route).
+ *
+ * Also resolves any `{"$yield": "<name>"}` placeholder in the step's
+ * `planner_params_json` against `yieldPool` BEFORE a caller ever invokes the
+ * planner (`docs/work/khronoton-step-yield-carry/design.md`'s "Consuming a
+ * yield") — returned as a shallow-cloned `resolvedStep` with that field
+ * replaced by the resolved JSON string, so `ouronet.aqp-inject` and every
+ * other planner keep calling `parseJson(step.planner_params_json, {})`
+ * exactly as they do today and simply receive already-resolved values; zero
+ * planner-side changes needed. `yieldPool` defaults to `{}`, so every
+ * pre-Wave-3 call site (passing only `(step, seams)`) is unaffected — a step
+ * with no `$yield` references anywhere resolves byte-identical to before
+ * this parameter existed.
  */
 export function resolvePlannerFor(
   step: CodexCronotonStepRow,
   seams: { runtime: ChainRuntime; resolver: KeyResolver; config?: Partial<Config> },
-): { planner: StepPlanner; plannerCtx: PlannerCtx } | undefined {
+  yieldPool: Record<string, unknown> = {},
+): { planner: StepPlanner; plannerCtx: PlannerCtx; resolvedStep: CodexCronotonStepRow } | undefined {
   const planner = getStepPlanner(step.planner_name ?? "");
   if (!planner) return undefined;
   const plannerCtx: PlannerCtx = { runtime: seams.runtime, resolver: seams.resolver, config: seams.config };
-  return { planner, plannerCtx };
+  const resolvedStep: CodexCronotonStepRow = {
+    ...step,
+    planner_params_json: JSON.stringify(
+      resolveYieldRefs(JSON.parse(step.planner_params_json ?? "{}"), yieldPool),
+    ),
+  };
+  return { planner, plannerCtx, resolvedStep };
 }

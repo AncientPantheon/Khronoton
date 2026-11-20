@@ -109,7 +109,7 @@ export type {
 } from "./public.js";
 
 // ── Chained-run step definitions: insert / list ──────────────────────────────
-export { insertStep, listStepsForCronoton } from "./steps.js";
+export { insertStep, listStepsForCronoton, getStepByIndex } from "./steps.js";
 export type { InsertStepInput, CodexCronotonStepRow } from "./steps.js";
 
 // ── Chained runs + legs: create / read / leg lifecycle ────────────────────────
@@ -131,3 +131,6 @@ export {
   touchRunDeadline,
 } from "./runs.js";
 export type { CreateRunInput, CodexCronotonRunRow, CodexCronotonRunLegRow } from "./runs.js";
+
+// ── Step-to-step yield carry: upsert / read the per-run named-yield pool ─────
+export { upsertYield, getYieldPool } from "./yields.js";

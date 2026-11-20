@@ -6,12 +6,16 @@
  *
  * Shape: always exactly ONE leg (never fans out — this built-in exists for
  * the capability-construction risk alone, see design.md's problem statement,
- * not for leg-count complexity). The amount is a LIVE `coin.get-balance`
- * read of the patron's current STOA balance, not an inter-step-carried
- * value (Khronoton has no mechanism for that yet — see design.md §A,
- * "Out of scope") — a self-correcting choice: if a prior drain step landed
- * and wrap hasn't run yet (or failed and is re-planned), the patron's
- * balance at read-time already equals exactly what's eligible to wrap.
+ * not for leg-count complexity). By default the amount is a LIVE
+ * `coin.get-balance` read of the patron's current STOA balance — a
+ * self-correcting choice: if a prior drain step landed and wrap hasn't run
+ * yet (or failed and is re-planned), the patron's balance at read-time
+ * already equals exactly what's eligible to wrap. `params.amountOverride`
+ * (see `docs/work/khronoton-step-yield-carry/design.md`) lets a caller skip
+ * that live probe entirely and supply the exact amount to wrap instead —
+ * e.g. a prior step's carried yield, via `{"$yield": "..."}` resolution one
+ * layer up. Either way, the function always reports the final amount it
+ * actually used back out as `yield`, so a later step can carry it forward.
  *
  * `coin` is called WITHOUT a namespace prefix throughout this module —
  * unlike `ouronet-ns.AQP-EVCT`/`ouronet-ns.AQP-FVT`, `coin` is Kadena's
@@ -37,6 +41,15 @@ function parseJson<T>(json: string | null, fallback: T): T {
 /** `stoaWrapPlanner`'s own `planner_params_json` shape. */
 interface StoaWrapPlannerParams {
   patronAccount: string;
+  /**
+   * When set, use this EXACT decimal string as the wrap amount instead of
+   * live-probing `coin.get-balance` — lets a later step (via the yield
+   * mechanism, Wave 2's T4) hand this planner a specific carried amount
+   * rather than always re-reading whatever the patron account happens to
+   * hold at fire time. See design.md's "step-to-step yield carry" problem
+   * statement.
+   */
+  amountOverride?: string;
 }
 
 /**
@@ -120,21 +133,25 @@ function formatPactDecimal(n: number): string {
  *    `read-string`-equivalent safety net, so this value is guarded
  *    regardless of source).
  * 2. Parse `signers`/`config`/`gasPayer`; derive `executor`.
- * 3. Read the patron's live STOA balance via `coin.get-balance` (a
- *    `dirtyRead` simulate, never a signed tx) — a failed read is a genuine
- *    error, never "balance is zero".
+ * 3. If `params.amountOverride` is set, shape-guard it against
+ *    `/^\d+\.\d+$/` and use it directly as the amount — skipping steps 4-5
+ *    below entirely (no live probe at all). Otherwise, read the patron's
+ *    live STOA balance via `coin.get-balance` (a `dirtyRead` simulate,
+ *    never a signed tx) — a failed read is a genuine error, never "balance
+ *    is zero".
  * 4. Validate the read result is numeric; `0` -> `[]` (the step is
  *    trivially satisfied — mirrors `unstallPlanner`'s own "zero stale
  *    users -> `[]`" convention).
- * 5. Format the balance as a decimal literal and build the one
- *    `LQD|C_WrapStoa` leg, attaching a scoped `coin.TRANSFER` capability
- *    (appended to, never replacing, signer 0's original capabilities
- *    string).
+ * 5. Format the balance as a decimal literal.
+ * 6. Build the one `LQD|C_WrapStoa` leg, attaching a scoped `coin.TRANSFER`
+ *    capability (appended to, never replacing, signer 0's original
+ *    capabilities string), and report the final amount used back out as
+ *    `{ legs: [leg], yield: amount }`.
  */
 export const stoaWrapPlanner: StepPlanner = async (
   step: CodexCronotonStepRow,
   ctx: PlannerCtx,
-): Promise<PlannedLeg[]> => {
+): Promise<PlannedLeg[] | { legs: PlannedLeg[]; yield: string }> => {
   const params = parseJson<Partial<StoaWrapPlannerParams>>(step.planner_params_json, {});
   if (typeof params.patronAccount !== "string") {
     throw new Error(
@@ -162,30 +179,51 @@ export const stoaWrapPlanner: StepPlanner = async (
 
   const executorCtx = { runtime: ctx.runtime, resolver: ctx.resolver, config: ctx.config };
 
-  // Bare `coin.get-balance` — `coin` is Kadena's root/system module, never
-  // namespaced under `ctx.runtime.namespace` (see module doc above).
-  const probeDefinition: PlannedLeg = {
-    pactCode: '(coin.get-balance (read-string "patron"))',
-    config,
-    payload: { patron: patronAccount },
-    gasPayer,
-    signers,
-  };
-  const result = await executeCodexTransaction(probeDefinition, "simulate", executorCtx);
-  if (!result.ok) {
-    throw new Error(result.error ?? "coin.get-balance read failed");
-  }
+  let amount: string;
+  if (params.amountOverride !== undefined) {
+    if (!/^\d+\.\d+$/.test(params.amountOverride)) {
+      throw new Error(
+        `ouronet.stoa-wrap: amountOverride must be a non-negative decimal string (e.g. "5.0"), got ${JSON.stringify(params.amountOverride)}`,
+      );
+    }
+    // Mirror the live-probe branch's own `data === 0` short-circuit below:
+    // a zero amount means there is nothing to wrap this pass (e.g. a
+    // yield-carried drain amount of "0.0"), not a doomed zero-value
+    // transfer — real review finding: without this check, "0.0" passed
+    // the decimal-shape regex above and flowed straight into building a
+    // real signed leg and a `coin.TRANSFER ... 0.0` capability line,
+    // unlike the probed path which already refuses to build anything for
+    // a zero balance.
+    if (Number(params.amountOverride) === 0) {
+      return [];
+    }
+    amount = params.amountOverride;
+  } else {
+    // Bare `coin.get-balance` — `coin` is Kadena's root/system module, never
+    // namespaced under `ctx.runtime.namespace` (see module doc above).
+    const probeDefinition: PlannedLeg = {
+      pactCode: '(coin.get-balance (read-string "patron"))',
+      config,
+      payload: { patron: patronAccount },
+      gasPayer,
+      signers,
+    };
+    const result = await executeCodexTransaction(probeDefinition, "simulate", executorCtx);
+    if (!result.ok) {
+      throw new Error(result.error ?? "coin.get-balance read failed");
+    }
 
-  const data = (result.rawResult as { data?: unknown } | undefined)?.data;
-  if (typeof data !== "number") {
-    throw new Error("ouronet.stoa-wrap: coin.get-balance returned a non-numeric result");
-  }
+    const data = (result.rawResult as { data?: unknown } | undefined)?.data;
+    if (typeof data !== "number") {
+      throw new Error("ouronet.stoa-wrap: coin.get-balance returned a non-numeric result");
+    }
 
-  if (data === 0) {
-    return [];
-  }
+    if (data === 0) {
+      return [];
+    }
 
-  const amount = formatPactDecimal(data);
+    amount = formatPactDecimal(data);
+  }
 
   // `ouronet-ns.TS01-C2` — the module's REAL, deployed, namespaced path
   // (confirmed against `03_TS01-C2.pact:1838`/`12_LIQUID.pact:612`); built
@@ -232,7 +270,7 @@ export const stoaWrapPlanner: StepPlanner = async (
     }),
   };
 
-  return [leg];
+  return { legs: [leg], yield: amount };
 };
 
 registerStepPlanner("ouronet.stoa-wrap", stoaWrapPlanner);

@@ -76,6 +76,7 @@ function baseStepRow(overrides: Partial<CodexCronotonStepRow> = {}): CodexCronot
     ]),
     planner_name: null,
     planner_params_json: null,
+    yield_as: null,
     idempotent: 0,
     created_at: '2026-01-01T00:00:00.000Z',
     modified_at: '2026-01-01T00:00:00.000Z',

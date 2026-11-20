@@ -9,6 +9,13 @@
  * validation of step sequencing, no planner-registry lookup, no "is this the
  * right next step" decision logic — that's explicitly Phase 2's job
  * (`pure/run-advance.ts`), not this layer's.
+ *
+ * `yieldAs`/`yield_as` (step-to-step yield carry, per
+ * `docs/work/khronoton-step-yield-carry/design.md`) applies uniformly to
+ * BOTH step modes: for `mode:'single'` it names what to store the confirmed
+ * leg's on-chain return value as; for `mode:'planner'` it names what to
+ * store the planner's returned yield value as. The step row itself owns the
+ * yield's NAME either way — never the planner, never hard-coded elsewhere.
  */
 import crypto from "node:crypto";
 
@@ -27,6 +34,7 @@ export interface InsertStepInput {
   plannerName?: string;
   plannerParams?: unknown;
   idempotent?: boolean;
+  yieldAs?: string;
 }
 
 export interface CodexCronotonStepRow {
@@ -44,6 +52,7 @@ export interface CodexCronotonStepRow {
   idempotent: number;
   created_at: string;
   modified_at: string;
+  yield_as: string | null;
 }
 
 /**
@@ -64,8 +73,8 @@ export function insertStep(input: InsertStepInput, dep: DbDep): string {
         `INSERT INTO codex_cronoton_steps
            (id, codex_cronoton_id, step_index, mode, pact_code, config_json,
             payload_json, gas_payer_json, signers_json, planner_name,
-            planner_params_json, idempotent, created_at, modified_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            planner_params_json, idempotent, created_at, modified_at, yield_as)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -82,6 +91,7 @@ export function insertStep(input: InsertStepInput, dep: DbDep): string {
         input.idempotent ? 1 : 0,
         now,
         now,
+        input.yieldAs ?? null,
       );
   } catch (error) {
     if (isUniqueConstraintError(error)) {
@@ -104,4 +114,27 @@ export function listStepsForCronoton(
         ORDER BY step_index ASC`,
     )
     .all(codexCronotonId) as CodexCronotonStepRow[];
+}
+
+/**
+ * One step row at a specific `(codexCronotonId, stepIndex)` slot, or `null`.
+ * A direct point lookup hitting `idx_codex_cronoton_steps_order` (the
+ * existing unique index on exactly this pair, `schema.ts`), instead of a
+ * caller fetching every step for the cronoton via {@link listStepsForCronoton}
+ * and filtering client-side for one row — a confirmed LOW performance
+ * finding from `handlers/steps.ts`'s standalone fire/simulate route, which
+ * only ever needs one step per request.
+ */
+export function getStepByIndex(
+  codexCronotonId: string,
+  stepIndex: number,
+  dep: DbDep,
+): CodexCronotonStepRow | null {
+  const row = dep.db
+    .prepare(
+      `SELECT * FROM codex_cronoton_steps
+        WHERE codex_cronoton_id = ? AND step_index = ?`,
+    )
+    .get(codexCronotonId, stepIndex) as CodexCronotonStepRow | undefined;
+  return row ?? null;
 }

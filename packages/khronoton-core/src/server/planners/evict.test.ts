@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
+import { normalizePlannerResult } from "./registry.js";
 import { evictPlanner } from "./evict.js";
 
 const PUB_A = "aa".repeat(32);
@@ -80,6 +81,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     signers_json: JSON.stringify([{ publicKey: PUB_A, capabilityMode: "pure", capabilities: "" }]),
     planner_name: "ouronet.aqp-evict",
     planner_params_json: JSON.stringify({ fvtId: "fvt-1", patronAccount: "k:patron" }),
+    yield_as: null,
     idempotent: 0,
     created_at: "t0",
     modified_at: "t0",
@@ -99,7 +101,7 @@ describe("evictPlanner", () => {
   it("returns [] when URHC_BuildEvictPlans reads zero outstanding legs — nothing owed, no leg built", async () => {
     dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
 
-    const legs = await evictPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toEqual([]);
     expect(dirtyRead).toHaveBeenCalledTimes(1);
@@ -112,7 +114,7 @@ describe("evictPlanner", () => {
       })
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 50000 });
 
-    const legs = await evictPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     // The FULL namespaced pact code — `ouronet-ns.AQP-EVCT`, the module's
@@ -142,7 +144,7 @@ describe("evictPlanner", () => {
       // gasUsed on an otherwise ok:false result.
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 3_000_000 });
 
-    const legs = await evictPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(3);
     const expectedPactCode =
@@ -201,7 +203,7 @@ describe("evictPlanner", () => {
       })
       .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 3_000_000 }); // over ceiling -> fan out
 
-    const legs = await evictPlanner(makeStepRow(), makeCtx());
+    const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).not.toContain(hostile);

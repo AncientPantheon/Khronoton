@@ -273,4 +273,100 @@ describe("fireStep", () => {
     expect(runs.c).toBe(0);
     expect(legs.c).toBe(0);
   });
+
+  // Regression coverage for `docs/work/khronoton-step-yield-carry/design.md`:
+  // the standalone fire/simulate route has no run, so no yield pool to
+  // resolve a `{"$yield": ...}` reference against — a step that references
+  // one (e.g. authored for chained-run use, then fired standalone to preview
+  // it) must fail clearly rather than silently passing the literal
+  // placeholder object through to the planner/chain call as if it were a
+  // real value.
+  it("on a mode:'planner' step whose planner_params_json contains a $yield reference, both simulateStep and fireStep return a clear error instead of passing the placeholder through", async () => {
+    h = buildTestCtx();
+    registerStepPlanner("steps-test-yield-planner", async (step) => {
+      const params = JSON.parse(step.planner_params_json ?? "{}") as Record<string, unknown>;
+      return [makePlannedLeg(`(+ ${JSON.stringify(params.amount)} 0)`)];
+    });
+    const { id } = seedCronoton(h.db);
+    insertStep(
+      {
+        codexCronotonId: id,
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "steps-test-yield-planner",
+        plannerParams: { amount: { $yield: "drainedAmount" } },
+      },
+      { db: h.db },
+    );
+
+    const simRes = await simulateStep(h.ctx, req({ confirmed: true, params: { id, index: "0" } }));
+    const fireRes = await fireStep(h.ctx, req({ confirmed: true, params: { id, index: "0" } }));
+
+    // 404 (not a bare uncaught-exception 500) proves `resolveStepLegs` caught
+    // the `YieldNotFoundError` itself and returned the function's own
+    // `{ok:false}` convention, rather than letting the resolution error
+    // escape uncaught and fall through to the handler's generic 500 catch-all.
+    expect(simRes.status).toBe(404);
+    expect(fireRes.status).toBe(404);
+    expect(h.runtime.submit).not.toHaveBeenCalled();
+    // Regression: the 404 body must name the actual unresolved yield, never
+    // a misleading "planner '<x>' is not registered" message — this step
+    // DOES have a registered planner; the real failure is the $yield
+    // reference, a distinct reason `resolveStepLegs` must report accurately.
+    expect((simRes.body as { error: string }).error).toMatch(/drainedAmount/);
+    expect((simRes.body as { error: string }).error).not.toMatch(/is not registered/);
+  });
+
+  it("on a mode:'single' step whose payload_json contains a $yield reference, both simulateStep and fireStep return a clear error instead of passing the placeholder through", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    insertStep(
+      {
+        codexCronotonId: id,
+        stepIndex: 0,
+        mode: "single",
+        pactCode: '(coin.transfer "a" "b" 1.0)',
+        config: CONFIG,
+        payload: { amount: { $yield: "drainedAmount" } },
+        gasPayer: CODEX_GAS_PAYER,
+        signers: [],
+      },
+      { db: h.db },
+    );
+
+    const simRes = await simulateStep(h.ctx, req({ confirmed: true, params: { id, index: "0" } }));
+    const fireRes = await fireStep(h.ctx, req({ confirmed: true, params: { id, index: "0" } }));
+
+    expect(simRes.status).toBe(404);
+    expect(fireRes.status).toBe(404);
+    expect(h.runtime.submit).not.toHaveBeenCalled();
+    // Regression: this is THE scenario the original bug hit hardest — a
+    // mode:'single' step's `planner_name` is always `null`, so the old
+    // untagged `{ok:false}` shape made this 404 literally read
+    // `planner 'null' is not registered`, pointing an operator at the wrong
+    // subsystem entirely for a failure that has nothing to do with planners.
+    expect((simRes.body as { error: string }).error).toMatch(/drainedAmount/);
+    expect((simRes.body as { error: string }).error).not.toMatch(/planner 'null'/);
+    expect((simRes.body as { error: string }).error).not.toMatch(/is not registered/);
+  });
+
+  it("a GENUINELY unregistered planner_name still reports its own accurate message, distinct from a yield-resolution failure", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    insertStep(
+      {
+        codexCronotonId: id,
+        stepIndex: 0,
+        mode: "planner",
+        plannerName: "steps-test-never-registered",
+        plannerParams: {},
+      },
+      { db: h.db },
+    );
+
+    const simRes = await simulateStep(h.ctx, req({ confirmed: true, params: { id, index: "0" } }));
+
+    expect(simRes.status).toBe(404);
+    expect((simRes.body as { error: string }).error).toMatch(/steps-test-never-registered.*is not registered/);
+  });
 });

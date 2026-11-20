@@ -56,8 +56,10 @@ import {
 import { listStepsForCronoton, type CodexCronotonStepRow } from "./store/steps.js";
 import { RunLegAlreadyExistsError } from "./store/errors.js";
 import { stepRowToDefinition } from "./store/mappers.js";
+import { getYieldPool, upsertYield } from "./store/yields.js";
 import { executeCodexTransaction } from "./executor.js";
-import { resolvePlannerFor, type PlannedLeg } from "./planners/registry.js";
+import { resolvePlannerFor, normalizePlannerResult } from "./planners/registry.js";
+import { resolveSingleStepPayload } from "./pure/yields.js";
 import { advanceRun, type LegState, type RunAction, type RunPolicy, type RunState } from "./pure/run-advance.js";
 import type { CodexTxDefinition } from "./types.js";
 
@@ -248,6 +250,7 @@ async function handleSubmitLeg(
  */
 async function handlePoll(
   stepLegs: readonly CodexCronotonRunLegRow[],
+  step: CodexCronotonStepRow,
   ctx: RunsDriverCtx,
 ): Promise<boolean> {
   const submitted = stepLegs.filter(
@@ -273,6 +276,24 @@ async function handlePoll(
       if (!landed) continue; // still pending — absent key means "not landed yet"
       if (landed.result.status === "success") {
         markLegConfirmed(leg.id, { db: ctx.db });
+        if (step.mode === "single" && step.yield_as) {
+          // The only way a plain hand-written Pact call (no JS-side planner
+          // runs for it) can contribute a yield: capture the real on-chain
+          // return value the moment this step's one leg CONFIRMS. `data` is
+          // not declared on `ListenResult.result`'s own narrow type (only
+          // `status`/`error` are), since most callers never need it — cast
+          // locally rather than widening that shared seam type for this one
+          // reader.
+          upsertYield(
+            {
+              runId: leg.run_id,
+              name: step.yield_as,
+              value: (landed.result as { data?: unknown }).data,
+              stepIndex: step.step_index,
+            },
+            { db: ctx.db },
+          );
+        }
       } else {
         markLegFailed(
           leg.id,
@@ -402,16 +423,35 @@ async function handleReplanStepInner(
   ctx: RunsDriverCtx,
 ): Promise<boolean> {
   if (step.mode === "planner") {
-    const resolved = resolvePlannerFor(step, ctx);
+    // Resolve any `{"$yield": "<name>"}` placeholder in this step's
+    // `planner_params_json` against the run's yield pool BEFORE the planner
+    // ever runs — a step with no `$yield` references anywhere resolves
+    // against this SAME pool (always `{}` for such a step) byte-identical
+    // to before this feature existed.
+    const pool = getYieldPool(run.id, { db: ctx.db });
+    const resolved = resolvePlannerFor(step, ctx, pool);
     if (!resolved) {
       throw new PlannerNotRegisteredError(step.planner_name ?? "(unnamed)");
     }
-    const legs: PlannedLeg[] = await resolved.planner(step, resolved.plannerCtx);
+    const rawResult = await resolved.planner(resolved.resolvedStep, resolved.plannerCtx);
+    const normalized = normalizePlannerResult(rawResult);
+    const legs = normalized.legs;
     if (legs.length === 0) {
       // The planner decided this step needs no work this pass (e.g. nothing
       // owed) — treat exactly like a cleared barrier, matching
       // `handleAdvanceStep`'s own terminal-vs-advance branch verbatim rather
-      // than duplicating it.
+      // than duplicating it. A review finding caught that an EARLIER version
+      // returned here before ever reaching the yield-write below, silently
+      // discarding a yield a planner reported alongside zero legs (e.g. "I
+      // confirmed there's nothing to do, and here's the value that proves
+      // it") — this step's barrier is cleared either way, so its yield (if
+      // any) is just as real and must still be persisted.
+      if (normalized.yield !== undefined && step.yield_as) {
+        upsertYield(
+          { runId: run.id, name: step.yield_as, value: normalized.yield, stepIndex: run.step_index },
+          { db: ctx.db },
+        );
+      }
       return handleAdvanceStep(run, now, ctx);
     }
 
@@ -429,17 +469,22 @@ async function handleReplanStepInner(
     const newAttempt = isReplan ? run.attempt + 1 : run.attempt;
     const startLegIndex = isReplan ? Math.max(...allStepLegs.map((l) => l.leg_index)) + 1 : 0;
 
-    if (isReplan) {
-      // `bumpRunAttempt` + `touchRunDeadline`, NEVER `advanceRunStep`, for a
-      // genuine re-plan: `advanceRunStep` unconditionally resets `attempt`
-      // back to 0 as part of its contract, which would silently undo the
-      // bump on every re-plan and turn `maxReplanAttempts` into dead config
-      // (an infinite retry loop with no error ever surfacing) — see
-      // `store/runs.ts`'s `touchRunDeadline` doc and design.md §A.
-      bumpRunAttempt(run.id, { db: ctx.db });
-      touchRunDeadline(run.id, computeStepDeadline(now, ctx), { db: ctx.db });
-    }
-
+    // Leg inserts run BEFORE the attempt bump / deadline touch / yield
+    // write, not after — a review finding caught that writing those first
+    // let a concurrent loser (two `driveRunOnce` callers racing this exact
+    // step generation, per this function's own doc comment above) commit
+    // its own `bumpRunAttempt`/`touchRunDeadline`/`upsertYield` calls even
+    // though `insertRunLeg` below then throws `RunLegAlreadyExistsError`
+    // for THAT caller specifically, meaning only the OTHER (winning)
+    // caller's legs actually get submitted. A SECOND review pass (after the
+    // yield-ordering fix alone had already landed) caught that
+    // `bumpRunAttempt`/`touchRunDeadline` had been left in their ORIGINAL,
+    // still-unguarded position — a losing racer was still silently burning
+    // through `maxReplanAttempts` roughly twice as fast as the configured
+    // budget, racing ahead of `insertRunLeg`'s own loss detection.
+    // Inserting legs FIRST means a losing caller never reaches ANY of the
+    // three writes below — each one is only ever persisted by whichever
+    // caller's legs genuinely won the race.
     legs.forEach((leg, i) => {
       insertRunLeg(
         {
@@ -452,6 +497,27 @@ async function handleReplanStepInner(
         { db: ctx.db },
       );
     });
+
+    if (isReplan) {
+      // `bumpRunAttempt` + `touchRunDeadline`, NEVER `advanceRunStep`, for a
+      // genuine re-plan: `advanceRunStep` unconditionally resets `attempt`
+      // back to 0 as part of its contract, which would silently undo the
+      // bump on every re-plan and turn `maxReplanAttempts` into dead config
+      // (an infinite retry loop with no error ever surfacing) — see
+      // `store/runs.ts`'s `touchRunDeadline` doc and design.md §A.
+      bumpRunAttempt(run.id, { db: ctx.db });
+      touchRunDeadline(run.id, computeStepDeadline(now, ctx), { db: ctx.db });
+    }
+
+    if (normalized.yield !== undefined && step.yield_as) {
+      // A planner that yields on a step with no `yield_as` set simply has
+      // that value discarded here — the leg-building itself still
+      // succeeded, so this is not an error, just nothing to carry forward.
+      upsertYield(
+        { runId: run.id, name: step.yield_as, value: normalized.yield, stepIndex: run.step_index },
+        { db: ctx.db },
+      );
+    }
 
     if (!isReplan) {
       // First entry (no legs existed yet) — byte-identical in final effect
@@ -467,7 +533,14 @@ async function handleReplanStepInner(
     return true;
   }
 
-  const definition = stepRowToDefinition(step);
+  // Same yield-reference resolution as the planner branch above, applied to
+  // the stored `payload_json` instead of `planner_params_json` — via the
+  // SAME shared `resolveSingleStepPayload` helper `handlers/steps.ts` uses,
+  // not a parallel reimplementation (a review finding caught the two call
+  // sites independently re-deriving the identical sequence).
+  const pool = getYieldPool(run.id, { db: ctx.db });
+  const resolvedStep = resolveSingleStepPayload(step, pool);
+  const definition = stepRowToDefinition(resolvedStep);
   insertRunLeg(
     { runId: run.id, stepIndex: run.step_index, legIndex: 0, definitionJson: JSON.stringify(definition) },
     { db: ctx.db },
@@ -511,7 +584,7 @@ async function executeAction(
     case "submit-leg":
       return handleSubmitLeg(action.legIndex, run, stepLegs, now, ctx);
     case "poll":
-      return handlePoll(stepLegs, ctx);
+      return handlePoll(stepLegs, step, ctx);
     case "advance-step":
       return handleAdvanceStep(run, now, ctx);
     case "replan-step":
@@ -530,11 +603,21 @@ async function executeAction(
  * defensive no-ops) or a pass makes no further progress.
  */
 export async function driveRunOnce(runId: string, now: Date, ctx: RunsDriverCtx): Promise<void> {
+  const initialRun = getRun(runId, { db: ctx.db });
+  if (!initialRun) return; // the run vanished between listInFlightRuns and this call
+
+  // Fetched ONCE for the whole call, not per inner-loop pass: a run's
+  // parent cronoton_id is immutable for the run's lifetime, so its static
+  // step definitions can never change mid-call either — a confirmed LOW
+  // performance finding (this file's own `allRunLegs` hoist two lines below
+  // already recognized and closed exactly this class of redundant re-query
+  // for legs; the same re-query was still happening here for steps).
+  const steps = listStepsForCronoton(initialRun.codex_cronoton_id, { db: ctx.db });
+
   for (;;) {
     const run = getRun(runId, { db: ctx.db });
-    if (!run) return; // the run vanished between listInFlightRuns and this call
+    if (!run) return; // the run vanished since the last pass
 
-    const steps = listStepsForCronoton(run.codex_cronoton_id, { db: ctx.db });
     const step = steps.find((s) => s.step_index === run.step_index);
     if (!step) {
       // A run/step-definition mismatch (e.g. steps deleted out from under a

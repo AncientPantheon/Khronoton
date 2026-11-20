@@ -19,7 +19,7 @@ import { json, err, type HandlerResponse } from "./http.js";
 import { withConfirm, type Handler, type HandlerContext } from "./context.js";
 import {
   getCodexCronoton,
-  listStepsForCronoton,
+  getStepByIndex,
   resolvePlannerFor,
   stepRowToDefinition,
   executeCodexTransaction,
@@ -27,6 +27,8 @@ import {
   type CodexCronotonStepRow,
   type CodexTxDefinition,
 } from "../server/index.js";
+import { resolveSingleStepPayload, YieldNotFoundError } from "../server/pure/yields.js";
+import { normalizePlannerResult } from "../server/planners/registry.js";
 
 /** Terminal statuses cannot be fired on demand — same set `execute.ts`'s
  * `executeNow`/`triggerCronoton` already enforce, duplicated locally per
@@ -38,20 +40,62 @@ const TERMINAL_STATUSES = new Set<CodexCronotonRow["status"]>(["completed", "err
 /** Resolve the leg(s) a stored step currently produces, via the SAME shared
  * `resolvePlannerFor` helper `runs-driver.ts`'s `handleReplanStep` uses —
  * not a parallel reimplementation, so the two call sites can never drift.
- * Returns `{ok:false}` for a planner-mode step whose `planner_name` has no
- * registered `StepPlanner`, matching `findStep`'s own `{ok,...}` result
- * convention rather than a one-off sentinel. */
+ * Returns a DISCRIMINATED failure reason rather than a bare `{ok:false}` —
+ * a real review finding caught that collapsing "planner not registered"
+ * and "unresolved $yield reference" into the same untagged shape made
+ * every caller report a misleading `planner 'null' is not registered`
+ * message for a `mode:'single'` step (whose `planner_name` is always
+ * `null`) that actually failed on a yield reference, not a planner lookup.
+ *
+ * A standalone fire/simulate has no run, so no yield pool to resolve a
+ * `{"$yield": "<name>"}` reference against — every resolution here runs
+ * against an explicit empty pool (`docs/work/khronoton-step-yield-carry/
+ * design.md`'s "Consuming a yield"). A step that references a yield (e.g.
+ * authored for chained-run use, then fired standalone to preview it) always
+ * fails `YieldNotFoundError`; caught here and reported as its own reason,
+ * rather than letting it escape uncaught to the handler's generic 500
+ * catch-all or being folded into the unrelated planner-not-registered case. */
 async function resolveStepLegs(
   step: CodexCronotonStepRow,
   ctx: HandlerContext,
-): Promise<{ ok: true; legs: CodexTxDefinition[] } | { ok: false }> {
-  if (step.mode === "single") {
-    return { ok: true, legs: [stepRowToDefinition(step)] };
+): Promise<
+  | { ok: true; legs: CodexTxDefinition[] }
+  | { ok: false; reason: "planner-not-registered" }
+  | { ok: false; reason: "yield-not-found"; message: string }
+> {
+  try {
+    if (step.mode === "single") {
+      // Same shared helper `runs-driver.ts`'s single-mode branch uses — not
+      // a parallel reimplementation (a review finding caught the two call
+      // sites independently re-deriving the identical sequence).
+      const resolvedStep = resolveSingleStepPayload(step, {});
+      return { ok: true, legs: [stepRowToDefinition(resolvedStep)] };
+    }
+    const resolved = resolvePlannerFor(step, ctx, {});
+    if (!resolved) return { ok: false, reason: "planner-not-registered" };
+    const result = await resolved.planner(resolved.resolvedStep, resolved.plannerCtx);
+    // The standalone route has no run to persist a yield into, so
+    // `normalized.yield`, if present, is deliberately discarded here.
+    const normalized = normalizePlannerResult(result);
+    return { ok: true, legs: normalized.legs };
+  } catch (error) {
+    if (error instanceof YieldNotFoundError) {
+      return { ok: false, reason: "yield-not-found", message: error.message };
+    }
+    throw error;
   }
-  const resolved = resolvePlannerFor(step, ctx);
-  if (!resolved) return { ok: false };
-  const legs = await resolved.planner(step, resolved.plannerCtx);
-  return { ok: true, legs };
+}
+
+/** Shared 404 body for either `resolveStepLegs` failure reason, so
+ * `simulateStep`/`fireStep` never independently decide how to phrase it. */
+function resolveStepLegsErrorResponse(
+  step: CodexCronotonStepRow,
+  resolved: { ok: false; reason: "planner-not-registered" } | { ok: false; reason: "yield-not-found"; message: string },
+): HandlerResponse {
+  if (resolved.reason === "yield-not-found") {
+    return err(404, `cannot resolve this step: ${resolved.message}`);
+  }
+  return err(404, `planner '${step.planner_name}' is not registered`);
 }
 
 /** Shared step lookup: 404 on missing cronoton or missing step-at-index.
@@ -65,7 +109,7 @@ function findStep(
 ): { ok: true; row: CodexCronotonRow; step: CodexCronotonStepRow } | { ok: false; response: HandlerResponse } {
   const row = getCodexCronoton(cronotonId, { db: ctx.db });
   if (!row) return { ok: false, response: err(404, "not found") };
-  const step = listStepsForCronoton(cronotonId, { db: ctx.db }).find((s) => s.step_index === index);
+  const step = getStepByIndex(cronotonId, index, { db: ctx.db });
   if (!step) return { ok: false, response: err(404, "step not found at that index") };
   return { ok: true, row, step };
 }
@@ -81,7 +125,7 @@ export const simulateStep: Handler = (ctx, req) =>
 
     const resolved = await resolveStepLegs(found.step, ctx);
     if (!resolved.ok) {
-      return err(404, `planner '${found.step.planner_name}' is not registered`);
+      return resolveStepLegsErrorResponse(found.step, resolved);
     }
     const legs = resolved.legs;
 
@@ -122,7 +166,7 @@ export const fireStep: Handler = (ctx, req) =>
 
     const resolved = await resolveStepLegs(found.step, ctx);
     if (!resolved.ok) {
-      return err(404, `planner '${found.step.planner_name}' is not registered`);
+      return resolveStepLegsErrorResponse(found.step, resolved);
     }
     const legs = resolved.legs;
 

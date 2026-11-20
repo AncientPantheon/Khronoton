@@ -112,6 +112,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     signers_json: "[]",
     planner_name: null,
     planner_params_json: null,
+    yield_as: null,
     idempotent: 0,
     created_at: NOW.toISOString(),
     modified_at: NOW.toISOString(),
