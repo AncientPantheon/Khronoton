@@ -52,6 +52,7 @@ import { createRun } from "./store/runs.js";
 import { RunAlreadyInFlightError } from "./store/errors.js";
 import { listStepsForCronoton } from "./store/steps.js";
 import { driveRunOnce } from "./runs-driver.js";
+import { attemptSingleTxFirst } from "./single-tx.js";
 import type {
   ChainRuntime,
   Config,
@@ -141,6 +142,20 @@ export async function codexCronotonTickOnce(
       const claimed = claimDueCodexCronoton(row, now, { db: ctx.db });
       if (!claimed) {
         skippedIds.push(row.id);
+        continue;
+      }
+
+      // Try-single-tx-first decision — ahead of the chained/plain branch below,
+      // per docs/work/khronoton-single-tx-custom/design.md. `fired: false` means
+      // either the flag is off or the simulate was refused specifically for
+      // being too expensive; either way fall through to the existing
+      // chained/plain decision unchanged. `fired: true` means the single-tx
+      // variant was actually fired (successfully or not) — the chained/plain
+      // path below is never reached for this row.
+      const attempt = await attemptSingleTxFirst(row, ctx, { auditDetailExtra: { actor: "scheduler" } });
+      if (attempt.fired) {
+        if (attempt.result!.ok) firedIds.push(row.id);
+        else failedIds.push(row.id);
         continue;
       }
 
@@ -301,6 +316,28 @@ export async function processDueManualBatchesOnce(
       const cronoton = getCodexCronoton(batch.codex_cronoton_id, { db: ctx.db });
       if (!cronoton || cronoton.status !== "active") {
         // Parent paused / deleted / terminal — stop the batch.
+        cancelManualBatch(batch.id, { db: ctx.db });
+        cancelledIds.push(batch.id);
+        continue;
+      }
+      if (cronoton.try_single_tx_first) {
+        // A review finding caught this: this loop fires the parent's raw
+        // top-level definition directly via `fireByServerResolver`, with NO
+        // `attemptSingleTxFirst` gas-ceiling simulate-then-decide guard — the
+        // exact guard `codexCronotonTickOnce`'s due-row branch and
+        // `executeNow`'s manual-trigger branch both now apply ahead of this
+        // same definition. A `try_single_tx_first=1` row's top-level fields
+        // are no longer inert placeholder data (docs/work/
+        // khronoton-single-tx-custom/design.md) — they are the operator's
+        // real single-tx Pact code, so firing them here on a repeating timer
+        // with no gas check is a genuinely new, unsafe bypass this topic's
+        // own change in field semantics introduces. Stop the batch rather
+        // than risk an unmineable (or unintended) repeated submission; the
+        // operator can re-trigger via `executeNow`, which DOES apply the
+        // guard. (Manual batches on an ORDINARY chained row — zero
+        // `try_single_tx_first` — already bypass the step machinery
+        // entirely; that is a separate, pre-existing gap this fix does not
+        // attempt to close.)
         cancelManualBatch(batch.id, { db: ctx.db });
         cancelledIds.push(batch.id);
         continue;

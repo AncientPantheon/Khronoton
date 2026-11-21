@@ -190,7 +190,13 @@ export interface FireByServerResolverOpts extends FireOpts {
 }
 
 function postponed(error: string): FireResult {
-  return { ok: false, mode: "fire", error, terminalIntent: null };
+  // `postponed: true` is the ONLY reliable signal that this result was never
+  // submitted to chain at all — a review finding caught that a caller
+  // deciding whether to fall back to an alternate path (e.g. `single-tx.ts`'s
+  // `attemptSingleTxFirst`) could not otherwise distinguish this from a
+  // GENUINE on-chain fire failure, since both are `{ ok: false, terminalIntent:
+  // null }` for a recurring row. See `FireResult.postponed`'s own doc comment.
+  return { ok: false, mode: "fire", error, terminalIntent: null, postponed: true };
 }
 
 /**

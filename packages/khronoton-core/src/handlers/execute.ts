@@ -26,16 +26,12 @@ import type { HandlerContext, Handler } from "./context.js";
 import { withConfirm } from "./context.js";
 import {
   executeCodexTransaction,
-  fireByServerResolver,
   getServerResolver,
   resolveServerVars,
   getCodexCronoton,
-  recordFire,
   recoverFire as recoverFireInStore,
-  applyTerminalIntent,
   rowToDefinition,
   rowRuntimeArgKeys,
-  computeDefinitionFingerprint,
   validateRuntimeArgs,
   applyRuntimeArgs,
   listStepsForCronoton,
@@ -49,6 +45,8 @@ import {
   type FireResult,
   type RunsDriverCtx,
 } from "../server/index.js";
+import { attemptSingleTxFirst } from "../server/single-tx.js";
+import { fireAndRecord as sharedFireAndRecord } from "../server/fire-and-record.js";
 
 /** A landed on-chain request key: 40–48 URL-safe base64 chars. */
 const REQUEST_KEY_RE = /^[A-Za-z0-9_-]{40,48}$/;
@@ -84,58 +82,18 @@ function chainDataFrom(rawResult: unknown): unknown {
 
 /**
  * Fire a loaded row inline through the shared dispatcher, record exactly one
- * fire row (success or failure), and apply the one-time terminal transition —
- * the same fire → record → finalize path the tick runs, minus the pre-fire
- * claim (an on-demand fire has no scheduler race to guard against).
+ * fire row, and apply the one-time terminal transition. A thin wrapper over
+ * the shared `fireAndRecord` (`server/fire-and-record.ts`) that only pins
+ * this handler's own `actor: "ancient"` audit-detail field — a review
+ * finding caught this handler and `single-tx.ts` each independently
+ * re-deriving the identical fire→record→finalize sequence by hand.
  */
 async function fireAndRecord(
   ctx: HandlerContext,
   row: CodexCronotonRow,
   definition: CodexTxDefinition,
 ): Promise<{ result: FireResult; fireId: string }> {
-  const result = await fireByServerResolver(definition, row, {
-    runtime: ctx.runtime,
-    resolver: ctx.resolver,
-    config: ctx.config,
-    db: ctx.db,
-  });
-  const fingerprint = computeDefinitionFingerprint(row);
-  const fireId = recordFire(
-    {
-      codexCronotonId: row.id,
-      jobId: null,
-      firedAt: new Date().toISOString(),
-      status: result.ok ? "success" : "failure",
-      requestKey: result.requestKey,
-      chainId: result.chainId,
-      errorMessage: result.error,
-      chainResponse: result.rawResult,
-      definitionFingerprint: fingerprint,
-    },
-    { db: ctx.db, resolveFireMode: ctx.resolveFireMode },
-  );
-
-  if ((definition.scheduleKind ?? "recurring") === "one-time") {
-    applyTerminalIntent(row.id, result.terminalIntent, { db: ctx.db });
-  }
-
-  await ctx.onAudit?.({
-    action: result.ok ? "codex_cronoton.fire" : "codex_cronoton.fire_failed",
-    result: result.ok ? "success" : "failure",
-    targetKind: "codex_cronoton",
-    targetId: row.id,
-    detail: {
-      codexCronotonId: row.id,
-      fireId,
-      requestKey: result.requestKey,
-      chainId: result.chainId,
-      actor: "ancient",
-      definitionFingerprint: fingerprint,
-      errorMessage: result.error,
-    },
-  });
-
-  return { result, fireId };
+  return sharedFireAndRecord(ctx, row, definition, { auditDetailExtra: { actor: "ancient" } });
 }
 
 /**
@@ -210,6 +168,26 @@ export const executeNow: Handler = (ctx, req) =>
     if (row.status === "paused") return err(400, "cannot execute a paused cronoton");
     if (TERMINAL_STATUSES.has(row.status)) {
       return err(400, "cannot execute a terminal cronoton");
+    }
+
+    // Ahead of the chained/plain decision below: an opt-in single-tx-first row
+    // (docs/work/khronoton-single-tx-custom) gets one more decision first — fire
+    // the row's own top-level definition inline when it fits under the gas
+    // ceiling, falling through to the existing chained/plain path unchanged
+    // when it's specifically gas-refused (or when the flag is off at all).
+    // `ctx` (a `HandlerContext`) already satisfies `SingleTxAttemptCtx`
+    // structurally with no adaptation needed — a review finding caught this
+    // call site hand-rebuilding an equivalent object instead of passing `ctx`
+    // straight through, the idiom every other `attemptSingleTxFirst`/
+    // `fireByServerResolver` call site in this feature already uses.
+    const attempt = await attemptSingleTxFirst(row, ctx, { auditDetailExtra: { actor: "ancient" } });
+    if (attempt.fired) {
+      return json(200, {
+        ok: attempt.result!.ok,
+        fireId: attempt.fireId,
+        requestKey: attempt.result!.requestKey,
+        error: attempt.result!.error,
+      });
     }
 
     const steps = listStepsForCronoton(row.id, { db: ctx.db });

@@ -19,6 +19,7 @@ import {
   insertStep,
   listRunLegs,
   getStepPlanner,
+  editCodexCronoton,
   type CodexTxConfig,
 } from "../server/index.js";
 import {
@@ -259,6 +260,137 @@ describe("executeNow", () => {
     // was built and inserted for the run.
     const legs = listRunLegs(body.runId as string, { db: h.db });
     expect(legs.length).toBeGreaterThan(0);
+  });
+
+  // `try_single_tx_first` + custom single-tx mode (docs/work/khronoton-single-tx-custom):
+  // `attemptSingleTxFirst` is consulted BEFORE the chained/plain decision above —
+  // these three cases prove the manual-trigger branch wires it in exactly as T3
+  // wires it into the scheduler tick, adapted to executeNow's HTTP response shape.
+  // The top-level row's pact code is deliberately DIFFERENT from the fallback
+  // step's. The harness's mock `universalSignTransaction` normally clobbers the
+  // built tx's `cmd` to a fixed "SIGNED" placeholder (see harness.ts) — pass it
+  // through unchanged instead, so a test can tell which definition a given
+  // `dirtyRead` call actually simulated/fired by its `cmd`.
+  const SINGLE_TX_PACT_CODE = "(+ 1 1)";
+
+  function seedSingleTxFirstChained(h: TestHarness): { id: string } {
+    const { id } = seedCronoton(h.db, { gasPayer: CODEX_GAS_PAYER, pactCode: SINGLE_TX_PACT_CODE });
+    seedSingleStep(h, id);
+    editCodexCronoton(id, { trySingleTxFirst: true, singleTxMode: "custom" }, { db: h.db });
+    h.runtime.universalSignTransaction.mockImplementation(async (tx: unknown) => ({
+      cmd: (tx as { cmd?: string }).cmd,
+      sigs: [{ sig: "x" }],
+    }));
+    return { id };
+  }
+
+  it("fires the single-tx variant inline (200 ok:true, fireId/requestKey) and never creates a run, when try_single_tx_first is on and the variant fits under the gas ceiling", async () => {
+    h = buildTestCtx();
+    const { id } = seedSingleTxFirstChained(h);
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; fireId?: string; requestKey?: string };
+    expect(body.ok).toBe(true);
+    expect(body.fireId).toBeTruthy();
+    expect(body.requestKey).toBe("RK-TEST");
+
+    // The row's OWN top-level pact code (the single-tx variant) is what got
+    // simulated/fired — never the fallback step's.
+    expect(
+      (h.runtime.dirtyRead.mock.calls[0]?.[0] as { cmd?: string } | undefined)?.cmd,
+    ).toBe(SINGLE_TX_PACT_CODE);
+
+    // The plain one-shot fire path ran — never the chained run machinery.
+    const runRows = h.db.prepare("SELECT COUNT(*) AS c FROM codex_cronoton_runs").get() as { c: number };
+    expect(runRows.c).toBe(0);
+    const fires = h.db
+      .prepare("SELECT status FROM codex_cronoton_fires WHERE codex_cronoton_id = ?")
+      .all(id) as Array<{ status: string }>;
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe("success");
+  });
+
+  it("audits the single-tx fire with actor:'ancient' (a review finding caught this attribution silently missing), unlike a scheduler-driven fire's actor:'scheduler'", async () => {
+    h = buildTestCtx();
+    const { id } = seedSingleTxFirstChained(h);
+
+    await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    const singleTxCalls = h.onAudit.mock.calls.filter(
+      (call: unknown[]) => (call[0] as { action: string }).action === "codex_cronoton.single_tx.fire",
+    );
+    expect(singleTxCalls).toHaveLength(1);
+    expect((singleTxCalls[0][0] as { detail: { actor?: string } }).detail.actor).toBe("ancient");
+  });
+
+  it("falls through to the existing chained-run response (200 ok:true, runId/status) when the single-tx variant is refused specifically for exceeding the gas ceiling", async () => {
+    h = buildTestCtx();
+    const { id } = seedSingleTxFirstChained(h);
+    // Over the harness's configured autoGasCeiling (2,000,000) — the executor's
+    // own refuse-unmineable signal — for the single-tx SIMULATE call only; the
+    // chain's own step execution below falls back to the default (fits) mock.
+    h.runtime.dirtyRead.mockResolvedValueOnce({
+      result: { status: "success", data: "OK" },
+      gas: 3_000_000,
+    });
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; runId?: string; status?: string };
+    expect(body.ok).toBe(true);
+    expect(typeof body.runId).toBe("string");
+    expect(body.runId?.length).toBeGreaterThan(0);
+
+    // The FIRST dirtyRead call simulated the single-tx variant (and was the
+    // one refused for gas) — the LAST call actually built/fired the fallback
+    // step's own definition, proving the chain genuinely ran, not a no-op.
+    const calls = h.runtime.dirtyRead.mock.calls as Array<[{ cmd?: string }]>;
+    expect(calls[0][0].cmd).toBe(SINGLE_TX_PACT_CODE);
+    expect(calls[calls.length - 1][0].cmd).toBe('(coin.transfer "a" "b" 1.0)');
+
+    // The single-tx attempt never fired — no fire row from it, and the chained
+    // path drove a real run through the normal step machinery.
+    const fires = h.db
+      .prepare("SELECT COUNT(*) AS c FROM codex_cronoton_fires WHERE codex_cronoton_id = ?")
+      .get(id) as { c: number };
+    expect(fires.c).toBe(0);
+    const legs = listRunLegs(body.runId as string, { db: h.db });
+    expect(legs.length).toBeGreaterThan(0);
+  });
+
+  // NOTE: the error genuinely propagates OUT of attemptSingleTxFirst/executeNow's
+  // handler body as a real thrown Error — it is NOT caught-and-converted by
+  // anything this task added. It surfaces as HTTP 500 because `withConfirm`'s
+  // shared `runGated` wrapper (context.ts, every mutate-tier handler in this
+  // file) already catches and maps ANY thrown error via `mapStoreError`'s
+  // generic fallback — the same thing that would happen to any other
+  // unexpected error thrown from this handler today. This is NOT a new
+  // catch-and-convert added for this feature, just the pre-existing shared one.
+  it("surfaces a genuine non-gas simulate failure as a real error (HTTP 500, never silently falling back to the chain)", async () => {
+    h = buildTestCtx();
+    const { id } = seedSingleTxFirstChained(h);
+    h.runtime.dirtyRead.mockRejectedValueOnce(new Error("node unreachable"));
+
+    const res = await executeNow(h.ctx, req({ confirmed: true, params: { id } }));
+
+    expect(res.status).toBe(500);
+    expect((res.body as { error?: string }).error).toContain("node unreachable");
+
+    // Exactly the single-tx simulate's own dirtyRead ran — the chain was never
+    // reached at all (not merely "reached but produced no rows").
+    expect(h.runtime.dirtyRead).toHaveBeenCalledTimes(1);
+
+    // Neither path recorded anything — the error surfaced before any
+    // fire/run bookkeeping ran.
+    const runRows = h.db.prepare("SELECT COUNT(*) AS c FROM codex_cronoton_runs").get() as { c: number };
+    expect(runRows.c).toBe(0);
+    const fires = h.db
+      .prepare("SELECT COUNT(*) AS c FROM codex_cronoton_fires WHERE codex_cronoton_id = ?")
+      .get(id) as { c: number };
+    expect(fires.c).toBe(0);
   });
 
   it("returns 409 with a clear error when a run is already in flight for the chained cronoton, never throwing out of the handler", async () => {

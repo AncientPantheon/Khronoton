@@ -138,6 +138,20 @@ export interface FireResult {
   readonly error?: string;
   /** Computed one-time terminal intent; `null` for recurring. */
   readonly terminalIntent: TerminalIntent | null;
+  /**
+   * `true` only for `resolvers.ts`'s own `postponed(...)` results — a
+   * server-resolver-routed fire that was NEVER submitted to chain at all
+   * (a dispatch error, an unknown/multi-tx-mismatched resolver name, a
+   * resolver-side safety-guard simulate failure, or its gas guard being
+   * tripped). Absent/`undefined` for every other `FireResult`, including a
+   * GENUINE on-chain fire failure — the two are otherwise structurally
+   * identical (`ok: false`, `terminalIntent: null` for a recurring row
+   * either way), which is exactly the ambiguity this field exists to
+   * resolve: a caller deciding whether "didn't fire" should fall back to
+   * an alternate path (as `single-tx.ts`'s `attemptSingleTxFirst` does)
+   * must be able to tell the two apart without parsing `error` text.
+   */
+  readonly postponed?: boolean;
 }
 
 /**
@@ -218,6 +232,23 @@ export interface CodexCronotonRow {
    * `SELECT *` carry the column.
    */
   public_observable?: number;
+  /**
+   * When 1, a chained row attempts a single-transaction variant of its own
+   * work (via `pact_code`/`payload_json`/`config_json`/`gas_payer_json`/
+   * `signers_json`, reinterpreted) before falling through to the step-by-step
+   * chain. Optional so pre-existing hand-constructed row doubles (test
+   * fixtures across the package, predating this column) still typecheck;
+   * real rows from `SELECT *` carry the column (value is never actually
+   * undefined at runtime — `installSchema`'s `ensureColumn` backfills
+   * `NOT NULL DEFAULT 0` on every row).
+   */
+  try_single_tx_first?: number;
+  /**
+   * Meaningful only when `try_single_tx_first` is 1: how the single-tx Pact
+   * code was produced. `null`/absent when unset. Optional for the same
+   * pre-existing-fixture-compatibility reason as `try_single_tx_first`.
+   */
+  single_tx_mode?: "custom" | "default" | null;
   status: "active" | "paused" | "completed" | "error";
   next_fire_at: string | null;
   last_fire_at: string | null;

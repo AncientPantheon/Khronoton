@@ -27,6 +27,7 @@ import {
   CodexCronotonValidationError,
   TerminalCronotonError,
 } from "./errors.js";
+import { insertStep } from "./steps.js";
 import { registerServerResolver } from "../resolvers.js";
 import { installSchema } from "../schema.js";
 import type { CodexCronotonRow } from "../types.js";
@@ -406,6 +407,162 @@ describe("editCodexCronoton", () => {
     expect(() =>
       editCodexCronoton(id, { payload: { amount: "1.0" } }, { db }),
     ).toThrow(/disjoint/);
+  });
+});
+
+describe("single-tx-first fields (try_single_tx_first / single_tx_mode)", () => {
+  // (1) A brand-new row never has codex_cronoton_steps rows yet (they're inserted
+  // via a separate, later insertStep call) — so there is never a fallback chain
+  // to justify the flag at commit time. Rejecting here, rather than silently
+  // persisting an unusable flag, is the whole point of this guard.
+  it("commit rejects trySingleTxFirst: true — a brand-new row has no steps yet", () => {
+    expect(() =>
+      commitCodexCronoton(validInput({ trySingleTxFirst: true }), {
+        now: new Date(),
+        db,
+      }),
+    ).toThrow(CodexCronotonValidationError);
+  });
+
+  // (2) 'default' mode is reserved for the sibling (not-yet-shipped) topic —
+  // accepting it silently would let an operator configure a mode that never
+  // actually composes anything.
+  it("commit rejects singleTxMode: 'default' — not yet supported", () => {
+    expect(() =>
+      commitCodexCronoton(validInput({ singleTxMode: "default" }), {
+        now: new Date(),
+        db,
+      }),
+    ).toThrow(CodexCronotonValidationError);
+  });
+
+  // (2b) REGRESSION (review finding): singleTxMode's TS type is erased at
+  // runtime — an out-of-enum string that is NOT the one reserved literal
+  // 'default' must still be rejected with this function's own typed error,
+  // not silently reach the raw SQL CHECK constraint (which would surface as
+  // an undifferentiated driver-level SqliteError instead of a clean 400).
+  it("commit rejects an out-of-enum singleTxMode value (not just the literal 'default')", () => {
+    expect(() =>
+      commitCodexCronoton(
+        validInput({ singleTxMode: "custom2" as never }),
+        { now: new Date(), db },
+      ),
+    ).toThrow(CodexCronotonValidationError);
+  });
+
+  // (3) Enabling the flag via edit on a row that still has zero steps is exactly
+  // as unusable as enabling it at commit — the guard must hold post-commit too.
+  it("edit rejects enabling trySingleTxFirst on a row with zero steps, naming the missing chain", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    expect(() =>
+      editCodexCronoton(id, { trySingleTxFirst: true, singleTxMode: "custom" }, { db }),
+    ).toThrow(/no steps/);
+  });
+
+  // (4) Once a real fallback chain exists (≥1 step row), the same edit must
+  // succeed and persist both fields exactly as requested.
+  it("edit enabling trySingleTxFirst on a row with ≥1 step succeeds and persists both fields", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+
+    const res = editCodexCronoton(
+      id,
+      { trySingleTxFirst: true, singleTxMode: "custom" },
+      { db },
+    );
+
+    expect(res.changedFields).toContain("trySingleTxFirst");
+    expect(res.changedFields).toContain("singleTxMode");
+    const row = getCodexCronoton(id, { db })!;
+    expect(row.try_single_tx_first).toBe(1);
+    expect(row.single_tx_mode).toBe("custom");
+  });
+
+  // (4a) REGRESSION (review finding): the guard's `row.single_tx_mode`
+  // INHERITANCE branch — not just its rejection branch — must actually let a
+  // later edit succeed when a PRIOR edit already persisted singleTxMode:
+  // "custom" and the new edit flips trySingleTxFirst on alone. Every other
+  // test in this file sets both fields in the SAME call, which never
+  // exercises this fallback resolving TO "custom" (only to null, via 4b/4c).
+  it("edit enabling trySingleTxFirst alone succeeds when a prior edit already persisted singleTxMode: 'custom'", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+    editCodexCronoton(id, { singleTxMode: "custom" }, { db });
+
+    const res = editCodexCronoton(id, { trySingleTxFirst: true }, { db });
+
+    expect(res.changedFields).toContain("trySingleTxFirst");
+    const row = getCodexCronoton(id, { db })!;
+    expect(row.try_single_tx_first).toBe(1);
+    expect(row.single_tx_mode).toBe("custom");
+
+    // A further edit touching neither field (the "steady state") must also
+    // keep succeeding — the inherited mode stays "custom" across any number
+    // of unrelated edits, not just the one that flipped the flag on.
+    editCodexCronoton(id, { name: "renamed-steady-state" }, { db });
+    const after = getCodexCronoton(id, { db })!;
+    expect(after.try_single_tx_first).toBe(1);
+    expect(after.single_tx_mode).toBe("custom");
+  });
+
+  // (4b) REGRESSION (review finding): enabling trySingleTxFirst without ALSO
+  // specifying singleTxMode: "custom" must be rejected — single_tx_mode would
+  // otherwise stay null, a state types.ts's own doc comment documents as
+  // meaningless once the flag is on.
+  it("edit rejects enabling trySingleTxFirst without also setting singleTxMode to 'custom'", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+
+    expect(() => editCodexCronoton(id, { trySingleTxFirst: true }, { db })).toThrow(
+      /singleTxMode/,
+    );
+  });
+
+  // (4c) The same guard holds even when a PRIOR edit already left
+  // single_tx_mode at null — turning the flag on later must still require
+  // the mode to be (re-)specified, not silently inherit the stale null.
+  it("edit rejects re-enabling trySingleTxFirst later if single_tx_mode was never set to 'custom'", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+    editCodexCronoton(id, { name: "renamed" }, { db }); // single_tx_mode stays null
+
+    expect(() => editCodexCronoton(id, { trySingleTxFirst: true }, { db })).toThrow(
+      /singleTxMode/,
+    );
+  });
+
+  // (5) 'default' mode is rejected at edit time regardless of step count — the
+  // step-count guard is orthogonal to the mode-whitelist guard.
+  it("edit rejects singleTxMode: 'default' regardless of step count", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+    expect(() => editCodexCronoton(id, { singleTxMode: "default" }, { db })).toThrow(
+      CodexCronotonValidationError,
+    );
+  });
+
+  // (5b) REGRESSION (review finding): same out-of-enum guard at edit time.
+  it("edit rejects an out-of-enum singleTxMode value (not just the literal 'default')", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    insertStep({ codexCronotonId: id, stepIndex: 0, mode: "single", pactCode: "(code)" }, { db });
+    expect(() =>
+      editCodexCronoton(id, { singleTxMode: "custom2" as never }, { db }),
+    ).toThrow(CodexCronotonValidationError);
+  });
+
+  // (6) Omitting both fields on commit AND on edit must leave the byte-identical
+  // defaults every pre-existing row in this file already relies on — a silent
+  // behavior change here would break every other test in this file.
+  it("omitting both fields on commit and on edit leaves try_single_tx_first: 0 / single_tx_mode: null", () => {
+    const { id } = commitCodexCronoton(validInput(), { now: new Date(), db });
+    const afterCommit = getCodexCronoton(id, { db })!;
+    expect(afterCommit.try_single_tx_first).toBe(0);
+    expect(afterCommit.single_tx_mode).toBeNull();
+
+    editCodexCronoton(id, { name: "renamed" }, { db });
+    const afterEdit = getCodexCronoton(id, { db })!;
+    expect(afterEdit.try_single_tx_first).toBe(0);
+    expect(afterEdit.single_tx_mode).toBeNull();
   });
 });
 

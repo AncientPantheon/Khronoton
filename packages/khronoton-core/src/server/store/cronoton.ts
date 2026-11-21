@@ -38,6 +38,7 @@ import {
   rowExternalFireable,
   rowRuntimeArgKeys,
 } from "./mappers.js";
+import { listStepsForCronoton } from "./steps.js";
 
 // ── Commit / read / list / edit ──────────────────────────────────────────────
 
@@ -62,6 +63,20 @@ export interface CommitCodexCronotonInput {
   /** When true, the row is host-fired on an event (via executeNow) rather than on a
    *  timer — a THIRD trigger-only reason: it commits scheduler-off (next_fire_at NULL). */
   eventDriven?: boolean;
+  /**
+   * Opt-in "try single-tx first" flag — ALWAYS rejected at commit time. A
+   * brand-new row never has `codex_cronoton_steps` rows yet (they're inserted
+   * via a separate, later `insertStep` call), so there is never a fallback
+   * chain to justify the flag this early. Enable it later via
+   * {@link editCodexCronoton} once ≥1 step row exists.
+   */
+  trySingleTxFirst?: boolean;
+  /**
+   * Single-tx Pact-code production mode. Only `'custom'` is supported today;
+   * `'default'` is reserved for the sibling (not-yet-shipped) topic and is
+   * ALWAYS rejected at commit time.
+   */
+  singleTxMode?: "custom" | "default";
 }
 
 interface CommitOpts extends DbDep {
@@ -114,6 +129,29 @@ export function commitCodexCronoton(
   }
 
   assertAutoGasGate(input.config);
+
+  // Validated against the FULL allowed set, not just the one reserved
+  // literal — a review finding caught that `singleTxMode`'s TypeScript type
+  // is erased at runtime, so any out-of-enum string (a typo, a stale client)
+  // previously fell through this check uncaught and relied solely on
+  // schema.ts's raw SQL CHECK constraint, surfacing as a driver-level
+  // SqliteError instead of this function's own typed validation error. (The
+  // `'default'` single-tx mode specifically is reserved for the sibling
+  // not-yet-shipped Default-mode topic — accepting it would silently
+  // configure a mode that never actually composes anything.)
+  if (input.singleTxMode !== undefined && input.singleTxMode !== "custom") {
+    throw new CodexCronotonValidationError(
+      `singleTxMode must be "custom" (got ${JSON.stringify(input.singleTxMode)}) — "default" is not yet supported`,
+    );
+  }
+  // A brand-new row never has codex_cronoton_steps rows yet (they're inserted
+  // via a separate, later insertStep call), so there is never a fallback chain
+  // to justify enabling the flag this early — enable it via an edit instead.
+  if (input.trySingleTxFirst) {
+    throw new CodexCronotonValidationError(
+      "trySingleTxFirst cannot be set at commit time — this cronoton has no steps yet; add steps first, then enable it via an edit",
+    );
+  }
 
   // Runtime-arg keys must be DISJOINT from the fixed payload — a trigger-supplied
   // arg must never be able to clobber a fixed key (e.g. a keyset).
@@ -171,9 +209,10 @@ export function commitCodexCronoton(
       `INSERT INTO codex_cronotons
          (id, name, description, pact_code, config_json, payload_json,
           gas_payer_json, signers_json, schedule_mode, schedule_config_json,
-          server_resolver, external_fireable, runtime_arg_keys, status,
+          server_resolver, external_fireable, runtime_arg_keys,
+          try_single_tx_first, single_tx_mode, status,
           next_fire_at, last_fire_at, created_at, modified_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?)`,
     )
     .run(
       id,
@@ -189,6 +228,8 @@ export function commitCodexCronoton(
       input.serverResolver ?? null,
       externalFireable ? 1 : 0,
       runtimeArgKeys.length > 0 ? JSON.stringify(runtimeArgKeys) : null,
+      input.trySingleTxFirst ? 1 : 0,
+      input.singleTxMode ?? null,
       nextFireAt,
       nowIso,
       nowIso,
@@ -274,6 +315,13 @@ export interface EditCodexCronotonPatch {
    *  edit or a scheduled→event-driven conversion. There is no persisted column, so
    *  the edit path relies on this patch signal (the persisted row can't reveal it). */
   eventDriven?: boolean;
+  /** Opt-in "try single-tx first" flag. Enabling it (explicitly `true`, or already
+   *  on and not explicitly turned off) requires the row to already carry ≥1
+   *  `codex_cronoton_steps` row — rejected otherwise, naming the missing chain. */
+  trySingleTxFirst?: boolean;
+  /** Single-tx Pact-code production mode. `'default'` is always rejected — reserved
+   *  for the sibling (not-yet-shipped) topic. */
+  singleTxMode?: "custom" | "default";
 }
 
 /**
@@ -303,6 +351,13 @@ export function editCodexCronoton(
   let nextScheduleConfigJson = row.schedule_config_json;
   let nextServerResolver = row.server_resolver;
   let nextFireAt = row.next_fire_at;
+  // `?? 0`/`?? null`: the row type widens both columns as optional only for
+  // pre-existing hand-constructed fixtures elsewhere; a real row from
+  // `getCodexCronoton`'s `SELECT *` always carries a concrete value, but the
+  // fallback keeps these locals bindable (better-sqlite3 rejects `undefined`
+  // params) even against an unusual double that omits them.
+  let nextTrySingleTxFirst = row.try_single_tx_first ?? 0;
+  let nextSingleTxMode = row.single_tx_mode ?? null;
 
   if (
     typeof patch.name === "string" &&
@@ -350,6 +405,56 @@ export function editCodexCronoton(
   if (patch.serverResolver !== undefined) {
     nextServerResolver = patch.serverResolver;
     changedFields.push("serverResolver");
+  }
+
+  // Validated against the FULL allowed set — see commitCodexCronoton's
+  // identical guard's doc comment for why (a review finding: the TS type is
+  // erased at runtime, so an out-of-enum string must not fall through to the
+  // raw SQL CHECK constraint uncaught). Rejected at edit time regardless of
+  // step count, the same as at commit time.
+  if (patch.singleTxMode !== undefined && patch.singleTxMode !== "custom") {
+    throw new CodexCronotonValidationError(
+      `singleTxMode must be "custom" (got ${JSON.stringify(patch.singleTxMode)}) — "default" is not yet supported`,
+    );
+  }
+  // Enabling the flag (explicitly, OR already on and not explicitly turned off)
+  // requires a real fallback chain to exist — otherwise there is nothing for the
+  // flag to ever fall back to.
+  const willBeTrySingleTxFirst =
+    patch.trySingleTxFirst !== undefined ? patch.trySingleTxFirst : row.try_single_tx_first === 1;
+  if (willBeTrySingleTxFirst && listStepsForCronoton(id, { db }).length === 0) {
+    throw new CodexCronotonValidationError(
+      "trySingleTxFirst requires at least one codex_cronoton_steps row to fall back to — this cronoton has no steps",
+    );
+  }
+  // A review finding caught this: `attemptSingleTxFirst` never reads
+  // `single_tx_mode` at all today (it is pure provenance metadata), so
+  // nothing previously stopped an edit from turning `trySingleTxFirst` on
+  // while leaving `single_tx_mode` at `null` — a state `types.ts`'s own doc
+  // comment documents as meaningless ("Meaningful only when
+  // try_single_tx_first is 1"). Harmless today (only `'custom'`/`null` are
+  // reachable, and both behave identically), but left unresolved it would
+  // silently misrecord operator intent once a future `'default'` mode needs
+  // to branch on this field. Require the resulting mode to resolve to
+  // `'custom'` whenever the flag will be on, mirroring the steps-count guard
+  // immediately above.
+  const willBeSingleTxMode =
+    patch.singleTxMode !== undefined ? patch.singleTxMode : row.single_tx_mode;
+  if (willBeTrySingleTxFirst && willBeSingleTxMode !== "custom") {
+    throw new CodexCronotonValidationError(
+      "trySingleTxFirst requires singleTxMode: \"custom\" to be set (single_tx_mode is otherwise left meaningless)",
+    );
+  }
+  if (
+    patch.trySingleTxFirst !== undefined &&
+    (patch.trySingleTxFirst ? 1 : 0) !== row.try_single_tx_first
+  ) {
+    nextTrySingleTxFirst = patch.trySingleTxFirst ? 1 : 0;
+    changedFields.push("trySingleTxFirst");
+  }
+  if (patch.singleTxMode !== undefined && patch.singleTxMode !== row.single_tx_mode) {
+    nextSingleTxMode = patch.singleTxMode;
+    changedFields.push("singleTxMode");
   }
 
   let scheduleChanged = false;
@@ -417,7 +522,8 @@ export function editCodexCronoton(
         SET name = ?, description = ?, pact_code = ?, config_json = ?,
             payload_json = ?, gas_payer_json = ?, signers_json = ?,
             schedule_mode = ?, schedule_config_json = ?, server_resolver = ?,
-            external_fireable = ?, next_fire_at = ?, modified_at = ?
+            external_fireable = ?, try_single_tx_first = ?, single_tx_mode = ?,
+            next_fire_at = ?, modified_at = ?
       WHERE id = ?`,
   ).run(
     nextName,
@@ -431,6 +537,8 @@ export function editCodexCronoton(
     nextScheduleConfigJson,
     nextServerResolver,
     nextExternalFireable,
+    nextTrySingleTxFirst,
+    nextSingleTxMode,
     nextFireAt,
     (opts.now ?? new Date()).toISOString(),
     id,

@@ -36,6 +36,7 @@ import * as runsStore from "./store/runs.js";
 import * as stepsStore from "./store/steps.js";
 import * as runsDriver from "./runs-driver.js";
 import { RunAlreadyInFlightError } from "./store/errors.js";
+import * as singleTx from "./single-tx.js";
 
 import { codexCronotonTickOnce, processDueManualBatchesOnce } from "./tick.js";
 import type { TickCtx } from "./tick.js";
@@ -185,6 +186,7 @@ let getCronotonSpy: ReturnType<typeof vi.spyOn>;
 let listStepsSpy: ReturnType<typeof vi.spyOn>;
 let createRunSpy: ReturnType<typeof vi.spyOn>;
 let driveRunOnceSpy: ReturnType<typeof vi.spyOn>;
+let attemptSingleTxSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -214,6 +216,11 @@ beforeEach(() => {
   listStepsSpy = vi.spyOn(stepsStore, "listStepsForCronoton").mockReturnValue([]);
   createRunSpy = vi.spyOn(runsStore, "createRun").mockReturnValue("run-mock-id");
   driveRunOnceSpy = vi.spyOn(runsDriver, "driveRunOnce").mockResolvedValue(undefined);
+
+  // Default to "did not fire" (mirrors try_single_tx_first=0) so every
+  // pre-existing test keeps taking the existing chained/plain decision
+  // completely unmodified; only the new single-tx-first tests override this.
+  attemptSingleTxSpy = vi.spyOn(singleTx, "attemptSingleTxFirst").mockResolvedValue({ fired: false });
 });
 
 afterEach(() => {
@@ -494,6 +501,105 @@ describe("codexCronotonTickOnce", () => {
     expect(recordSpy).toHaveBeenCalledTimes(1);
     expect(result.firedIds).toEqual(["cc-plain-checked"]);
   });
+
+  it("consults attemptSingleTxFirst for every due row (passing the row and the tick's own ctx) and, when it reports try_single_tx_first is off (fired:false), drives the existing plain-fire path with zero behavior change", async () => {
+    fetchSpy.mockReturnValue([makeRow({ id: "cc-single-off", try_single_tx_first: 0 })]);
+    fireSpy.mockResolvedValue(fireOk());
+    const ctx = makeCtx();
+
+    const result = await codexCronotonTickOnce(NOW, ctx);
+
+    expect(attemptSingleTxSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "cc-single-off" }),
+      ctx,
+      { auditDetailExtra: { actor: "scheduler" } },
+    );
+    // off → falls straight through to the pre-existing chained/plain decision.
+    expect(listStepsSpy).toHaveBeenCalledWith("cc-single-off", expect.objectContaining({ db: ctx.db }));
+    expect(fireSpy).toHaveBeenCalledTimes(1);
+    expect(recordSpy).toHaveBeenCalledTimes(1);
+    expect(result.firedIds).toEqual(["cc-single-off"]);
+    expect(result.skippedIds).toEqual([]);
+  });
+
+  it("fires a due chained row's single-tx-first variant when it fits simulation — reports the row in firedIds, never creates a run (drivenRunIds stays empty), and never touches the step/leg machinery", async () => {
+    const row = makeRow({ id: "cc-single-fit", try_single_tx_first: 1 });
+    fetchSpy.mockReturnValue([row]);
+    attemptSingleTxSpy.mockResolvedValue({
+      fired: true,
+      result: fireOk({ requestKey: "rk-single-tx" }),
+      fireId: "fire-single-1",
+    });
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(result.firedIds).toEqual(["cc-single-fit"]);
+    expect(result.failedIds).toEqual([]);
+    expect(result.skippedIds).toEqual([]);
+    // no run was ever created for this row.
+    expect(result.drivenRunIds).toEqual([]);
+    // the step/leg machinery (and the plain one-shot fire path) is never reached.
+    expect(listStepsSpy).not.toHaveBeenCalled();
+    expect(createRunSpy).not.toHaveBeenCalled();
+    expect(driveRunOnceSpy).not.toHaveBeenCalled();
+    expect(fireSpy).not.toHaveBeenCalled();
+    expect(recordSpy).not.toHaveBeenCalled();
+  });
+
+  it("lands a due chained row's single-tx-first variant in failedIds when it fires but the dispatcher reports ok:false, still never driving a run", async () => {
+    const row = makeRow({ id: "cc-single-firedfail", try_single_tx_first: 1 });
+    fetchSpy.mockReturnValue([row]);
+    attemptSingleTxSpy.mockResolvedValue({
+      fired: true,
+      result: fireFail(),
+      fireId: "fire-single-2",
+    });
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(result.firedIds).toEqual([]);
+    expect(result.failedIds).toEqual(["cc-single-firedfail"]);
+    expect(result.drivenRunIds).toEqual([]);
+    expect(createRunSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the existing chained path when a due row's single-tx-first attempt is refused for being too expensive (fired:false), driving a real run exactly as a try_single_tx_first=0 row would", async () => {
+    const row = makeRow({ id: "cc-single-gasrefused", try_single_tx_first: 1 });
+    fetchSpy.mockReturnValue([row]);
+    listStepsSpy.mockReturnValue([makeStepRow({ codex_cronoton_id: "cc-single-gasrefused" })]);
+    createRunSpy.mockReturnValue("run-after-refusal");
+    attemptSingleTxSpy.mockResolvedValue({ fired: false });
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(createRunSpy).toHaveBeenCalledWith(
+      { codexCronotonId: "cc-single-gasrefused", stepCount: 1 },
+      expect.anything(),
+    );
+    expect(driveRunOnceSpy).toHaveBeenCalledTimes(1);
+    expect(result.firedIds).toEqual(["cc-single-gasrefused"]);
+    expect(result.drivenRunIds).toEqual(["run-after-refusal"]);
+  });
+
+  it("isolates a due row whose single-tx-first attempt throws for a genuine non-gas simulate failure, landing it in skippedIds via the existing per-row catch (not a new error path)", async () => {
+    const row = makeRow({ id: "cc-single-badsim", try_single_tx_first: 1 });
+    fetchSpy.mockReturnValue([row]);
+    attemptSingleTxSpy.mockRejectedValue(new Error("single-tx simulate failed: bad pact code"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await codexCronotonTickOnce(NOW, makeCtx());
+
+    expect(result.skippedIds).toEqual(["cc-single-badsim"]);
+    expect(result.firedIds).toEqual([]);
+    expect(result.failedIds).toEqual([]);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("cc-single-badsim"),
+      expect.any(Error),
+    );
+    // the same isolation any other orchestration error in this loop already gets.
+    expect(createRunSpy).not.toHaveBeenCalled();
+    expect(fireSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("processDueManualBatchesOnce", () => {
@@ -509,6 +615,27 @@ describe("processDueManualBatchesOnce", () => {
     expect(fireSpy).not.toHaveBeenCalled();
     expect(recordSpy).not.toHaveBeenCalled();
     expect(result.cancelledIds).toEqual(["mb-x"]);
+    expect(result.firedIds).toEqual([]);
+  });
+
+  it("auto-cancels a batch whose parent cronoton has try_single_tx_first=1 (regression) — never fires the raw top-level definition with no gas-ceiling guard", async () => {
+    fetchBatchSpy.mockReturnValue([makeBatch({ id: "mb-single-tx", codex_cronoton_id: "cc-single-tx-parent" })]);
+    getCronotonSpy.mockReturnValue(
+      makeRow({ id: "cc-single-tx-parent", status: "active", try_single_tx_first: 1 }),
+    );
+    const ctx = makeCtx();
+
+    const result = await processDueManualBatchesOnce(NOW, ctx);
+
+    // Before the fix: this fired `rowToDefinition(cronoton)` — the row's OWN
+    // single-tx Pact code, by this feature's own semantics no longer inert
+    // placeholder data — directly through `fireByServerResolver`, with NO
+    // `attemptSingleTxFirst` simulate-then-decide gas-ceiling check at all.
+    expect(claimBatchSpy).not.toHaveBeenCalled();
+    expect(fireSpy).not.toHaveBeenCalled();
+    expect(recordSpy).not.toHaveBeenCalled();
+    expect(cancelBatchSpy).toHaveBeenCalledWith("mb-single-tx", expect.objectContaining({ db: ctx.db }));
+    expect(result.cancelledIds).toEqual(["mb-single-tx"]);
     expect(result.firedIds).toEqual([]);
   });
 

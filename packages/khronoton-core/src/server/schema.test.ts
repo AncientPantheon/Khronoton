@@ -337,6 +337,49 @@ describe("installSchema", () => {
     assertHasYieldAs(db);
   });
 
+  it("adds try_single_tx_first (NOT NULL DEFAULT 0) and single_tx_mode (nullable, CHECK custom/default) to codex_cronotons, on both a fresh install and a re-run", () => {
+    const assertShape = (handle: Database.Database) => {
+      const cols = handle
+        .prepare(`PRAGMA table_info(codex_cronotons)`)
+        .all() as Array<{ name: string; notnull: number }>;
+      const trySingleTxFirst = cols.find((c) => c.name === "try_single_tx_first");
+      expect(trySingleTxFirst).toBeDefined();
+      expect(trySingleTxFirst?.notnull).toBe(1);
+
+      const singleTxMode = cols.find((c) => c.name === "single_tx_mode");
+      expect(singleTxMode).toBeDefined();
+      expect(singleTxMode?.notnull).toBe(0);
+    };
+
+    // Fresh install (already installed in beforeEach).
+    assertShape(db);
+
+    // Re-run against an already-provisioned DB is idempotent.
+    expect(() => installSchema(db)).not.toThrow();
+    assertShape(db);
+
+    insertCronoton("c-single-tx");
+    const row = db
+      .prepare(
+        `SELECT try_single_tx_first, single_tx_mode FROM codex_cronotons WHERE id = ?`,
+      )
+      .get("c-single-tx") as { try_single_tx_first: number; single_tx_mode: string | null };
+    expect(row.try_single_tx_first).toBe(0);
+    expect(row.single_tx_mode).toBeNull();
+
+    // CHECK restricts single_tx_mode to 'custom'/'default' — NULL stays vacuously ok.
+    expect(() =>
+      db
+        .prepare(`UPDATE codex_cronotons SET single_tx_mode = ? WHERE id = ?`)
+        .run("bogus", "c-single-tx"),
+    ).toThrow(/CHECK constraint/i);
+    expect(() =>
+      db
+        .prepare(`UPDATE codex_cronotons SET single_tx_mode = ? WHERE id = ?`)
+        .run("custom", "c-single-tx"),
+    ).not.toThrow();
+  });
+
   it("public_token has a unique index that still allows multiple NULLs", () => {
     const freshDb = new Database(":memory:");
     installSchema(freshDb);

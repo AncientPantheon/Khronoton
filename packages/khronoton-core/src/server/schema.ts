@@ -241,4 +241,18 @@ export function installSchema(db: Database): void {
   // stored under in `codex_cronoton_run_yields`. Additive via `ensureColumn`,
   // covering both a fresh install and an already-provisioned database.
   ensureColumn(db, "codex_cronoton_steps", "yield_as", "TEXT");
+  // Opt-in single-tx-first chain variant (docs/work/khronoton-single-tx-custom):
+  // `try_single_tx_first` gates the simulate-then-decide orchestration ahead of
+  // the chained-run machinery; `single_tx_mode` (meaningful only when the flag
+  // is on) selects how the single-tx Pact code was produced. The CHECK is
+  // vacuously satisfied by NULL (mirrors `codex_cronoton_steps.yield_as`'s own
+  // nullable-no-CHECK precedent, just with a value whitelist added), so a row
+  // can leave `single_tx_mode` unset without an explicit `OR ... IS NULL` clause.
+  ensureColumn(db, "codex_cronotons", "try_single_tx_first", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(
+    db,
+    "codex_cronotons",
+    "single_tx_mode",
+    "TEXT CHECK (single_tx_mode IN ('custom', 'default'))",
+  );
 }
