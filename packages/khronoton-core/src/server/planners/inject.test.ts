@@ -11,7 +11,7 @@ import type { ChainClient, ChainRuntime, KeyResolver } from "../seams.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { PlannerCtx } from "./registry.js";
 import { normalizePlannerResult } from "./registry.js";
-import { injectPlanner } from "./inject.js";
+import { injectPlanner, InjectRequiresUnstallError } from "./inject.js";
 
 const PUB_A = "aa".repeat(32);
 
@@ -83,6 +83,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
     planner_params_json: JSON.stringify({
       fvtId: "fvt-1",
       patronAccount: "k:patron",
+      executor: "Ѻ.testexecutor",
       rewardDptfId: "dptf-1",
       amount: "12.345",
     }),
@@ -119,7 +120,7 @@ describe("injectPlanner", () => {
     );
     expect(legs[0].payload).toEqual({
       patron: "k:patron",
-      executor: `k:${PUB_A}`,
+      executor: "Ѻ.testexecutor",
       "fvt-id": "fvt-1",
       "reward-dptf-id": "dptf-1",
       amount: "12.345",
@@ -146,7 +147,7 @@ describe("injectPlanner", () => {
     );
     expect(legs[0].payload).toEqual({
       patron: "k:patron",
-      executor: `k:${PUB_A}`,
+      executor: "Ѻ.testexecutor",
       "fvt-id": "fvt-1",
       "reward-dptf-id": "dptf-1",
       amount: "12.345",
@@ -154,20 +155,64 @@ describe("injectPlanner", () => {
     expect(dirtyRead).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects when BOTH CC_InjectFinalize and CC_Inject fail — never fans out, even when the second failure carries a numeric gasUsed", async () => {
+  it("throws InjectRequiresUnstallError (not a plain Error) when CC_InjectFinalize fails AND CC_Inject is refused specifically for exceeding the gas ceiling", async () => {
     dirtyRead
       .mockResolvedValueOnce({ result: { status: "failure", error: { message: "stale stakers remain" } } })
-      // A numeric gasUsed here would make evictPlanner fan out — injectPlanner
-      // has no fan-out leg shape at all and must still reject.
-      .mockResolvedValueOnce({ result: { status: "failure", error: { message: "exceeds block gas limit" } }, gas: 3_000_000 });
+      // The executor's refuse-unmineable signal requires a SUCCESSFUL
+      // simulate whose measured gas exceeds the ceiling (runSimulate only
+      // reaches the gasUsed>ceiling check when `result.status !== "failure"`
+      // — Pact itself only reports a real cost for a run that didn't abort)
+      // — the distinguishable "insert an ouronet.aqp-unstall step first"
+      // case design.md calls for, not a generic chain-level failure.
+      .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 3_000_000 });
 
-    await expect(injectPlanner(makeStepRow(), makeCtx())).rejects.toThrow(/exceeds block gas limit/);
+    let caught: unknown;
+    try {
+      await injectPlanner(makeStepRow(), makeCtx());
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(InjectRequiresUnstallError);
+    expect((caught as Error).message).toMatch(/fvt-1/);
+    expect((caught as Error).message).toMatch(/ouronet\.aqp-unstall/);
+    expect(dirtyRead).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws a plain Error (never InjectRequiresUnstallError) when CC_InjectFinalize fails AND CC_Inject fails for a genuine non-gas reason", async () => {
+    dirtyRead
+      .mockResolvedValueOnce({ result: { status: "failure", error: { message: "stale stakers remain" } } })
+      // No numeric gasUsed on the second failure — a genuine Pact error, not
+      // a gas refusal, so this must never be treated as "needs an unstall
+      // step first."
+      .mockResolvedValueOnce({ result: { status: "failure", error: { message: "insufficient funds" } } });
+
+    let caught: unknown;
+    try {
+      await injectPlanner(makeStepRow(), makeCtx());
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).not.toBeInstanceOf(InjectRequiresUnstallError);
+    expect((caught as Error).message).toMatch(/insufficient funds/);
     expect(dirtyRead).toHaveBeenCalledTimes(2);
   });
 
   it("rejects with a configuration-error message when planner_params_json is missing fvtId, never calling the chain", async () => {
+    // Every OTHER required field is supplied (a review finding caught the
+    // original fixture also omitting `executor`, which would have let this
+    // test keep passing even if the `fvtId` check itself were accidentally
+    // dropped from the combined guard, since `executor`'s own absence alone
+    // still throws the same static message) — isolating fvtId as the ONLY
+    // missing field, mirroring the "missing executor" test's own pattern.
     const step = makeStepRow({
-      planner_params_json: JSON.stringify({ patronAccount: "k:patron", rewardDptfId: "dptf-1", amount: "1.0" }),
+      planner_params_json: JSON.stringify({
+        patronAccount: "k:patron",
+        executor: "Ѻ.testexecutor",
+        rewardDptfId: "dptf-1",
+        amount: "1.0",
+      }),
     });
 
     await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/fvtId/);
@@ -175,8 +220,15 @@ describe("injectPlanner", () => {
   });
 
   it("rejects with a configuration-error message when planner_params_json is missing amount specifically, never calling the chain", async () => {
+    // Every OTHER required field is supplied — see the "missing fvtId" test
+    // immediately above for why this isolation matters.
     const step = makeStepRow({
-      planner_params_json: JSON.stringify({ fvtId: "fvt-1", patronAccount: "k:patron", rewardDptfId: "dptf-1" }),
+      planner_params_json: JSON.stringify({
+        fvtId: "fvt-1",
+        patronAccount: "k:patron",
+        executor: "Ѻ.testexecutor",
+        rewardDptfId: "dptf-1",
+      }),
     });
 
     await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/amount/);
@@ -190,6 +242,7 @@ describe("injectPlanner", () => {
         planner_params_json: JSON.stringify({
           fvtId: "fvt-1",
           patronAccount: "k:patron",
+          executor: "Ѻ.testexecutor",
           rewardDptfId: "dptf-1",
           amount: badAmount,
         }),
@@ -199,4 +252,48 @@ describe("injectPlanner", () => {
       expect(dirtyRead).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects with a configuration-error message naming executor when planner_params_json is missing executor, never calling the chain", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({
+        fvtId: "fvt-1",
+        patronAccount: "k:patron",
+        rewardDptfId: "dptf-1",
+        amount: "1.0",
+      }),
+    });
+
+    await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/executor/);
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty-string executor before ever calling the chain", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({
+        fvtId: "fvt-1",
+        patronAccount: "k:patron",
+        executor: "",
+        rewardDptfId: "dptf-1",
+        amount: "1.0",
+      }),
+    });
+
+    await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/executor/);
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("rejects a k:-prefixed executor before ever calling the chain — the exact bug class this fix closes (a k: account has no DPTF balance row)", async () => {
+    const step = makeStepRow({
+      planner_params_json: JSON.stringify({
+        fvtId: "fvt-1",
+        patronAccount: "k:patron",
+        executor: `k:${PUB_A}`,
+        rewardDptfId: "dptf-1",
+        amount: "1.0",
+      }),
+    });
+
+    await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/executor/);
+    expect(dirtyRead).not.toHaveBeenCalled();
+  });
 });

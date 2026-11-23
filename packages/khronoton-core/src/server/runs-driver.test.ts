@@ -769,7 +769,7 @@ describe("driveRunOnce — a 2-step run chains TWO DIFFERENT real registered pla
         stepIndex: 1,
         mode: "planner",
         plannerName: "ouronet.aqp-inject",
-        plannerParams: { fvtId: "fvt-chain", patronAccount: "k:patron-chain", rewardDptfId: "dptf-chain", amount: "5.0" },
+        plannerParams: { fvtId: "fvt-chain", patronAccount: "k:patron-chain", executor: "Ѻ.executor-chain", rewardDptfId: "dptf-chain", amount: "5.0" },
         config: { chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: false, ttl: 600 },
         payload: {},
         gasPayer: { type: "gas-station", gasStationSignerKey: PUB_A },
@@ -823,7 +823,7 @@ describe("driveRunOnce — a 2-step run chains TWO DIFFERENT real registered pla
     expect(injectDef.pactCode).toContain("CC_InjectFinalize");
     expect(injectDef.payload).toEqual({
       patron: "k:patron-chain",
-      executor: `k:${PUB_A}`,
+      executor: "Ѻ.executor-chain",
       "fvt-id": "fvt-chain",
       "reward-dptf-id": "dptf-chain",
       amount: "5.0",
@@ -1444,6 +1444,7 @@ describe("driveRunOnce — step-to-step yield carry (docs/work/khronoton-step-yi
         plannerParams: {
           fvtId: "fvt-wrap-inject",
           patronAccount: "k:patron-wrap-inject",
+          executor: "Ѻ.executor-wrap-inject",
           rewardDptfId: "dptf-wrap-inject",
           amount: { $yield: "wrappedAmount" },
         },
