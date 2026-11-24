@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  capacityFor,
   evenSplit,
   measureSize,
   planFromSizing,
@@ -17,6 +18,17 @@ import {
 import type { ProbeOutcome, SplitSizing } from "./split-plan.js";
 
 const CEILING = 2_000_000;
+
+describe("capacityFor — confirmed mode reserves less headroom than planning mode", () => {
+  it("yields strictly more capacity for the same model/ceiling, since confirmed trusts a real measurement instead of extrapolating", () => {
+    const model = { fixed: 10_000, perItem: 5_000 };
+
+    const planning = capacityFor(model, CEILING, "planning");
+    const confirmed = capacityFor(model, CEILING, "confirmed");
+
+    expect(confirmed).toBeGreaterThan(planning);
+  });
+});
 
 describe("splitPlan — a single item that fits (1 probe total)", () => {
   it("returns batches:[[item]] and probes the item exactly once", async () => {
@@ -109,7 +121,7 @@ describe("measureSize + planFromSizing — 200 items, sample doesn't cover the s
     expect(sizing.ok).toBe(true);
     const sized = sizing as Extract<SplitSizing, { ok: true }>;
     expect(sized.fitsInOne).toBe(false);
-    // capacity 184 (see the exact-value comment below) -> ceil(200/184) = 2.
+    // capacity 198 (floor(maxSimulatedGasFor(2_000_000) / 10_000)) -> ceil(200/198) = 2.
     expect(sized.estimatedTransactions).toBe(2);
     expect(calls).toBe(2); // probe(1 item), probe(64-item sample)
 
@@ -118,12 +130,12 @@ describe("measureSize + planFromSizing — 200 items, sample doesn't cover the s
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable");
     // Pins the exact result this linear model/ceiling combination must
-    // produce (capacity 184 -> evenSplit(200,2)=[100,100], confirmed at
+    // produce (capacity 198 -> evenSplit(200,2)=[100,100], confirmed at
     // 1,000,000 gas, growth loop breaks without spending a probe since
-    // capacityFor at the 0.99 margin still rounds to the same 2 batches) —
-    // a looser length/balance/sum check would also pass a capacity/margin
-    // regression that happened to still produce a different, still-balanced
-    // batch count.
+    // capacityFor in "confirmed" mode (capacity 199) still rounds to the
+    // same 2 batches) — a looser length/balance/sum check would also pass a
+    // capacity/mode regression that happened to still produce a different,
+    // still-balanced batch count.
     expect(result.batches).toEqual([items.slice(0, 100), items.slice(100, 200)]);
     expect(result.worstBatchGas).toBe(1_000_000);
     // Exactly one more probe than measureSize already spent — the
@@ -139,12 +151,12 @@ describe("planFromSizing — a confirmation probe that refuses once, then succee
     const calls: number[] = [];
     const probe = async (batch: readonly unknown[]): Promise<ProbeOutcome> => {
       calls.push(batch.length);
-      if (batch.length === 1) return { ok: true, gas: 5_000 };
-      if (batch.length === 64) return { ok: true, gas: 893_300 };
+      if (batch.length === 1) return { ok: true, gas: 14_900 };
+      if (batch.length === 64) return { ok: true, gas: 953_600 };
       // First confirmation attempt: the whole 100-item selection as one
-      // batch (capacity 130 > n), refused by the chain.
+      // batch (capacity 133 > n), refused by the chain.
       if (batch.length === 100) return { ok: false, floor: 1_900_000 };
-      // Second confirmation attempt, after capacity shrinks 130 -> 97: a
+      // Second confirmation attempt, after capacity shrinks 133 -> 99: a
       // 50-item batch, which succeeds.
       if (batch.length === 50) return { ok: true, gas: 1_960_000 };
       throw new Error(`unexpected probe batch size ${batch.length}`);
@@ -187,9 +199,9 @@ describe("planFromSizing — the growth loop's success path: a probe at a larger
       calls.push(batch.length);
       if (batch.length === 1) return { ok: true, gas: 10_000 };
       if (batch.length === 64) return { ok: true, gas: 1_648_000 };
-      // First confirmation attempt: capacity 70 -> evenSplit(200, 3) -> [67, 67, 66].
+      // First confirmation attempt: capacity 76 -> evenSplit(200, 3) -> [67, 67, 66].
       if (batch.length === 67) return { ok: true, gas: 1_000_000 };
-      // Growth attempt 1: refit through (1, 67) gives capacity 132 ->
+      // Growth attempt 1: refit through (1, 67) gives capacity 133 ->
       // evenSplit(200, 2) -> [100, 100], fewer batches than 3, so the loop
       // probes it. It succeeds, and `best` is replaced.
       if (batch.length === 100) return { ok: true, gas: 1_900_000 };
@@ -276,12 +288,12 @@ describe("planFromSizing — the growth loop runs BOTH of its MAX_GROWTHS=2 iter
       calls.push(batch.length);
       if (batch.length === 1) return { ok: true, gas: 23_000 };
       if (batch.length === 64) return { ok: true, gas: 1_472_000 };
-      // Confirmation: capacity 80 -> evenSplit(300, 4) -> four 75-item batches.
-      if (batch.length === 75) return { ok: true, gas: 1_000_000 };
-      // Growth attempt 1: refit through (1, 75) gives capacity ~149 ->
+      // Confirmation: capacity 86 -> evenSplit(300, 4) -> four 75-item batches.
+      if (batch.length === 75) return { ok: true, gas: 1_200_000 };
+      // Growth attempt 1: refit through (1, 75) gives capacity ~125 ->
       // evenSplit(300, 3) -> three 100-item batches (fewer than 4).
-      if (batch.length === 100) return { ok: true, gas: 1_200_000 };
-      // Growth attempt 2: refit through (1, 100) gives capacity ~165 ->
+      if (batch.length === 100) return { ok: true, gas: 1_300_000 };
+      // Growth attempt 2: refit through (1, 100) gives capacity ~154 ->
       // evenSplit(300, 2) -> two 150-item batches (fewer than 3). This is
       // the probe the other two growth tests never reach.
       if (batch.length === 150) return { ok: true, gas: 1_900_000 };
@@ -348,8 +360,8 @@ describe("measureSize — the fixed cost alone leaves no room under the ceiling 
   it("returns ok:false with the infeasible shape, without ever probing the full selection", async () => {
     // one.gas and the 64-item sample are both comfortably under ceiling on
     // their own, but the FITTED fixed cost (~1,999,998) consumes nearly all
-    // of it, leaving `capacityFor` no room for even a single item once the
-    // 0.92 planning margin is applied.
+    // of it, leaving `capacityFor` no room for even a single item once
+    // `maxSimulatedGasFor`'s planning-mode headroom is applied.
     const probe = async (batch: readonly unknown[]): Promise<ProbeOutcome> => {
       if (batch.length === 1) return { ok: true, gas: 1_999_999 };
       if (batch.length === 64) return { ok: true, gas: 2_000_062 };
@@ -412,12 +424,12 @@ describe("planFromSizing — the confirmation loop exhausts all MAX_CONFIRMATION
     const calls: number[] = [];
     // Refuses every batch, regardless of size, so the shrink-and-retry loop
     // runs all 3 attempts and still never confirms. The underlying CAPACITY
-    // shrinks 92 -> 69 -> 51 (floor(capacity * SHRINK) each time), but
+    // shrinks 99 -> 74 -> 55 (floor(capacity * SHRINK) each time), but
     // `planAt` converts capacity to a batch COUNT first (Math.ceil(n /
     // capacity)) and then evenly splits — so the actual batch length handed
-    // to `probe` is [67, 67, 50], not [92, 69, 51]: capacities 92 and 69
+    // to `probe` is [67, 67, 50], not [99, 74, 55]: capacities 99 and 74
     // both round up to the same 3-batch split (evenSplit(200,3)=[67,67,66],
-    // largest 67), and only the third shrink (to 51) changes the batch
+    // largest 67), and only the third shrink (to 55) changes the batch
     // count to 4 (evenSplit(200,4)=[50,50,50,50], largest 50).
     const probe = async (batch: readonly unknown[]): Promise<ProbeOutcome> => {
       calls.push(batch.length);

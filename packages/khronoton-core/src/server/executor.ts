@@ -43,9 +43,11 @@ import type {
   UniversalKeypair,
   IUnsignedCommand,
   ListenResult,
+  DirtyReadResult,
 } from "./seams.js";
 import { LISTEN_TIMEOUT_MS, AUTO_GAS_CEILING } from "./seams.js";
 import { parseCapabilityLine, computeTerminalIntent } from "./pure/capability.js";
+import { declareGasLimit } from "./pure/gas-declaration.js";
 import { effectiveSigners, deriveSenderAccount } from "./executor-signers.js";
 import type {
   CodexTxDefinition,
@@ -128,7 +130,7 @@ export function __clearCeilingCacheForTests(): void {
  * is never cached as a sane value in that case — `AUTO_GAS_CEILING` itself
  * IS cached, so a chain whose adapter keeps failing doesn't re-attempt the
  * live fetch on every single call either). */
-async function resolveCeiling(ctx: ExecutorCtx, client: ChainClient, chainId: string): Promise<number> {
+export async function resolveCeiling(ctx: ExecutorCtx, client: ChainClient, chainId: string): Promise<number> {
   if (isSaneCeiling(ctx.config?.autoGasCeiling)) return ctx.config.autoGasCeiling;
 
   const now = Date.now();
@@ -285,6 +287,35 @@ function dirtyReadError(result: { error?: { message?: string } }): string {
 }
 
 /**
+ * The AUTO-gas calibration call, shared by `runSimulate`'s preview and
+ * `submitTransaction`'s real declaration — a review finding caught these
+ * two independently constructing the identical `declareGasLimit` call,
+ * which is exactly the kind of drift that let the preview and the real
+ * declaration disagree in the first place (the bug this helper's own
+ * extraction was prompted by fixing). `tx.cmd`'s byte length is measured
+ * against the SAME unsigned `tx` both callers preflight — see each call
+ * site's own doc comment for why that must be unsigned, not `signed`.
+ */
+function calibrateAutoGas(
+  runtime: ChainRuntime,
+  tx: IUnsignedCommand,
+  gasUsed: number,
+  signers: CodexTxDefinition["signers"],
+  ceiling: number,
+): number {
+  return declareGasLimit(
+    {
+      simulatedGas: gasUsed,
+      simIncludesSize: true,
+      cmdBytes: Buffer.byteLength(tx.cmd, "utf8"),
+      ed25519Signers: signers.length,
+      ceiling,
+    },
+    (g) => runtime.calculateAutoGasLimit(g),
+  ).gasLimit;
+}
+
+/**
  * Describe a caught throw for a structured `{ ok: false, error }` result —
  * shared by the `submit` and `fire` catch branches of
  * {@link executeCodexTransaction} so a future change to how a thrown error is
@@ -343,7 +374,6 @@ async function runSimulate(
     signers,
     autoGasLimit ? ceiling : undefined,
   );
-  const signed = await signTransaction(runtime, resolver, signers, tx);
 
   if (autoGasLimit && !client.preflightRead) {
     throw new Error(
@@ -355,9 +385,22 @@ async function runSimulate(
         "cronoton to manual gas.",
     );
   }
+  // Preflight the UNSIGNED `tx`, never `signed`, for the AUTO-gas branch —
+  // a review finding caught this previously preflighting the already-signed
+  // artifact, which makes `declareGasLimit`'s `simIncludesSize`+signature-byte
+  // correction genuinely ambiguous (is the real signature-byte cost already
+  // counted by a preflight of a fully-signed command, or not? — not
+  // something to guess at). Matches `submitTransaction`'s own identical fix
+  // for the same reason. A second review finding caught the sign call
+  // ALSO still running unconditionally even though the AUTO-gas branch
+  // never reads `signed` at all — wasted resolver/sign work on every
+  // AUTO-gas simulate, and (since it ran before the `preflightRead`
+  // availability check above) capable of masking that check's own clearer
+  // error behind an unrelated signing failure. Only the MANUAL-gas branch
+  // signs now, exactly mirroring `submitTransaction`'s own `if`/`else`.
   const simulation = autoGasLimit
-    ? await client.preflightRead!(signed)
-    : await client.dirtyRead(signed);
+    ? await client.preflightRead!(tx)
+    : await client.dirtyRead(await signTransaction(runtime, resolver, signers, tx));
 
   if (simulation.result.status === "failure") {
     return {
@@ -380,8 +423,16 @@ async function runSimulate(
       terminalIntent: null,
     };
   }
+  // Routed through the shared `calibrateAutoGas` (not the old
+  // `calculateAutoGasLimit` ladder directly) — a review finding caught this
+  // preview diverging from what `submitTransaction` actually declares at
+  // fire time, once that path was ported; a second finding caught the fix
+  // re-duplicating the same call construction in both places instead of
+  // sharing it, reopening the exact drift risk the first fix closed.
   const calibratedGasLimit =
-    autoGasLimit && gasUsed > 0 ? runtime.calculateAutoGasLimit(gasUsed) : undefined;
+    autoGasLimit && gasUsed > 0
+      ? calibrateAutoGas(runtime, tx, gasUsed, signers, ceiling)
+      : undefined;
 
   return {
     ok: true,
@@ -415,14 +466,15 @@ async function submitTransaction(
   const { runtime, resolver } = ctx;
   const { chainId, autoGasLimit } = definition.config;
 
-  // Build + sign for the pre-flight read.
+  // Build at the resolved ceiling — UNSIGNED. An AUTO-gas fire preflights
+  // this build directly, before any signing; a MANUAL-gas fire signs it
+  // immediately below, unchanged.
   let tx = buildTransaction(
     runtime,
     definition,
     signers,
     autoGasLimit ? ceiling : undefined,
   );
-  let signed = await signTransaction(runtime, resolver, signers, tx);
 
   if (autoGasLimit && !client.preflightRead) {
     throw new Error(
@@ -436,11 +488,21 @@ async function submitTransaction(
   }
 
   // (F-001) Pre-submit pre-flight — never submit a tx a pre-flight would
-  // catch (saves a one-time terminal fire + gas). AUTO-gas fires source this
-  // from the accurate `preflightRead`; MANUAL-gas fires stay on `dirtyRead`.
-  const preflight = autoGasLimit
-    ? await client.preflightRead!(signed)
-    : await client.dirtyRead(signed);
+  // catch (saves a one-time terminal fire + gas). AUTO-gas fires preflight
+  // the UNSIGNED build directly off `buildTransaction`: `declareGasLimit`'s
+  // size-charge-delta correction below is derived against reading the
+  // UNSIGNED command, so preflighting an already-signed artifact instead
+  // would make "is the signature byte cost already counted" ambiguous (see
+  // docs/work/ouronet-gas-declaration-port/design.md). MANUAL-gas fires sign
+  // first, unchanged, and stay on `dirtyRead` of the signed tx.
+  let signed: unknown;
+  let preflight: DirtyReadResult;
+  if (autoGasLimit) {
+    preflight = await client.preflightRead!(tx);
+  } else {
+    signed = await signTransaction(runtime, resolver, signers, tx);
+    preflight = await client.dirtyRead(signed);
+  }
   if (preflight.result.status === "failure") {
     return {
       ok: false,
@@ -464,10 +526,18 @@ async function submitTransaction(
     };
   }
 
-  // Auto-gas: rebuild + re-sign with the calibrated limit from the pre-flight read.
-  if (autoGasLimit && gasUsed > 0) {
-    const calibrated = runtime.calculateAutoGasLimit(gasUsed);
-    tx = buildTransaction(runtime, definition, signers, calibrated);
+  // Auto-gas: calibrate from the unsigned preflight read via the closed-form
+  // declaration model (below EVIDENCE_FLOOR this defers unchanged to the
+  // legacy ladder), rebuild at the calibrated limit if calibration ran, then
+  // sign — the ONLY sign call this branch makes, win or lose on calibration.
+  if (autoGasLimit) {
+    if (gasUsed > 0) {
+      // Shared with `runSimulate`'s identical preview calibration — see
+      // `calibrateAutoGas`'s own doc comment for why this must not be
+      // re-duplicated here by hand.
+      const calibrated = calibrateAutoGas(runtime, tx, gasUsed, signers, ceiling);
+      tx = buildTransaction(runtime, definition, signers, calibrated);
+    }
     signed = await signTransaction(runtime, resolver, signers, tx);
   }
 

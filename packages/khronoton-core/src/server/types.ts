@@ -21,11 +21,16 @@ import type { ScheduleMode } from "../schedule.js";
 export type ChainId = string;
 
 /**
- * Run mode: `simulate` signs + dirty-reads but never submits; `fire` submits
- * AND awaits confirmation (listen); `submit` submits but does NOT await
- * confirmation — the caller polls it separately (see {@link SubmitResult}
- * and `ChainClient.pollRequestKeys`), which is what lets a chained,
- * multi-leg run avoid blocking the scheduler on a 5-minute listen per leg.
+ * Run mode: `simulate` never submits — MANUAL-gas signs first, then
+ * dirty-reads the signed command; AUTO-gas never signs at all, preflighting
+ * the unsigned build directly (a review finding caught `executor.ts`'s own
+ * `calibrateAutoGas` calibration depending on an unsigned reading, so
+ * signing before preflight would be wasted work with no reader of its
+ * result). `fire` submits AND awaits confirmation (listen); `submit`
+ * submits but does NOT await confirmation — the caller polls it separately
+ * (see {@link SubmitResult} and `ChainClient.pollRequestKeys`), which is
+ * what lets a chained, multi-leg run avoid blocking the scheduler on a
+ * 5-minute listen per leg.
  */
 export type ExecutorMode = "simulate" | "fire" | "submit";
 

@@ -112,6 +112,14 @@ export type {
 export { insertStep, listStepsForCronoton, getStepByIndex } from "./steps.js";
 export type { InsertStepInput, CodexCronotonStepRow } from "./steps.js";
 
+// ── Chained commit (parent + N steps + optional single-tx-first) ─────────────
+export { commitChainedCronoton } from "./chain.js";
+export type {
+  CommitChainedCronotonInput,
+  CommitChainStepInput,
+  CommitChainSingleTxFirst,
+} from "./chain.js";
+
 // ── Chained runs + legs: create / read / leg lifecycle ────────────────────────
 export {
   createRun,

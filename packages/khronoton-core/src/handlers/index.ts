@@ -34,6 +34,16 @@ export {
   deleteCodexCronoton,
 } from "./cronoton.js";
 export type { CommitBody, CommitEnvelope, CommitSchedule } from "./cronoton.js";
+export type {
+  ChainCommitBody,
+  ChainStepInput,
+  ChainSingleTxFirst,
+  ChainSchedule,
+  ChainCommitView,
+  ChainStepSimResult,
+  ChainSimulateView,
+} from "./chain.js";
+export { commitChainedCronoton, simulateChain } from "./chain.js";
 
 // ── Execution handlers (TC.4) ─────────────────────────────────────────────────
 export { simulateCodexTx, executeNow, triggerCronoton, recoverFire } from "./execute.js";

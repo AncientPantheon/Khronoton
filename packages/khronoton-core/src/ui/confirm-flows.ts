@@ -95,7 +95,8 @@ function browserAlert(): ((message: string) => void) | undefined {
   return typeof window !== "undefined" ? window.alert.bind(window) : undefined;
 }
 
-function errorMessage(err: unknown): string {
+/** Extract a message from a thrown value — an `Error`'s `.message`, or `String(err)` otherwise. */
+export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 

@@ -19,8 +19,33 @@
  */
 import crypto from "node:crypto";
 
-import type { DbDep } from "../seams.js";
+import type { Database, DbDep, Statement } from "../seams.js";
 import { isUniqueConstraintError, StepAlreadyExistsError } from "./errors.js";
+
+const INSERT_STEP_SQL = `INSERT INTO codex_cronoton_steps
+           (id, codex_cronoton_id, step_index, mode, pact_code, config_json,
+            payload_json, gas_payer_json, signers_json, planner_name,
+            planner_params_json, idempotent, created_at, modified_at, yield_as)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+/**
+ * `insertStep`'s prepared INSERT statement, cached per `db` instance so a
+ * chained-cronoton commit (`chain.ts`'s `commitChainedCronoton`, looping
+ * `insertStep` once per step) doesn't re-parse the identical SQL on every
+ * call — better-sqlite3 has no implicit statement cache of its own. Keyed by
+ * the `Database` instance (not a bare module-level statement) since
+ * different callers — e.g. tests vs. production — pass different instances.
+ */
+const insertStepStatements = new WeakMap<Database, Statement>();
+
+function getInsertStepStatement(db: Database): Statement {
+  let statement = insertStepStatements.get(db);
+  if (!statement) {
+    statement = db.prepare(INSERT_STEP_SQL);
+    insertStepStatements.set(db, statement);
+  }
+  return statement;
+}
 
 export interface InsertStepInput {
   codexCronotonId: string;
@@ -68,31 +93,23 @@ export function insertStep(input: InsertStepInput, dep: DbDep): string {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    dep.db
-      .prepare(
-        `INSERT INTO codex_cronoton_steps
-           (id, codex_cronoton_id, step_index, mode, pact_code, config_json,
-            payload_json, gas_payer_json, signers_json, planner_name,
-            planner_params_json, idempotent, created_at, modified_at, yield_as)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.codexCronotonId,
-        input.stepIndex,
-        input.mode,
-        input.pactCode ?? null,
-        input.config !== undefined ? JSON.stringify(input.config) : null,
-        input.payload !== undefined ? JSON.stringify(input.payload) : null,
-        input.gasPayer !== undefined ? JSON.stringify(input.gasPayer) : null,
-        input.signers !== undefined ? JSON.stringify(input.signers) : null,
-        input.plannerName ?? null,
-        input.plannerParams !== undefined ? JSON.stringify(input.plannerParams) : null,
-        input.idempotent ? 1 : 0,
-        now,
-        now,
-        input.yieldAs ?? null,
-      );
+    getInsertStepStatement(dep.db).run(
+      id,
+      input.codexCronotonId,
+      input.stepIndex,
+      input.mode,
+      input.pactCode ?? null,
+      input.config !== undefined ? JSON.stringify(input.config) : null,
+      input.payload !== undefined ? JSON.stringify(input.payload) : null,
+      input.gasPayer !== undefined ? JSON.stringify(input.gasPayer) : null,
+      input.signers !== undefined ? JSON.stringify(input.signers) : null,
+      input.plannerName ?? null,
+      input.plannerParams !== undefined ? JSON.stringify(input.plannerParams) : null,
+      input.idempotent ? 1 : 0,
+      now,
+      now,
+      input.yieldAs ?? null,
+    );
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       throw new StepAlreadyExistsError(input.codexCronotonId, input.stepIndex);

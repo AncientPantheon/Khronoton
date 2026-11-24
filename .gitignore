@@ -12,6 +12,7 @@ Thumbs.db
 # Node / TS
 node_modules/
 dist/
+preview-dist/
 build/
 .next/
 coverage/

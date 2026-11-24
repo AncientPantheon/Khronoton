@@ -22,10 +22,10 @@
  * dispatch boundary via an injectable `exec` seam (default: a ctx-bound closure).
  */
 
-import { executeCodexTransaction } from "./executor.js";
+import { executeCodexTransaction, resolveCeiling } from "./executor.js";
 import type { ExecutorCtx } from "./executor.js";
+import { maxSimulatedGasAtLimit } from "./pure/gas-declaration.js";
 import type { ChainRuntime, Config, Database, DbDep, KeyResolver } from "./seams.js";
-import { SINGLE_TX_GAS_GUARD } from "./seams.js";
 import type {
   CodexTxDefinition,
   ExecutorMode,
@@ -278,6 +278,28 @@ function resolveExec(opts: FireOpts): ExecFn {
 }
 
 /**
+ * Resolve the DERIVED default single-tx gas guard: the live ceiling for
+ * `chainId`, fetched the same way `executor.ts`'s own `runSimulate`/
+ * `submitTransaction` do (construct a `ChainClient` for the chain, then
+ * `resolveCeiling`), narrowed to the single-transaction headroom via
+ * {@link maxSimulatedGasAtLimit}. Only called when no explicit
+ * `opts.config.singleTxGasGuard` override is set — the `??` in
+ * {@link fireWithServerResolver} short-circuits before this runs, so an
+ * override never pays for a live ceiling fetch it doesn't need.
+ */
+async function resolveSingleTxGasGuard(fired: CodexTxDefinition, opts: FireOpts): Promise<number> {
+  const chainId = fired.config.chainId;
+  const ctx: ExecutorCtx = {
+    runtime: opts.runtime as ChainRuntime,
+    resolver: opts.resolver as KeyResolver,
+    config: opts.config,
+  };
+  const client = opts.runtime!.createClient(opts.runtime!.getPactUrl(chainId));
+  const ceiling = await resolveCeiling(ctx, client, chainId);
+  return maxSimulatedGasAtLimit(ceiling);
+}
+
+/**
  * The single fire-time dispatcher the tick calls for EVERY row. Routes by kind:
  *   - no `serverResolver` → executor `fire` (pass-through);
  *   - registered `multi-tx` → {@link dispatchMultiTxResolver} + summary adapt;
@@ -368,7 +390,7 @@ export async function fireWithServerResolver(
     opts.onEvent?.({ kind: "postponed", reason: "simulate failed", error: sim.error });
     return postponed(`postponed: simulate failed: ${sim.error ?? "unknown"}`);
   }
-  const guard = opts.config?.singleTxGasGuard ?? SINGLE_TX_GAS_GUARD;
+  const guard = opts.config?.singleTxGasGuard ?? (await resolveSingleTxGasGuard(fired, opts));
   const gasUsed = sim.gasUsed ?? 0;
   if (gasUsed > guard) {
     opts.onEvent?.({ kind: "postponed", reason: "gas over single-tx guard", gasUsed, guard });

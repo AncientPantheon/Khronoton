@@ -17,6 +17,7 @@ import type { ExecutorCtx } from "./executor.js";
 import type { ChainRuntime, ChainClient, KeyResolver } from "./seams.js";
 import { AUTO_GAS_CEILING } from "./seams.js";
 import type { CodexTxDefinition } from "./types.js";
+import { declareGasLimit } from "./pure/gas-declaration.js";
 
 // ── recorders for the fake Pact.builder chain ───────────────────────────────
 interface BuilderCall {
@@ -313,6 +314,24 @@ describe("executeCodexTransaction — simulate mode", () => {
     expect(dirtyRead).not.toHaveBeenCalled();
   });
 
+  // Regression (review finding): an AUTO-gas simulate used to sign the
+  // transaction unconditionally even though it never reads the signed
+  // result (preflightRead runs against the UNSIGNED build) — wasted
+  // resolver/sign work on every preview, and capable of masking the
+  // `preflightRead`-required error behind an unrelated signing failure
+  // since the sign ran before that check.
+  it("autoGasLimit simulate never signs at all — preflightRead runs against the unsigned build only", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      ctx,
+    );
+    expect(universalSignTransaction).not.toHaveBeenCalled();
+  });
+
   it("dirty-read failure → structured failure result, no throw, no submit", async () => {
     dirtyRead.mockResolvedValue({
       result: { status: "failure", error: { message: "boom" } },
@@ -431,6 +450,114 @@ describe("executeCodexTransaction — fire mode", () => {
     // the old execution-only dirtyRead figure.
     expect(preflightRead).toHaveBeenCalled();
     expect(dirtyRead).not.toHaveBeenCalled();
+  });
+});
+
+// ── AUTO-gas resequencing (khronoton-auto-gas-handoff follow-up) ───────────
+// OuronetUI previews UNSIGNED, calibrates, then signs ONCE. Khronoton's prior
+// sequence signed TWICE (once just to get something to preflight, again after
+// calibrating) and preflighted the SIGNED artifact — ambiguous input for
+// `declareGasLimit`'s signature-byte-delta correction, which is specifically
+// derived against an UNSIGNED reading. These pin the corrected sequence: the
+// unsigned build preflighted first, exactly one sign call, and the final
+// declared gasLimit sourced from `declareGasLimit` rather than the old ladder
+// once the reading is at/above EVIDENCE_FLOOR.
+describe("executeCodexTransaction — AUTO-gas resequencing (preflight unsigned, sign once)", () => {
+  it("preflightRead receives the UNSIGNED build, before universalSignTransaction is ever called", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "fire",
+      ctx,
+    );
+    expect(preflightRead).toHaveBeenCalledTimes(1);
+    const preflighted = preflightRead.mock.calls[0][0] as {
+      cmd: string;
+      sigs: unknown[];
+    };
+    // The fake builder's own unsigned shape — never `signed`'s real sig array
+    // (`universalSignTransaction` resolves to `{ cmd: "SIGNED", sigs: [{ sig: "x" }] }`).
+    expect(preflighted.cmd).toBe("UNSIGNED_CMD");
+    expect(preflighted.sigs).toEqual([]);
+    expect(preflightRead.mock.invocationCallOrder[0]).toBeLessThan(
+      universalSignTransaction.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("universalSignTransaction is called exactly ONCE for a successful AUTO-gas fire", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 700 });
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "fire",
+      ctx,
+    );
+    expect(universalSignTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("at/above EVIDENCE_FLOOR, the final declared gasLimit matches declareGasLimit, not the legacy ladder", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 100_000 });
+    await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "fire",
+      ctx,
+    );
+    const metas = builderCalls.filter((c) => c.method === "setMeta");
+    const lastMeta = metas[metas.length - 1].args[0] as { gasLimit: number };
+    const expected = declareGasLimit(
+      {
+        simulatedGas: 100_000,
+        simIncludesSize: true,
+        cmdBytes: Buffer.byteLength("UNSIGNED_CMD", "utf8"),
+        ed25519Signers: 1,
+        ceiling: AUTO_GAS_CEILING,
+      },
+      (g) => calculateAutoGasLimit(g),
+    ).gasLimit;
+    // The new formula disagrees with the old ladder at this reading — proof
+    // the calibration genuinely switched models, not merely that some number
+    // came out.
+    expect(expected).not.toBe(calculateAutoGasLimit(100_000));
+    expect(lastMeta.gasLimit).toBe(expected);
+  });
+
+  // Regression (review finding): `runSimulate`'s own `calibratedGasLimit`
+  // preview used to call `runtime.calculateAutoGasLimit` directly, unchanged
+  // by this port — so simulating a cronoton and then firing it could show
+  // two DIFFERENT numbers for "what gas will this declare," once the fire
+  // path above switched formulas. This pins the preview to the exact same
+  // `declareGasLimit` call `submitTransaction` makes, preflighting the same
+  // UNSIGNED shape (never `signed`) for the identical ambiguity reason.
+  it("simulate mode's calibratedGasLimit preview matches declareGasLimit too, at/above EVIDENCE_FLOOR — never the stale ladder", async () => {
+    preflightRead.mockResolvedValue({ result: { status: "success" }, gas: 100_000 });
+    const res = await executeCodexTransaction(
+      baseDef({
+        config: { chainId: "0", gasPrice: 10000, gasLimit: 1500, autoGasLimit: true, ttl: 28800 },
+      }),
+      "simulate",
+      ctx,
+    );
+    const preflighted = preflightRead.mock.calls[0][0] as { cmd: string; sigs: unknown[] };
+    // Preflighted the UNSIGNED build, same as the fire path's own fix above.
+    expect(preflighted.cmd).toBe("UNSIGNED_CMD");
+    expect(preflighted.sigs).toEqual([]);
+    const expected = declareGasLimit(
+      {
+        simulatedGas: 100_000,
+        simIncludesSize: true,
+        cmdBytes: Buffer.byteLength("UNSIGNED_CMD", "utf8"),
+        ed25519Signers: 1,
+        ceiling: AUTO_GAS_CEILING,
+      },
+      (g) => calculateAutoGasLimit(g),
+    ).gasLimit;
+    expect(expected).not.toBe(calculateAutoGasLimit(100_000));
+    expect(res.mode === "simulate" && res.calibratedGasLimit).toBe(expected);
   });
 });
 

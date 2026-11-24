@@ -21,18 +21,14 @@
  * oversized batch. The caller decides what to do with it.
  */
 
+import { maxSimulatedGasAtLimit, maxSimulatedGasFor } from "./gas-declaration.js";
+
 /** The size of the second sizing sample — large enough that the slope
  *  reading isn't swamped by measurement noise on the fixed cost, small
  *  enough that the probe is an ordinary, cheap batch. Clamped down to `n`
  *  when the selection is smaller, in which case this single probe also
  *  settles the whole question (see `measureSize`'s `fitsInOne` check). */
 const SAMPLE_SIZE = 64;
-
-/** Plan for this fraction of the ceiling when the model is still an
- *  EXTRAPOLATED two-point fit (probe(1), probe(<=64)) — the line carries
- *  real extrapolation error when stretched to a batch an order of
- *  magnitude larger, and a cheap margin is the fix. */
-const PLANNING_MARGIN = 0.92;
 
 /** How many times the confirmation probe may refuse before planFromSizing
  *  gives up on this capacity. */
@@ -43,12 +39,6 @@ const MAX_CONFIRMATIONS = 3;
  *  the reported floor UNDER-states the true cost) — shrinking by a
  *  constant factor rather than refitting is the honest response. */
 const SHRINK = 0.75;
-
-/** The margin applied ONCE the model has been refitted through a
- *  confirmed batch measured at the size actually being planned — a
- *  different, tighter margin for a different (anchored, not
- *  extrapolated) model. */
-const CONFIRMED_MARGIN = 0.99;
 
 /** How many times the plan may be refitted upward from a confirmed
  *  measurement. A growth probe that is refused, or comes back over
@@ -140,13 +130,25 @@ export function lineThrough(
 }
 
 /**
- * Items one transaction can carry under `ceiling`, per `model`, with a
- * safety margin. Pass `CONFIRMED_MARGIN` (0.99) when the model has been
- * refitted through a real measurement at the size being planned — see
- * that constant's own doc for why the two margins differ.
+ * Items one transaction can carry under `ceiling`, per `model`, with
+ * derived headroom from `pure/gas-declaration.ts` standing in for the old
+ * flat-fraction margins. `"planning"` (the default) is for a model that is
+ * still an EXTRAPOLATED two-point fit (probe(1), probe(<=64)) — the line
+ * carries real extrapolation error when stretched to a batch an order of
+ * magnitude larger, so the room ceiling is `maxSimulatedGasFor`, which
+ * reserves the full drift allowance. `"confirmed"` is for a model that has
+ * been refitted through a real measurement at the size being planned — an
+ * anchored, not extrapolated, model gets `maxSimulatedGasAtLimit`'s tighter
+ * room instead, since a single transaction has been simulated exactly as it
+ * will be sent.
  */
-export function capacityFor(model: SplitModel, ceiling: number, margin = PLANNING_MARGIN): number {
-  const room = ceiling * margin - model.fixed;
+export function capacityFor(
+  model: SplitModel,
+  ceiling: number,
+  mode: "planning" | "confirmed" = "planning",
+): number {
+  const roomCeiling = mode === "confirmed" ? maxSimulatedGasAtLimit(ceiling) : maxSimulatedGasFor(ceiling);
+  const room = roomCeiling - model.fixed;
   return room <= 0 ? 0 : Math.floor(room / model.perItem);
 }
 
@@ -389,18 +391,19 @@ export async function planFromSizing<T>(
   }
 
   // PACK TIGHTER. The line from stage 1 is fitted at n=1 and n<=64 and
-  // extrapolated to the operating size, which is why PLANNING_MARGIN
-  // exists; stage 2 has just measured a real batch AT the planned size — a
-  // point the fit never had, and the only point that actually matters.
-  // Refitting through it replaces an extrapolation with an anchor, so the
-  // margin can step aside for CONFIRMED_MARGIN. This can never make the
-  // answer worse: `best` only ever advances on a confirmed measurement
-  // under ceiling, so a refused or over-ceiling growth probe just breaks
-  // the loop and leaves the previously confirmed plan exactly as it was.
+  // extrapolated to the operating size, which is why `capacityFor`'s
+  // "planning" mode reserves the full drift allowance; stage 2 has just
+  // measured a real batch AT the planned size — a point the fit never had,
+  // and the only point that actually matters. Refitting through it replaces
+  // an extrapolation with an anchor, so the mode can step up to "confirmed".
+  // This can never make the answer worse: `best` only ever advances on a
+  // confirmed measurement under ceiling, so a refused or over-ceiling
+  // growth probe just breaks the loop and leaves the previously confirmed
+  // plan exactly as it was.
   let fitted = model;
   for (let growth = 0; growth < MAX_GROWTHS; growth++) {
     fitted = lineThrough({ n: 1, gas: one.gas }, { n: best.size, gas: best.gas });
-    const grown = capacityFor(fitted, ceiling, CONFIRMED_MARGIN);
+    const grown = capacityFor(fitted, ceiling, "confirmed");
     if (grown <= best.size) break;
 
     const planned = planAt(grown);

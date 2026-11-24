@@ -13,8 +13,10 @@
  * resolver stands in. Each `it` uses a UNIQUE resolver name so the module-level
  * registry map does not leak state across cases.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { __clearCeilingCacheForTests } from "./executor.js";
+import { maxSimulatedGasAtLimit } from "./pure/gas-declaration.js";
 import {
   getServerResolver,
   registerServerResolver,
@@ -25,7 +27,16 @@ import {
   listServerResolvers,
 } from "./resolvers.js";
 import type { ChainRuntime, KeyResolver } from "./seams.js";
+import { AUTO_GAS_CEILING } from "./seams.js";
 import type { CodexTxDefinition, FireResult, SimulateResult } from "./types.js";
+
+// The live-ceiling resolution the single-tx gas guard now performs (mirroring
+// `executor.ts`'s own `resolveCeiling`) is keyed by chain id and cached with a
+// TTL — clearing it before every test keeps each guard test's ceiling
+// resolution independent of execution order within this file.
+beforeEach(() => {
+  __clearCeilingCacheForTests();
+});
 
 const baseDef: CodexTxDefinition = {
   pactCode: "(noop)",
@@ -189,8 +200,9 @@ describe("fireWithServerResolver: single-tx path", () => {
         terminalIntent: null,
       } as FireResult);
     const def = { ...baseDef, serverResolver: "fire-single" };
+    const { runtime } = makeChainMocks();
 
-    const result = await fireWithServerResolver(def, {}, { exec });
+    const result = await fireWithServerResolver(def, {}, { exec, runtime });
 
     // exactly two exec calls: the safety-guard simulate, then the fire.
     expect(exec).toHaveBeenCalledTimes(2);
@@ -227,8 +239,9 @@ describe("fireWithServerResolver: single-tx path", () => {
         terminalIntent: null,
       } as FireResult);
     const def = { ...baseDef, serverResolver: "fire-single-settle-throws" };
+    const { runtime } = makeChainMocks();
 
-    const result = await fireWithServerResolver(def, {}, { exec });
+    const result = await fireWithServerResolver(def, {}, { exec, runtime });
 
     // the on-chain fire landed (rk-OK); a settlement failure AFTER it must NOT
     // flip the fire to failed — else the tick would record a failure for a tx
@@ -254,7 +267,48 @@ describe("fireWithServerResolver: single-tx path", () => {
     expect(result.error).toMatch(/multi-tx/i);
   });
 
-  it("postpones over the single-tx gas guard rather than burning gas on an unlandable tx", async () => {
+  it("fires (does NOT postpone) a gasUsed between the old hand-set guard and the new derived default — the old 1,600,000 constant would have wrongly refused this, the derived ceiling-based guard allows it", async () => {
+    // WHY: this is the whole point of the T4 port — a hand-set 1,600,000
+    // constant left ~400,000 gas of real headroom unused at a 2,000,000
+    // ceiling. 1,700,000 exceeds the OLD guard but sits comfortably under
+    // `maxSimulatedGasAtLimit(AUTO_GAS_CEILING)` (1,999,350), so a fire that
+    // used to be wrongly postponed must now actually land.
+    const settle = vi.fn();
+    registerServerResolver("fire-single-between-thresholds", {
+      kind: "single-tx",
+      resolve: () => ({ plan: [], payload: {} }),
+      settle,
+    });
+    const exec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        mode: "simulate",
+        gasUsed: 1_700_000,
+        terminalIntent: null,
+      } as SimulateResult)
+      .mockResolvedValueOnce({
+        ok: true,
+        mode: "fire",
+        requestKey: "rk-OK",
+        terminalIntent: null,
+      } as FireResult);
+    const def = { ...baseDef, serverResolver: "fire-single-between-thresholds" };
+    const { runtime } = makeChainMocks();
+
+    const result = await fireWithServerResolver(def, {}, { exec, runtime });
+
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+  });
+
+  it("still postpones over the new DERIVED default guard rather than burning gas on an unlandable tx", async () => {
+    // WHY: the port must not become unconditionally permissive — a gasUsed
+    // genuinely above the derived ceiling-based headroom
+    // (`maxSimulatedGasAtLimit(AUTO_GAS_CEILING)` === 1,999,350) must still
+    // be refused, exactly as the old guard refused figures above its own
+    // threshold.
     const settle = vi.fn();
     registerServerResolver("fire-single-overgas", {
       kind: "single-tx",
@@ -264,17 +318,54 @@ describe("fireWithServerResolver: single-tx path", () => {
     const exec = vi.fn().mockResolvedValueOnce({
       ok: true,
       mode: "simulate",
-      gasUsed: 1_700_000,
+      gasUsed: 2_100_000,
       terminalIntent: null,
     } as SimulateResult);
     const def = { ...baseDef, serverResolver: "fire-single-overgas" };
+    const { runtime } = makeChainMocks();
 
-    const result = await fireWithServerResolver(def, {}, { exec });
+    const result = await fireWithServerResolver(def, {}, { exec, runtime });
 
-    // simulate over the 1_600_000 guard → postpone; the fire exec never happens.
     expect(exec).toHaveBeenCalledTimes(1);
     expect(settle).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
+    expect(result.error).toMatch(
+      new RegExp(`guard ${maxSimulatedGasAtLimit(AUTO_GAS_CEILING)}`),
+    );
+  });
+
+  it("an explicit config.singleTxGasGuard override still takes priority over the derived default, unchanged behavior", async () => {
+    // WHY: `config.singleTxGasGuard` is an explicit override seam (same
+    // pattern `config.autoGasCeiling` already uses) — a caller that sets it
+    // must keep getting EXACTLY that value as the guard, never the derived
+    // default, regardless of how much headroom the live ceiling would allow.
+    // No `runtime` is supplied here: the override must win WITHOUT ever
+    // needing a live ceiling fetch.
+    const settle = vi.fn();
+    registerServerResolver("fire-single-override-guard", {
+      kind: "single-tx",
+      resolve: () => ({ plan: [], payload: {} }),
+      settle,
+    });
+    const exec = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      mode: "simulate",
+      gasUsed: 800_000,
+      terminalIntent: null,
+    } as SimulateResult);
+    const def = { ...baseDef, serverResolver: "fire-single-override-guard" };
+
+    const result = await fireWithServerResolver(def, {}, {
+      exec,
+      config: { singleTxGasGuard: 500_000 },
+    });
+
+    // 800,000 sits comfortably under the derived default (1,999,350) but
+    // exceeds the explicit 500,000 override — the override must still refuse.
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(settle).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/guard 500000/);
   });
 });
 
@@ -317,8 +408,9 @@ describe("fireByServerResolver: kind-routing fire dispatcher", () => {
         terminalIntent: null,
       } as FireResult);
     const def = { ...baseDef, serverResolver: "by-single" };
+    const { runtime } = makeChainMocks();
 
-    const result = await fireByServerResolver(def, {}, { exec });
+    const result = await fireByServerResolver(def, {}, { exec, runtime });
 
     expect(exec).toHaveBeenCalledTimes(2);
     expect(settle).toHaveBeenCalledWith(plan, expect.objectContaining({ requestKey: "rk-OK" }));

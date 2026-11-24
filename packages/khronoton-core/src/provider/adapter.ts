@@ -41,6 +41,8 @@ import type { CommitBody, CodexSignerDescriptor } from "../handlers/index.js";
 // the handlers' confirm gate raises, never a private copy (REQ-G01).
 export { NeedsConfirmError } from "../handlers/context.js";
 
+import type { ChainCommitBody, ChainCommitView, ChainSimulateView } from "../handlers/chain.js";
+
 // ── Request-side shapes ───────────────────────────────────────────────────────
 
 /**
@@ -243,6 +245,21 @@ export interface KhronotonAdapter {
     requestKey: string,
     opts?: ConfirmOpts,
   ): Promise<RecoverView>;
+
+  // ── Chained tier (multi-step) — OPTIONAL ─────────────────────────────────────
+  /**
+   * Commit a CHAINED cronoton (N steps + optional single-tx-first variant).
+   * OPTIONAL: an adapter whose backend has no chained-commit route omits it and
+   * the chained builder degrades (its commit is disabled). Deliberately NOT in
+   * {@link REQUIRED_METHODS} — requiring it would break every single-tx consumer.
+   */
+  commitChain?(body: ChainCommitBody, opts?: ConfirmOpts): Promise<ChainCommitView>;
+  /**
+   * Whole-chain dry run: simulate the single-tx variant (when present) as one tx
+   * and/or walk the step chain feeding each yield forward. OPTIONAL, same as
+   * {@link commitChain}.
+   */
+  simulateChain?(body: ChainCommitBody, opts?: ConfirmOpts): Promise<ChainSimulateView>;
 }
 
 /** The 16 method names an object must carry to be a {@link KhronotonAdapter}. */

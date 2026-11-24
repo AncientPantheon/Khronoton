@@ -45,6 +45,18 @@ export type { DetailProps } from "./Detail.js";
 export { Builder, DEFAULT_BUILDER_ROBOTS } from "./builder/Builder.js";
 export type { BuilderProps } from "./builder/Builder.js";
 
+// Chained (multi-step) builder + its state model.
+export { ChainedBuilder, DEFAULT_CHAINED_BUILDER_ROBOTS } from "./chained/ChainedBuilder.js";
+export type { ChainedBuilderProps } from "./chained/ChainedBuilder.js";
+export {
+  makeEmptyChainedBuilderState,
+  makeEmptyStepState,
+  chainedBuilderToCommit,
+  canCommitChain,
+  KNOWN_PLANNERS,
+} from "./chained-builder-state.js";
+export type { ChainedBuilderState, StepState } from "./chained-builder-state.js";
+
 // ── Screen 4: Public read-only view ───────────────────────────────────────────
 export { Public, DEFAULT_PUBLIC_ROBOTS } from "./Public.js";
 export type { PublicProps } from "./Public.js";
@@ -62,3 +74,4 @@ export {
   ServerResolverPill,
   ExternallyFireablePill,
 } from "./badges.js";
+export * from "../builtins/descriptors.js";

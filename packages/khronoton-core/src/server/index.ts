@@ -169,3 +169,10 @@ export * from "./loop.js";
 // `advanceInFlightRunsOnce` + `RunsDriverCtx` + `PlannerNotRegisteredError`.
 // Collision-free: it re-exports nothing already barrelled.
 export * from "./runs-driver.js";
+
+// ── Whole-chain dry-run simulator (the SIMULATE sibling of store/chain.ts's
+// commitChainedCronoton). `simulateChainBody` + its input/result types. Placed
+// AFTER the planner exports above so the 5 built-ins are registered by the time
+// a consumer imports this barrel and simulates a planner step. Collision-free:
+// it re-exports nothing already barrelled.
+export * from "./chain-simulate.js";

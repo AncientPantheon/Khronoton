@@ -7,7 +7,7 @@
  * `(codex_cronoton_id, step_index)` index is actually enforced.
  */
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getStepByIndex, insertStep, listStepsForCronoton } from "./steps.js";
 import { StepAlreadyExistsError } from "./errors.js";
@@ -201,6 +201,25 @@ describe("insertStep — yieldAs", () => {
     const steps = listStepsForCronoton("cc-1", { db });
 
     expect(steps[0].yield_as).toBeNull();
+  });
+});
+
+describe("insertStep — prepared statement caching", () => {
+  it("prepares the INSERT statement once across N calls against the same db instance, still inserting every row", () => {
+    const prepareSpy = vi.spyOn(db, "prepare");
+
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 0, mode: "single", pactCode: "(step-0)" }, { db });
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 1, mode: "single", pactCode: "(step-1)" }, { db });
+    insertStep({ codexCronotonId: "cc-1", stepIndex: 2, mode: "single", pactCode: "(step-2)" }, { db });
+
+    // Re-parsing the identical INSERT SQL on every call (rather than
+    // preparing once and reusing the compiled statement) is exactly the
+    // per-call recompilation `commitChainedCronoton` (chain.ts) would
+    // otherwise pay N times over for an N-step chain.
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+
+    const steps = listStepsForCronoton("cc-1", { db });
+    expect(steps.map((s) => s.pact_code)).toEqual(["(step-0)", "(step-1)", "(step-2)"]);
   });
 });
 
