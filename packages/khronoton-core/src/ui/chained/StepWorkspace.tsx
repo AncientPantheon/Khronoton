@@ -65,6 +65,12 @@ export interface StepWorkspaceProps {
   pane?: Pane;
   /** Pact editor height (the editor pane owns the tall column). */
   editorHeight?: number;
+  /**
+   * Fill the available height instead of using `editorHeight` — for the chained
+   * builder's Pact pane, where the editor sits in a bounded flex column. Avoids
+   * clipping when the mode/yield row above the editor changes height.
+   */
+  fillEditor?: boolean;
 }
 
 const labelStyle: CSSProperties = {
@@ -96,6 +102,7 @@ export function StepWorkspace({
   variant = false,
   pane = "both",
   editorHeight = 300,
+  fillEditor = false,
 }: StepWorkspaceProps): ReactNode {
   const [tab, setTab] = useState<StepTab>("config");
   const patch = (next: Partial<StepState>): void => onChange({ ...step, ...next });
@@ -243,8 +250,13 @@ export function StepWorkspace({
           </div>
         </div>
       ) : (
-        <div style={{ flex: 1 }}>
-          <PactCodeEditor value={step.pactCode} onChange={(pactCode) => patch({ pactCode })} height={editorHeight} />
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <PactCodeEditor
+            value={step.pactCode}
+            onChange={(pactCode) => patch({ pactCode })}
+            height={editorHeight}
+            fill={fillEditor}
+          />
         </div>
       )}
     </div>

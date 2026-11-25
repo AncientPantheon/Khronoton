@@ -34,6 +34,12 @@ export interface PactCodeEditorProps {
   /** Editor body height in pixels. Defaults to 460 (the Hub builder height). */
   height?: number;
   /**
+   * Fill the parent's height instead of using a fixed `height`. The editor's
+   * container must be bounded (e.g. a flex child with `minHeight: 0`). Lets the
+   * editor grow/shrink with the pane, with no dead space and no clipping.
+   */
+  fill?: boolean;
+  /**
    * Forces the plain-textarea fallback instead of CodeMirror. This is the
    * documented SSR/test seam — CodeMirror cannot measure DOM under jsdom.
    */
@@ -90,6 +96,7 @@ export function PactCodeEditor({
   onChange,
   onClear,
   height = 460,
+  fill = false,
   forceFallback = false,
   subBar,
 }: PactCodeEditorProps): ReactNode {
@@ -101,9 +108,13 @@ export function PactCodeEditor({
   const useCodeMirror =
     mounted && typeof window !== "undefined" && !forceFallback;
 
+  // In fill mode the panel fills its (bounded) parent and the editor body flexes;
+  // otherwise the body is a fixed `height` box (the original behaviour).
+  const bodyHeight: number | string = fill ? "100%" : height;
+
   const fallbackStyle: CSSProperties = {
     width: "100%",
-    height,
+    height: fill ? "100%" : height,
     boxSizing: "border-box",
     resize: "none",
     background: "var(--khr-panel)",
@@ -126,7 +137,7 @@ export function PactCodeEditor({
   );
 
   return (
-    <div style={panelStyle}>
+    <div style={fill ? { ...panelStyle, height: "100%", minHeight: 0 } : panelStyle}>
       <div style={headerStyle}>
         <span style={eyebrowStyle}>PACT Code Editor</span>
         {onClear ? (
@@ -140,10 +151,10 @@ export function PactCodeEditor({
           {subBar}
         </div>
       ) : null}
-      <div style={{ height }}>
+      <div style={fill ? { flex: 1, minHeight: 0 } : { height }}>
         {useCodeMirror ? (
           <Suspense fallback={fallback}>
-            <LazyPactCodeMirror value={value} onChange={onChange} height={height} />
+            <LazyPactCodeMirror value={value} onChange={onChange} height={bodyHeight} />
           </Suspense>
         ) : (
           fallback

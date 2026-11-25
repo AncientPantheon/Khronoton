@@ -110,7 +110,8 @@ const BASIC_SETUP = {
 export interface PactCodeMirrorProps {
   value: string;
   onChange: (value: string) => void;
-  height: number;
+  /** Pixel height (number) or any CSS height (e.g. "100%" to fill a flex parent). */
+  height: number | string;
 }
 
 export default function PactCodeMirror({
@@ -121,7 +122,7 @@ export default function PactCodeMirror({
   return (
     <CodeMirror
       value={value}
-      height={`${height}px`}
+      height={typeof height === "number" ? `${height}px` : height}
       theme={khronotonEditorTheme}
       extensions={buildPactEditorExtensions()}
       basicSetup={BASIC_SETUP}

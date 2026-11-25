@@ -36,12 +36,50 @@ vi.mock("../PactCodeMirror.js", () => ({
   ),
 }));
 
+// jsdom implements neither `ResizeObserver` nor real layout (`clientWidth` is
+// always 0), but `ChainedBuilder`'s filmstrip sizes its panes from a
+// `ResizeObserver`-measured width — with both absent, its `fit` calculation
+// degenerates to 1 and `renderedPanes` (the LAST `fit` visible panes) renders
+// only "Fields", never "Pact code", which a real browser never does (it
+// always has both APIs). Stubbing a realistic desktop width here is a test-
+// environment fix, not a production one — `ChainedBuilder.tsx`'s own
+// behavior/shape is unchanged; this just gives jsdom the measurement a real
+// browser already provides for free.
+class FakeResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+// jsdom has no ResizeObserver at runtime, but the DOM lib types declare it
+// globally, so this plain assignment type-checks without a suppression —
+// it unblocks ChainedBuilder.tsx's `typeof ResizeObserver === "undefined"`
+// guard for this test file only.
+global.ResizeObserver = FakeResizeObserver;
+Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+  configurable: true,
+  value: 1200, // enough for "Pact code" + "Fields" to both fit (PANE_MIN=360, RAIL=210, GAP=14)
+});
+
 import { KhronotonProvider } from "../../provider/KhronotonProvider.js";
 import type { KhronotonAdapter } from "../../provider/adapter.js";
 import { KhronotonUiRoot } from "../KhronotonUiRoot.js";
 import { ChainedBuilder } from "./ChainedBuilder.js";
 import { builderToCommit, makeEmptyBuilderState } from "../builder-state.js";
 import type { Access } from "../access.js";
+
+// Full-suite runs (100+ files, heavy parallel load) occasionally need more
+// than testing-library's 1000ms waitFor default — this file mounts a
+// ResizeObserver-driven layout + nested tab state on top of the usual async
+// commit/simulate chain, so give every wait here real headroom rather than
+// relying on luck. IMPORTANT: this must stay comfortably BELOW each test's
+// own `it(..., TEST_TIMEOUT)` third argument below — vitest's own per-test
+// timeout (default 5000ms) wraps the whole test independently of any
+// individual `waitFor`'s internal polling timeout, and the two racing at the
+// same value is exactly what caused an intermittent full-suite-only flake
+// here (a `waitFor({timeout:5000})` and the test's own unwidened 5000ms
+// default could each "win" depending on scheduling).
+const ASYNC_TIMEOUT = { timeout: 8000 };
+const TEST_TIMEOUT = 15000;
 
 afterEach(() => {
   cleanup();
@@ -101,6 +139,15 @@ function setPactCode(code: string) {
   fireEvent.change(screen.getByLabelText("PACT code"), { target: { value: code } });
 }
 
+/** Opens the Fields pane's "Whole cronoton" tab (Name/Description/Schedule) —
+ *  it defaults to "Step config" (the dominant surface), so Name must be
+ *  reached explicitly. Matched by regex: the tab's own label grows a
+ *  trailing "•" while `wholeIncomplete` (no name yet), which would break an
+ *  exact-string accessible-name match. */
+function openWholeCronotonTab() {
+  fireEvent.click(screen.getByRole("button", { name: /Whole cronoton/ }));
+}
+
 /** Waits for the signer descriptors, opens the step's Gas Payer tab (its
  *  `tab` state persists across step switches — StepWorkspace is not remounted
  *  per step — so this only needs to run once per test), and picks a signing
@@ -110,7 +157,7 @@ function setPactCode(code: string) {
 async function setGasStationKey(key: string) {
   await screen.findByRole("option", { name: key }).catch(() => null);
   fireEvent.click(screen.getByRole("button", { name: "Gas Payer" }));
-  await waitFor(() => expect(screen.getByRole("option", { name: key })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole("option", { name: key })).toBeTruthy(), ASYNC_TIMEOUT);
   fireEvent.change(screen.getByLabelText("Signing Key (DALOS.GAS_PAYER capability)"), {
     target: { value: key },
   });
@@ -140,14 +187,18 @@ describe("ChainedBuilder — single-step, single-mode, no-variant chain commits 
     // the DEFAULT state (`makeEmptyChainedBuilderState()`) already satisfies
     // that; only the commit gate's own required fields need filling in.
     setPactCode("(+ 1 2)");
+    await setGasStationKey("k:alice");
+    // Name lives on the Fields pane's "Whole cronoton" tab (not the default
+    // "Step config" tab) — switch to it only after the per-step Gas Payer
+    // tab (a DIFFERENT, nested tab strip inside "Step config") is done with.
+    openWholeCronotonTab();
     fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
       target: { value: "Nightly chain" },
     });
-    await setGasStationKey("k:alice");
 
     fireEvent.click(screen.getByRole("button", { name: "Create cronoton" }));
 
-    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
     expect(commitChain).not.toHaveBeenCalled();
 
     // The wire body is exactly what the single-tx serializer produces from the
@@ -160,8 +211,8 @@ describe("ChainedBuilder — single-step, single-mode, no-variant chain commits 
     });
     expect(commit.mock.calls[0][0]).toEqual(expected);
 
-    await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_single"));
-  });
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_single"), ASYNC_TIMEOUT);
+  }, TEST_TIMEOUT);
 });
 
 describe("ChainedBuilder — a 2-step chain commits via adapter.commitChain", () => {
@@ -184,11 +235,11 @@ describe("ChainedBuilder — a 2-step chain commits via adapter.commitChain", ()
     });
     mount(adapter, { onDone });
 
-    // Step 1 (selected by default).
+    // Step 1 (selected by default). Stay on the Fields pane's default
+    // "Step config" tab for every per-step field — it's a nested tab strip
+    // (Config/Payload/Gas Payer/Signatures) independent of `selected`, so
+    // adding a step and switching to it never disturbs it.
     setPactCode("(+ 1 2)");
-    fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
-      target: { value: "Two-step chain" },
-    });
     await setGasStationKey("k:alice");
 
     // Adding a second step flips `isSingleStepChain` false (2 steps) AND moves
@@ -202,9 +253,16 @@ describe("ChainedBuilder — a 2-step chain commits via adapter.commitChain", ()
       target: { value: "k:bob" },
     });
 
+    // Name lives on the Fields pane's "Whole cronoton" tab — switch to it
+    // only now that every per-step field is done.
+    openWholeCronotonTab();
+    fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
+      target: { value: "Two-step chain" },
+    });
+
     fireEvent.click(screen.getByRole("button", { name: "Create chained cronoton" }));
 
-    await waitFor(() => expect(commitChain).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(commitChain).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
     expect(commit).not.toHaveBeenCalled();
     expect(commitChain.mock.calls[0][0]).toMatchObject({
       name: "Two-step chain",
@@ -214,8 +272,8 @@ describe("ChainedBuilder — a 2-step chain commits via adapter.commitChain", ()
       ],
     });
 
-    await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_chain"));
-  });
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_chain"), ASYNC_TIMEOUT);
+  }, TEST_TIMEOUT);
 });
 
 describe("ChainedBuilder — missing adapter.commitChain on a real chain", () => {
@@ -234,9 +292,6 @@ describe("ChainedBuilder — missing adapter.commitChain on a real chain", () =>
     mount(adapter, { onDone });
 
     setPactCode("(+ 1 2)");
-    fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
-      target: { value: "No commitChain" },
-    });
     await setGasStationKey("k:alice");
 
     fireEvent.click(screen.getByRole("button", { name: "+ Add step" }));
@@ -245,16 +300,25 @@ describe("ChainedBuilder — missing adapter.commitChain on a real chain", () =>
       target: { value: "k:bob" },
     });
 
+    // Name lives on the Fields pane's "Whole cronoton" tab — switch to it
+    // only now that every per-step field is done.
+    openWholeCronotonTab();
+    fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
+      target: { value: "No commitChain" },
+    });
+
     expect(() =>
       fireEvent.click(screen.getByRole("button", { name: "Create chained cronoton" })),
     ).not.toThrow();
 
-    await waitFor(() =>
-      expect(alertSpy).toHaveBeenCalledWith(
-        "This backend does not support chained cronotons (no commitChain).",
-      ),
+    await waitFor(
+      () =>
+        expect(alertSpy).toHaveBeenCalledWith(
+          "This backend does not support chained cronotons (no commitChain).",
+        ),
+      ASYNC_TIMEOUT,
     );
     expect(commit).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT);
 });
