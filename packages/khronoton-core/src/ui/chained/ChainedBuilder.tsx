@@ -184,6 +184,22 @@ export interface ChainedBuilderProps {
   access: Access;
   onDone?: (id?: string) => void;
   robots?: string;
+  /**
+   * Per-pane width cap in pixels — above this a pane just wastes width on a
+   * wide monitor, so it caps + the whole workspace centres instead. Default
+   * `600`. Clamped to never be less than the resolved `paneMinWidth` (a
+   * misconfigured `paneMaxWidth < paneMinWidth` clamps to `paneMinWidth`
+   * rather than inverting the width cap).
+   */
+  paneMaxWidth?: number;
+  /**
+   * Below this a pane is too cramped, so "Fit: Auto" renders fewer panes
+   * side by side. Default `360`. Feeds `autoFit` directly — a larger value
+   * lowers the automatic pane count at any given width.
+   */
+  paneMinWidth?: number;
+  /** Left rail column width in pixels (actions + gate + step rail). Default `210`. */
+  railWidth?: number;
 }
 
 const field: CSSProperties = {
@@ -226,6 +242,9 @@ export function ChainedBuilder({
   access,
   onDone,
   robots = DEFAULT_CHAINED_BUILDER_ROBOTS,
+  paneMaxWidth = 600,
+  paneMinWidth = 360,
+  railWidth = 210,
 }: ChainedBuilderProps): ReactNode {
   const adapter = useKhronotonAdapter();
   const config = useKhronotonConfig();
@@ -285,9 +304,16 @@ export function ChainedBuilder({
   }, []);
 
   const GAP = 14;
-  const RAIL = 210; // left column (actions + gate + step rail) fixed width
-  const PANE_MIN = 360; // below this a pane is too cramped → fewer panes
-  const PANE_MAX = 600; // above this a pane just wastes width → cap + centre
+  const RAIL = railWidth; // left column (actions + gate + step rail) width — integrator-settable, default 210
+  const PANE_MIN = paneMinWidth; // below this a pane is too cramped → fewer panes — integrator-settable, default 360
+  // Integrator-settable, default 600 — NOT separately clamped against PANE_MIN
+  // here: `paneW`'s own outer `Math.max(PANE_MIN, …)` below already fully
+  // absorbs a misconfigured `paneMaxWidth < paneMinWidth` (it rescues the
+  // result up to PANE_MIN regardless of what PANE_MAX resolves to), so a
+  // second clamp on PANE_MAX itself would be dead weight with no observable
+  // effect of its own — confirmed by hand-tracing every call site; PANE_MAX
+  // is consumed nowhere else.
+  const PANE_MAX = paneMaxWidth;
   // Width the panes may use once the rail is taken out, measured from the FULL
   // builder — so capping the body below never feeds back into the pane count.
   const availPanes = Math.max(0, rootWidth - RAIL - GAP);
@@ -303,10 +329,28 @@ export function ChainedBuilder({
   const shown = Math.max(1, renderedPanes.length);
   // Size the panes to how many are ACTUALLY shown (not the capacity), capped at
   // PANE_MAX — so 2 visible panes get the full width each, not a third's share.
-  const paneW = Math.max(
-    PANE_MIN,
-    Math.min(PANE_MAX, Math.floor((availPanes - (shown - 1) * GAP) / shown) || PANE_MAX),
-  );
+  const rawShare = Math.floor((availPanes - (shown - 1) * GAP) / shown);
+  const preferredPaneW = Math.max(PANE_MIN, Math.min(PANE_MAX, rawShare || PANE_MAX));
+  // PANE_MIN is a PREFERENCE ("don't show a pane narrower than this"), not a
+  // guarantee — `autoFit` is what's supposed to pick a `shown` count small
+  // enough that PANE_MIN actually fits, but that assumption breaks the moment
+  // an integrator passes a `paneMinWidth` larger than the measured available
+  // width (or forces more panes via the Fit control than the width can really
+  // hold). Rescuing a too-tight width UP to the preference would overflow —
+  // the pane's own `flex: 0 0 ${paneW}px` never shrinks — so the preference
+  // must NEVER win over `rawShare` (the actual per-pane share of the measured
+  // width), including when `rawShare` is zero or negative (essentially no
+  // room at all: clamps down to 0, an invisible-but-non-overflowing pane,
+  // rather than falling back to the preference). This is the one invariant
+  // this component cannot relax at ANY prop value: `railWidth`/`paneMinWidth`
+  // can make a pane unusably narrow, but never wider than what's measured.
+  //
+  // One thing this does NOT (and cannot) fix: `railWidth` itself is not
+  // clamped against the measured total width, so a `railWidth` that ALONE
+  // exceeds the mount's own width still overflows regardless of `paneW` — a
+  // deliberately out-of-scope misconfiguration (asking for a rail wider than
+  // the whole app), not a "pane sizing" bug this prop's own contract covers.
+  const paneW = Math.min(preferredPaneW, Math.max(0, rawShare));
   const workspaceMaxWidth = shown * paneW + (shown - 1) * GAP;
   // The whole block (rail + gap + workspace) caps here and CENTRES, so the void
   // on an ultrawide splits evenly left/right instead of all trailing on the right.
@@ -588,9 +632,20 @@ export function ChainedBuilder({
       {/* The workspace fills the remaining height: left column (actions + gate +
           step rail) + the panes. Both columns are height-bounded here, so the
           rail and the panes scroll on their own instead of growing the page. */}
-      <div style={{ flex: 1, minHeight: 0, width: "100%", maxWidth: bodyMaxWidth, alignSelf: "center", display: "flex", gap: 14, alignItems: "stretch" }}>
-        {/* Left column: Simulate / Create as menu items, the gate, then the rail. */}
-        <div style={{ width: 210, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div
+        data-testid="chained-builder-body"
+        style={{ flex: 1, minHeight: 0, width: "100%", maxWidth: bodyMaxWidth, alignSelf: "center", display: "flex", gap: 14, alignItems: "stretch" }}
+      >
+        {/* Left column: Simulate / Create as menu items, the gate, then the rail.
+            Width is `RAIL` (the resolved `railWidth` prop) — NOT a separate
+            hardcoded literal. The two must never desync: `RAIL` is also what
+            the width math above (`availPanes`/`bodyMaxWidth`) assumes, so a
+            custom `railWidth` would otherwise silently break the
+            no-horizontal-scroll invariant the moment it differs from 210. */}
+        <div
+          data-testid="chained-builder-rail"
+          style={{ width: RAIL, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 12 }}
+        >
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <button
               type="button"
@@ -761,6 +816,7 @@ export function ChainedBuilder({
             {renderedPanes.map((p) => (
               <section
                 key={p.key}
+                data-testid={`chained-builder-pane-${p.key}`}
                 style={{ ...paneStyle, flex: `0 0 ${paneW}px`, overflow: "hidden" }}
               >
                 {p.key === "pact" && (

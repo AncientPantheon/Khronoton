@@ -135,7 +135,17 @@ export function StepWorkspace({
   const showFields = pane === "fields" || pane === "both";
 
   const editorPane = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
+    // `flex: 1, minHeight: 0` — NOT `height: "100%"`. This div is a FLEX ITEM
+    // of its parent (ChainedBuilder's Pact-pane `panel` card, itself
+    // `flex:1, minHeight:0` in a column). A percentage height on a flex item
+    // doesn't reliably propagate the way `flex:1` does (the item's own
+    // height resolution and the parent's definite-height resolution are both
+    // mid-flight in the same layout pass) — every OTHER layer in this exact
+    // chain (the panel card itself; `PactCodeEditor.tsx`'s own inner wrapper
+    // around the CodeMirror mount) already uses this idiom; this was the one
+    // link that didn't, and the cause of the Pact editor not filling its
+    // pane (see docs/work/chained-builder-layout-tweaks/design.md #1).
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
       {/* Mode + yield + idempotent (hidden for the single-tx variant). */}
       {!variant && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 12 }}>

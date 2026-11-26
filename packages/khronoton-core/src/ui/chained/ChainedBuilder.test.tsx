@@ -635,3 +635,120 @@ describe("ChainedBuilder — Raw JSON pane: unlock / paste / import", () => {
     TEST_TIMEOUT,
   );
 });
+
+// All of these run at the file's fixed 1200px `clientWidth` stub (see the
+// top-of-file `Object.defineProperty` — jsdom has no real ResizeObserver
+// callback, so `rootWidth` is only ever set once, from that stubbed value).
+// RAIL=210, GAP=14 default → availPanes = 1200-210-14 = 976.
+describe("ChainedBuilder — integrator-settable pane sizing props (paneMaxWidth/paneMinWidth/railWidth)", () => {
+  it("omitting all three props reproduces today's exact rail width (210px) and 2-pane width (481px) — the backward-compat pin", () => {
+    mount(makeAdapter());
+    expect(screen.getByTestId("chained-builder-rail").style.width).toBe("210px");
+    // Default visiblePanes = ["pact", "fields"], both fit (autoFit=2 at the
+    // default 360 paneMinWidth): shown=2, paneW = floor((976-14)/2) = 481,
+    // under the default 600 cap so it's not clamped.
+    expect(screen.getByTestId("chained-builder-pane-pact").style.flex).toBe("0 0 481px");
+    // Sizing is uniform across every simultaneously-rendered pane — "fields"
+    // gets the exact same paneW as "pact", not a separately-derived value.
+    expect(screen.getByTestId("chained-builder-pane-fields").style.flex).toBe("0 0 481px");
+  });
+
+  it("railWidth changes BOTH the actually-rendered rail column's width AND the pane-width math — closing the landmine where only the math constant was prop-driven", () => {
+    mount(makeAdapter(), { railWidth: 320 });
+    expect(screen.getByTestId("chained-builder-rail").style.width).toBe("320px");
+    // availPanes = 1200-320-14 = 866; autoFit still 2 (paneMinWidth default
+    // 360); paneW = floor((866-14)/2) = 426 — narrower than the 481px
+    // default because the math used the SAME railWidth, not a stale 210.
+    expect(screen.getByTestId("chained-builder-pane-pact").style.flex).toBe("0 0 426px");
+  });
+
+  it("paneMaxWidth raises the cap once a single visible pane's share would otherwise exceed it", () => {
+    mount(makeAdapter());
+    // Hide "Fields" so only one pane (Pact code) is visible — its full share
+    // of availPanes (976px) exceeds the default 600px cap, so the cap binds.
+    fireEvent.click(screen.getByRole("button", { name: "Fields" }));
+    expect(screen.getByTestId("chained-builder-pane-pact").style.flex).toBe("0 0 600px");
+  });
+
+  it("the SAME single-visible-pane scenario, with paneMaxWidth raised past availPanes, is no longer capped", () => {
+    mount(makeAdapter(), { paneMaxWidth: 1200 });
+    fireEvent.click(screen.getByRole("button", { name: "Fields" }));
+    // PANE_MAX = max(360, 1200) = 1200; paneW = min(1200, 976) = 976 (the
+    // full available width, uncapped, since 1200 > 976).
+    expect(screen.getByTestId("chained-builder-pane-pact").style.flex).toBe("0 0 976px");
+  });
+
+  it("paneMaxWidth smaller than paneMinWidth doesn't invert the cap — paneW still floors at paneMinWidth, via paneW's own outer clamp (PANE_MAX carries no separate clamp of its own)", () => {
+    mount(makeAdapter(), { paneMaxWidth: 100 }); // < default paneMinWidth (360)
+    fireEvent.click(screen.getByRole("button", { name: "Fields" }));
+    // rawShare = 976 (plenty of room) > the misconfigured PANE_MAX (100), so
+    // preferredPaneW's inner Math.min clamps DOWN to 100 — but the outer
+    // Math.max(PANE_MIN=360, 100) then rescues it back UP to 360. Since
+    // rawShare (976) > 0 and exceeds 360, the final `Math.min(preferredPaneW,
+    // rawShare)` leaves it at 360, not 100 — the cap never actually inverts.
+    expect(screen.getByTestId("chained-builder-pane-pact").style.flex).toBe("0 0 360px");
+  });
+
+  it("paneMinWidth larger than the measured available width no longer overflows — it's clamped DOWN to what actually fits, not forced up past it", () => {
+    // Regression for a real bug a correctness review caught: the old formula
+    // (`Math.max(PANE_MIN, Math.min(PANE_MAX, rawShare || PANE_MAX))` with no
+    // further check) unconditionally floors paneW at PANE_MIN regardless of
+    // availPanes — so paneMinWidth=1200 here forced paneW to 1200px while
+    // only 976px was actually available (availPanes = 1200-210-14), a real
+    // 224px horizontal overflow on a `flex: 0 0 …px` pane (flex-shrink:0,
+    // never shrinks to fit). The fix: PANE_MIN is a PREFERENCE, and must
+    // never win over the ACTUAL per-pane share once that share is positive.
+    mount(makeAdapter(), { paneMinWidth: 1200 });
+    // autoFit = floor((976+14)/(1200+14)) = 0 -> "||1" = 1, so only the LAST
+    // of the default ["pact","fields"] visible panes survives `.slice(-1)`.
+    expect(screen.queryByTestId("chained-builder-pane-pact")).toBeNull();
+    const railW = parseInt(screen.getByTestId("chained-builder-rail").style.width, 10);
+    const paneW = parseInt(screen.getByTestId("chained-builder-pane-fields").style.flex.split(" ")[2], 10);
+    expect(paneW).toBe(976); // rawShare — NOT the configured 1200.
+    expect(railW + 14 + paneW).toBeLessThanOrEqual(1200);
+  });
+
+  it("a larger paneMinWidth lowers the Fit control's Auto pane count (GAP-inclusive arithmetic, not a GAP-naive approximation)", () => {
+    mount(makeAdapter());
+    expect(screen.getByRole("button", { name: "Auto (2)" })).toBeTruthy();
+    cleanup();
+
+    // paneMinWidth=488 is chosen so the real formula and a plausible
+    // GAP-NAIVE mutant (`floor(availPanes / PANE_MIN)` instead of
+    // `floor((availPanes+GAP) / (PANE_MIN+GAP))`) actually DISAGREE here:
+    // real: floor((976+14)/(488+14)) = floor(990/502) = 1.
+    // GAP-naive: floor(976/488) = 2 — a different result, so this breakpoint
+    // genuinely pins the GAP-inclusive formula, not just "some monotonic
+    // decrease somewhere between 360 and a big number."
+    mount(makeAdapter(), { paneMinWidth: 488 });
+    expect(screen.getByRole("button", { name: "Auto (1)" })).toBeTruthy();
+  });
+
+  it("never renders a pane wider than the measured width can hold, at custom prop values — the no-horizontal-scroll invariant", () => {
+    for (const props of [
+      { paneMaxWidth: 2000, paneMinWidth: 100, railWidth: 50 },
+      // railWidth + GAP lands EXACTLY at the stubbed 1200px clientWidth
+      // (1186+14=1200) — availPanes bottoms out at its Math.max(0, …) floor
+      // of 0, the tightest edge reachable WITHOUT railWidth alone exceeding
+      // the mount's own width (that further edge is a deliberately
+      // out-of-scope misconfiguration — see the comment at `paneW`'s
+      // definition in ChainedBuilder.tsx).
+      { railWidth: 1186 },
+      // paneMinWidth alone exceeds availPanes (976 at default railWidth) —
+      // the exact HIGH-severity regression fixed above, re-checked here as
+      // part of the general invariant sweep too.
+      { paneMinWidth: 1200 },
+    ]) {
+      mount(makeAdapter(), props);
+      const railW = parseInt(screen.getByTestId("chained-builder-rail").style.width, 10);
+      const paneEls = [
+        screen.queryByTestId("chained-builder-pane-pact"),
+        screen.queryByTestId("chained-builder-pane-fields"),
+      ].filter((el): el is HTMLElement => el !== null);
+      const paneWidths = paneEls.map((el) => parseInt(el.style.flex.split(" ")[2], 10));
+      const totalWidth = railW + 14 + paneWidths.reduce((sum, w) => sum + w, 0) + (paneWidths.length - 1) * 14;
+      expect(totalWidth, `overflow at props=${JSON.stringify(props)}`).toBeLessThanOrEqual(1200);
+      cleanup();
+    }
+  });
+});

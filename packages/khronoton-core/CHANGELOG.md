@@ -4,6 +4,33 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.20.0 — 2026-11-26
+
+**MINOR — two `ChainedBuilder` layout refinements: fixes the Pact editor not filling its pane's height, and adds three optional, backward-compatible props letting an integrator control pane/rail sizing instead of three hard-coded constants.**
+
+### Pact editor fill-height fix
+
+**Symptom:** on a live full-page mount, a short Pact program rendered at its own content height with empty dead space below it, down to the pane's bottom edge — the pane filled correctly; the editor inside it didn't grow to match.
+
+**Root cause, confirmed by reading (not guessing):** `@uiw/react-codemirror`'s own installed source already handles CodeMirror-internal height correctly out of the box — an unconditional `scrollerTheme` (`.cm-scroller {height:'100% !important'}`) plus a per-call dimension theme (`&{height:...}`, applied whenever a truthy `height` prop is passed) — ruling out a CodeMirror-side cause entirely. The real bug: `StepWorkspace.tsx`'s `editorPane` wrapper used `height: "100%"` on what is a **flex item** of a flex-column parent — the textbook flexbox gotcha where a percentage height on a flex item doesn't reliably propagate the way `flex: 1` does (the item's own height resolution and the parent's definite-height resolution are both mid-flight in the same layout pass). Every OTHER layer in this exact chain (the Pact pane's own `panel` card; `PactCodeEditor.tsx`'s inner wrapper around the real CodeMirror mount) already used the correct `flex:1 + minHeight:0` idiom — `editorPane` was the one link that didn't.
+
+**Fix:** `editorPane`'s wrapper is now `flex: 1, minHeight: 0` (dropping `height: "100%"`), matching the idiom used everywhere else in this chain. No change needed to `PactCodeEditor.tsx`/`PactCodeMirror.tsx`. Verified via the real rendered DOM node's own inline style (jsdom has no layout engine, so a pixel-fill assertion isn't reachable — this is the closest reachable guard, matching this package's own established precedent for this exact class of CSS problem) — a new regression test (`StepWorkspace.test.tsx`, new file) confirmed red against the pre-fix code before the one-line style change, green after.
+
+### Integrator-settable pane sizing props
+
+`PANE_MIN`/`PANE_MAX`/`RAIL` (360/600/210) were hard-coded constants inside `ChainedBuilder` — the "Fit" control only ever changed pane *count*, never width, so a wide monitor showing just Pact code + Raw JSON still capped each pane at 600px with a large void centred around them, and the consuming integrator had no way to influence this. `ChainedBuilderProps` gains three optional props, all defaulting to today's exact values (omitting all three reproduces the current layout byte-for-byte):
+- `paneMaxWidth?: number` (default `600`) — the per-pane width cap.
+- `paneMinWidth?: number` (default `360`) — feeds `autoFit`; a larger value naturally lowers the automatic pane count.
+- `railWidth?: number` (default `210`) — the left rail column's width.
+
+A real landmine was found and closed while wiring this up: the rail column's *actually-rendered* `<div style={{width:210,...}}>` was a **separate hardcoded literal**, independent of the `RAIL` constant the width math used — wiring `railWidth` through the math alone, without also fixing this JSX literal, would have silently desynced the math's assumed rail width from the actually-rendered one the moment anyone passed a non-default `railWidth`, breaking the no-horizontal-scroll invariant. Both now read the same resolved value. The Hub can now pass e.g. `paneMaxWidth={1200}` from its full-page mount — no package change needed next time the preferred width shifts.
+
+**Reviewed via nectar (correctness/conventions/tests lenses; security omitted — pure client-side layout/props, no external input):** conventions came back clean. The tests lens found 4 MEDIUM + 1 LOW coverage gaps (a clamp test that would pass identically with the clamp deleted; no assertion that the "fields" pane gets the same width as "pact"; an `autoFit` test pinned at breakpoints a GAP-naive mutant formula would also pass; no test near the `availPanes → 0` edge; no smoke test for `StepWorkspace`'s unused `pane="both"` value) — all closed. The correctness lens caught a genuine **HIGH**: `paneW`'s floor (`Math.max(PANE_MIN, …)`) unconditionally rescued the result UP to `paneMinWidth` regardless of what the measured width could actually hold — so a `paneMinWidth` (or `railWidth`) configured larger than the available space forced a real, measured horizontal overflow on the rendered pane (`flex: 0 0 …px` never shrinks), directly contradicting this release's own "no horizontal scroll at ANY prop values" promise. Fixed: the preference now never wins over the actual per-pane share of the measured width, down to and including zero (an unusably narrow, but never overflowing, pane) — the only configuration this still can't rescue is a `railWidth` that alone exceeds the whole mount's width, a deliberately out-of-scope misconfiguration no pane-width clamp could fix anyway. The now-redundant separate `PANE_MAX` clamp (`Math.max(paneMinWidth, paneMaxWidth)`) was removed — `paneW`'s own floor already fully absorbs a `paneMaxWidth < paneMinWidth` misconfiguration on its own, confirmed by hand-tracing every consumer of `PANE_MAX` (there is exactly one).
+
+Verified via 9 tests in `ChainedBuilder.test.tsx` (7 original + 2 from the review round) and 2 in `StepWorkspace.test.tsx` (1 original + 1 from the review round): the backward-compat pin, now also checking the "fields" pane matches "pact"'s width; `railWidth` changing BOTH the rendered rail width AND the pane-width math; `paneMaxWidth` raising/lowering the cap; the HIGH regression itself (`paneMinWidth` larger than the measured width no longer overflows); `autoFit` at a GAP-discriminating breakpoint; and the no-horizontal-scroll invariant swept across three distinct edge-case prop combinations, including the `availPanes → 0` boundary. Every new/changed test confirmed red against the pre-fix code before its corresponding fix landed (via a scoped `git stash` of just the two implementation files for the review-round fixes).
+
+**1581 specs pass** (10 new total). `npx tsc --noEmit` clean; `npm run build` clean.
+
 ## 0.19.1 — 2026-11-26
 
 **PATCH — fixes a real crash in `ChainedBuilder`'s Raw JSON pane: a pathologically deep (but otherwise valid) payload or planner-params value could overflow the call stack during the pane's own live preview render, crashing the whole component.**
