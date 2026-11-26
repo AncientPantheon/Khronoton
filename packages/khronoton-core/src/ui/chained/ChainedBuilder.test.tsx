@@ -602,4 +602,36 @@ describe("ChainedBuilder — Raw JSON pane: unlock / paste / import", () => {
     },
     TEST_TIMEOUT,
   );
+
+  it(
+    "a pathologically deep payload — typed into the EXISTING raw-JSON payload field, not pasted via import — does not crash the live Raw JSON preview render",
+    () => {
+      // `jsonToChainedBuilderState` was already hardened to never throw on a
+      // deep-but-valid import (it eagerly re-serializes each step's raw
+      // payload/plannerParams to populate the Payload/Planner-params text,
+      // so a document deep enough to overflow THAT serialize is rejected
+      // with a clean parse error before it ever reaches state). But the
+      // Payload tab's own raw-JSON textarea (`PayloadTab.tsx`, pre-existing,
+      // nothing to do with the new import feature) stores typed text as-is
+      // with no serialize step at all — so a deep value entered THIS way
+      // reaches `state` untouched, and is only re-walked when `codeText`
+      // (this component's own live Raw JSON preview, `JSON.stringify`d on
+      // every render) tries to render it. That call had no guard at all.
+      mount(makeAdapter());
+
+      fireEvent.click(screen.getByRole("button", { name: "Payload" }));
+      fireEvent.click(screen.getByRole("button", { name: "Switch to raw JSON" }));
+      const deepArray = "[".repeat(50_000) + "]".repeat(50_000);
+      fireEvent.change(screen.getByLabelText("Raw payload JSON (object)"), {
+        target: { value: `{"deep": ${deepArray}}` },
+      });
+
+      // Must not crash the component — the render above must have survived
+      // for this assertion to even run. The Raw JSON pane itself must still
+      // be a normal, interactive read-only pane (not stuck mid-crash).
+      openRawJsonPane();
+      expect(screen.getByRole("button", { name: "Paste / import" })).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
 });

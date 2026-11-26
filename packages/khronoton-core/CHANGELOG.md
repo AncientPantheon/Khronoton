@@ -4,6 +4,16 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.19.1 — 2026-11-26
+
+**PATCH — fixes a real crash in `ChainedBuilder`'s Raw JSON pane: a pathologically deep (but otherwise valid) payload or planner-params value could overflow the call stack during the pane's own live preview render, crashing the whole component.**
+
+Flagged by a security-lens finding on 0.19.0's Raw JSON import work: that review's own fix already made `jsonToChainedBuilderState` genuinely never-throwing (a deep IMPORT target is rejected with a clean parse error, since the importer eagerly re-serializes each step's raw payload/plannerParams to populate their own text fields — a deep-enough value overflows THAT guarded call first). But the Raw JSON pane's own live preview (`codeText`, a `useMemo` that re-`JSON.stringify`s the whole commit body on every render) had no equivalent guard, and — critically — is reachable through a completely different path than import: typing or pasting a deeply nested value directly into the PRE-EXISTING Payload tab's raw-JSON textarea (`PayloadTab.tsx`, nothing to do with the 0.19.0 import feature) stores it as plain text with no serialize step at all, so nothing rejects it on the way in. The next render's `codeText` computation then tries to `JSON.stringify` that reconstructed deep value as part of the whole document and throws `RangeError: Maximum call stack size exceeded`, uncaught, crashing `ChainedBuilder` entirely.
+
+Confirmed via a real reproduction (not just code reading): mounted `ChainedBuilder`, switched a step's Payload tab to raw-JSON mode, typed a ~50,000-level-deep nested array as the payload — reliably reproduced the exact `RangeError` at `ChainedBuilder.tsx`'s `codeText` computation against the unfixed code. Fixed by wrapping `codeText`'s computation in a try/catch, falling back to a clear `"Could not render the Raw JSON preview: <message>"` string instead of propagating the exception — the pane degrades gracefully; nothing else in the component is affected (committing/simulating already went through `handleCommit`/`handleSimulate`'s own existing try/catch, unaffected by this gap). Checked for the same pattern elsewhere in the package: no equivalent unguarded live-preview `JSON.stringify` exists in the sibling single-tx `Builder.tsx` — this gap was unique to `ChainedBuilder`'s Raw JSON pane.
+
+**1571 specs pass** (1 new, the crash reproduction + fix verification). `npx tsc --noEmit` clean; `npm run build` clean.
+
 ## 0.19.0 — 2026-11-26
 
 **MINOR (two deliverables on the `ChainedBuilder` UI's Raw JSON pane: the "paste/import" follow-on 0.17.0 deferred, plus a brand-new generated raw-cronoton-JSON schema + field reference) — the Raw JSON pane gains a paste/upload/capture affordance that loads parsed JSON straight into builder state, and the package now publishes a machine-readable JSON Schema + human field reference for the raw chained-cronoton JSON document, generated from the package's own types and `BUILTIN_DESCRIPTORS` rather than hand-written.**

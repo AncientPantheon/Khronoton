@@ -393,10 +393,24 @@ export function ChainedBuilder({
   // plain `CommitBody`), not the chain shape, so the Raw JSON pane matches.
   const commitBody = useMemo(() => chainedBuilderToCommit(state), [state]);
   const gate = useMemo(() => canCommitChain(state, commitBody.steps), [state, commitBody]);
-  const codeText = useMemo(
-    () => JSON.stringify(isSingleCronoton ? singleCronotonBody() : commitBody, null, 2),
-    [commitBody, isSingleCronoton, singleCronotonBody],
-  );
+  // `JSON.stringify` recurses once per nesting level, with no depth cap of
+  // its own — a pathologically deep (but otherwise perfectly valid) raw-mode
+  // payload or planner-params value, typed directly into the existing
+  // Payload/Planner-params raw-JSON textareas (stored as plain text with no
+  // serialize step of its own, so nothing rejects it on the way in), can
+  // overflow the call stack right here on every render. Unlike
+  // `jsonToChainedBuilderState`'s own internal re-serialize (guarded, since a
+  // deep IMPORT target is rejected with a clean parse error before ever
+  // reaching state), this live preview has no earlier guarded call to lean
+  // on — it must guard itself, or the whole component crashes on render
+  // instead of the Raw JSON pane merely failing to preview.
+  const codeText = useMemo(() => {
+    try {
+      return JSON.stringify(isSingleCronoton ? singleCronotonBody() : commitBody, null, 2);
+    } catch (e) {
+      return `Could not render the Raw JSON preview: ${errorMessage(e)}`;
+    }
+  }, [commitBody, isSingleCronoton, singleCronotonBody]);
 
   // ── Mutations ────────────────────────────────────────────────────────────────
   const patchStep = useCallback(
