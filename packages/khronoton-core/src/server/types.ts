@@ -82,11 +82,21 @@ export interface CodexTxConfig {
    * guaranteed to go stale. Absence self-heals a historical row with no DB
    * migration.
    */
+  /** @minimum 0 */
   readonly gasPriceBufferAnu?: number;
+  /**
+   * The gas limit, in gas units. Must be a positive integer — a cronoton with
+   * `gasLimit <= 0` is rejected at commit time (`validateConfig`).
+   * @minimum 1
+   */
   readonly gasLimit: number;
   /** When true, the executor calibrates the gas limit from a dirty-read. */
   readonly autoGasLimit: boolean;
-  /** Time-to-live in seconds. */
+  /**
+   * Time-to-live in seconds. Enforced at commit time (`validateConfig`).
+   * @minimum 60
+   * @maximum 86400
+   */
   readonly ttl: number;
 }
 

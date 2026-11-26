@@ -251,6 +251,16 @@ function buildPayload(payload: PayloadState): Record<string, unknown> {
   return out;
 }
 
+/**
+ * A plain-object type-guard (excludes `null` and arrays). Exported so
+ * `chained-builder-state.ts`'s JSON importer reuses this exact predicate
+ * instead of reimplementing it for the identical "is this safely indexable
+ * as a record" need.
+ */
+export function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 /** Parse a string as a JSON object; null for anything that is not a plain object. */
 function tryParseObject(raw: string): Record<string, unknown> | null {
   let parsed: unknown;
@@ -259,8 +269,8 @@ function tryParseObject(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  return parsed as Record<string, unknown>;
+  if (!isPlainObject(parsed)) return null;
+  return parsed;
 }
 
 function toGasPayer(gasPayer: GasPayerState): CodexGasPayer {
@@ -425,8 +435,13 @@ export function canCommit(
 
 let signerIdSeq = 0;
 
-/** A fresh, unique ephemeral id for a rehydrated signer row. */
-function freshSignerId(): string {
+/**
+ * A fresh, unique ephemeral id for a rehydrated signer row. Exported so a
+ * sibling rehydration path (`chained-builder-state.ts`'s JSON importer) draws
+ * from the SAME counter rather than inventing a second id scheme for the
+ * identical "rehydrate a signer row from an external representation" need.
+ */
+export function freshSignerId(): string {
   signerIdSeq += 1;
   return `signer-${signerIdSeq}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -440,11 +455,26 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-function toGasPayerState(gasPayer: CodexGasPayer): GasPayerState {
+/**
+ * `CodexGasPayer` (wire) → `GasPayerState` (form). Exported so
+ * `chained-builder-state.ts`'s JSON importer reuses this exact mapping
+ * instead of reimplementing it for the per-step/variant gas payer.
+ */
+export function toGasPayerState(gasPayer: CodexGasPayer): GasPayerState {
   if (gasPayer.type === "gas-station") {
     return { type: "gas-station", signingKey: gasPayer.gasStationSignerKey };
   }
   return { type: "codex", address: gasPayer.address };
+}
+
+/**
+ * A raw payload object → `PayloadState`, forced into raw mode (lossless
+ * pretty JSON, typed rows/keysets empty). Exported so
+ * `chained-builder-state.ts`'s JSON importer reuses this exact mapping
+ * instead of reimplementing it for the per-step/variant raw payload.
+ */
+export function toRawPayloadState(obj: Record<string, unknown>): PayloadState {
+  return { entries: [], keysets: [], rawMode: true, rawJson: JSON.stringify(obj, null, 2) };
 }
 
 /**
@@ -485,12 +515,7 @@ export function detailToBuilderState(row: CodexCronotonRow): BuilderState {
       autoGasLimit: storedConfig.autoGasLimit,
       ttl: storedConfig.ttl,
     },
-    payload: {
-      entries: [],
-      keysets: [],
-      rawMode: true,
-      rawJson: JSON.stringify(payloadObj, null, 2),
-    },
+    payload: toRawPayloadState(payloadObj),
     gasPayer: toGasPayerState(gasPayer),
     signers: signers.map((s) => ({
       id: freshSignerId(),

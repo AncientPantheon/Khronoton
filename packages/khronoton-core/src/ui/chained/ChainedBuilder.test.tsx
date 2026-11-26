@@ -322,3 +322,284 @@ describe("ChainedBuilder — missing adapter.commitChain on a real chain", () =>
     expect(onDone).not.toHaveBeenCalled();
   }, TEST_TIMEOUT);
 });
+
+/** Shows the "Raw JSON" pane. With the 1200px `clientWidth` stub above, `fit`
+ *  is 2 — adding a 3rd visible pane drops the oldest ("Pact code"), leaving
+ *  Fields + Raw JSON on screen, which is exactly what these tests need. */
+function openRawJsonPane() {
+  fireEvent.click(screen.getByRole("button", { name: "Raw JSON" }));
+}
+
+describe("ChainedBuilder — Raw JSON pane: unlock / paste / import", () => {
+  it("stays read-only by default, with a 'Paste / import' toggle and no textarea", () => {
+    mount(makeAdapter());
+    openRawJsonPane();
+    expect(screen.getByRole("button", { name: "Paste / import" })).toBeTruthy();
+    expect(screen.queryByLabelText("Import JSON")).toBeNull();
+  });
+
+  it("the toggle reveals the import textarea + Capture/Cancel, and Cancel returns to read-only with no state change", () => {
+    mount(makeAdapter());
+    openRawJsonPane();
+    fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+    expect(screen.getByLabelText("Import JSON")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Capture & parse" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Import JSON")).toBeNull();
+    expect(screen.getByRole("button", { name: "Paste / import" })).toBeTruthy();
+  });
+
+  it(
+    "Capture & parse on valid JSON replaces the builder's state (proven via the Name field, not just the pure function)",
+    async () => {
+      mount(makeAdapter());
+      openRawJsonPane();
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      fireEvent.change(screen.getByLabelText("Import JSON"), {
+        target: {
+          value: JSON.stringify({
+            name: "Imported Chain",
+            steps: [{ mode: "single", pactCode: "(+ 9 9)" }],
+          }),
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Capture & parse" }));
+
+      // Capture closes the import panel back to read-only on success.
+      await waitFor(() => expect(screen.queryByLabelText("Import JSON")).toBeNull(), ASYNC_TIMEOUT);
+
+      // The Fields pane is still on screen (fit=2 kept it); open "Whole
+      // cronoton" to prove the imported name actually landed in `state`.
+      openWholeCronotonTab();
+      expect((screen.getByPlaceholderText("StoicismRewardFlow") as HTMLInputElement).value).toBe(
+        "Imported Chain",
+      );
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "Capture & parse on invalid JSON shows an error and leaves prior state untouched",
+    async () => {
+      mount(makeAdapter());
+
+      // Hand-enter a name FIRST, before ever touching import — proves this
+      // survives a failed capture attempt untouched.
+      openWholeCronotonTab();
+      fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
+        target: { value: "Original Name" },
+      });
+
+      openRawJsonPane();
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      fireEvent.change(screen.getByLabelText("Import JSON"), { target: { value: "{not valid json" } });
+      fireEvent.click(screen.getByRole("button", { name: "Capture & parse" }));
+
+      await waitFor(() => expect(screen.getByText(/Invalid JSON/)).toBeTruthy(), ASYNC_TIMEOUT);
+      // The import panel stays OPEN on failure (so the author can fix the
+      // pasted text and retry) — it does not silently snap back to read-only.
+      expect(screen.getByLabelText("Import JSON")).toBeTruthy();
+
+      // The hand-entered name from before the failed attempt is untouched.
+      expect((screen.getByPlaceholderText("StoicismRewardFlow") as HTMLInputElement).value).toBe(
+        "Original Name",
+      );
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "uploading a .json file reads its text into the same textarea Capture reads from",
+    async () => {
+      mount(makeAdapter());
+      openRawJsonPane();
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+
+      const fileText = JSON.stringify({ name: "From file", steps: [{ mode: "single" }] });
+      const file = new File([fileText], "chain.json", { type: "application/json" });
+      const input = screen.getByLabelText("Upload .json file") as HTMLInputElement;
+      fireEvent.change(input, { target: { files: [file] } });
+
+      await waitFor(
+        () => expect((screen.getByLabelText("Import JSON") as HTMLTextAreaElement).value).toBe(fileText),
+        ASYNC_TIMEOUT,
+      );
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "a failed file read shows an inline error instead of silently doing nothing (no onerror wired, no non-string-result branch)",
+    async () => {
+      // Stub `FileReader` for this test only — `handleImportFile` wires its own
+      // `onload`/`onerror`, so a fake that always fails via `onerror` exercises
+      // the error path without needing a real unreadable File (jsdom has no
+      // notion of a corrupt file read). Restored in `finally` so the sibling
+      // "uploading a .json file" test above keeps using the real jsdom
+      // `FileReader` it depends on.
+      const OriginalFileReader = global.FileReader;
+      class AlwaysFailsFileReader {
+        result: string | null = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsText(): void {
+          queueMicrotask(() => this.onerror?.());
+        }
+      }
+      global.FileReader = AlwaysFailsFileReader as unknown as typeof FileReader;
+      try {
+        mount(makeAdapter());
+        openRawJsonPane();
+        fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+
+        const file = new File(["{}"], "chain.json", { type: "application/json" });
+        const input = screen.getByLabelText("Upload .json file") as HTMLInputElement;
+        fireEvent.change(input, { target: { files: [file] } });
+
+        // The same `{importError}` paragraph the "invalid JSON" capture test
+        // already asserts against — a failed read is surfaced the same way a
+        // failed parse is, not a silent no-op.
+        await waitFor(
+          () => expect(screen.getByText(/Could not read the selected file/)).toBeTruthy(),
+          ASYNC_TIMEOUT,
+        );
+      } finally {
+        global.FileReader = OriginalFileReader;
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "a non-string FileReader result (e.g. an aborted/binary read) also surfaces an error, not a silent no-op",
+    async () => {
+      const OriginalFileReader = global.FileReader;
+      class NonStringResultFileReader {
+        result: unknown = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsText(): void {
+          this.result = new ArrayBuffer(0); // never a string
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      global.FileReader = NonStringResultFileReader as unknown as typeof FileReader;
+      try {
+        mount(makeAdapter());
+        openRawJsonPane();
+        fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+
+        const file = new File(["{}"], "chain.json", { type: "application/json" });
+        const input = screen.getByLabelText("Upload .json file") as HTMLInputElement;
+        fireEvent.change(input, { target: { files: [file] } });
+
+        await waitFor(
+          () => expect(screen.getByText(/Could not read the selected file/)).toBeTruthy(),
+          ASYNC_TIMEOUT,
+        );
+      } finally {
+        global.FileReader = OriginalFileReader;
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "Fit:1 pins the Raw JSON pane while an import is open — clicking a different pane's chip can no longer evict it with no trace",
+    () => {
+      mount(makeAdapter());
+      // Default fit (auto) is 2 at this file's 1200px clientWidth stub —
+      // showing Raw JSON first evicts "Pact code" (the comment on
+      // `openRawJsonPane` above already documents this), leaving
+      // visiblePanes = ["fields", "raw"].
+      openRawJsonPane();
+
+      // Force Fit:1 — with all three panes present this chip is never
+      // disabled, exactly the "always clickable" case the finding calls out.
+      fireEvent.click(screen.getByRole("button", { name: "1" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      fireEvent.change(screen.getByLabelText("Import JSON"), {
+        target: { value: '{"draft": "in progress"}' },
+      });
+
+      // The exact reachable sequence the review found: clicking a DIFFERENT
+      // pane's toggle chip while mid-import, at a fit low enough that adding
+      // it would otherwise slice "raw" out of `visiblePanes` entirely —
+      // unmounting the whole import UI with zero on-screen warning.
+      fireEvent.click(screen.getByRole("button", { name: "Pact code" }));
+
+      // The import panel — and the draft already typed into it — must still
+      // be on screen; "raw" was never evicted.
+      expect((screen.getByLabelText("Import JSON") as HTMLTextAreaElement).value).toBe(
+        '{"draft": "in progress"}',
+      );
+      expect(screen.getByRole("button", { name: "Capture & parse" })).toBeTruthy();
+    },
+  );
+
+  it(
+    "a successful Capture resets selection/fields-tab/sim derived from the PREVIOUS state (not just Name), and reopening import afterwards starts empty",
+    async () => {
+      const simulateChain = vi.fn(async (_body: unknown) => ({
+        ok: true as const,
+        steps: [{ stepIndex: 0, mode: "single" as const, ok: true, gasUsed: 10 }],
+      }));
+      mount(
+        makeAdapter({
+          simulateChain: simulateChain as unknown as KhronotonAdapter["simulateChain"],
+        }),
+      );
+
+      // Build a state that differs from fresh-mount defaults in every field
+      // `handleCaptureImport`'s success path is supposed to reset, so the
+      // later assertions actually prove the reset fired — not just "those
+      // fields happened to already be at their defaults".
+      setPactCode("(+ 1 2)");
+      fireEvent.click(screen.getByRole("button", { name: "+ Add step" })); // selected -> 1, 2 steps
+      openWholeCronotonTab();
+      fireEvent.click(screen.getByRole("button", { name: "Description" })); // wholeField -> "description"
+
+      fireEvent.click(screen.getByRole("button", { name: "Simulate chain" }));
+      await waitFor(() => expect(simulateChain).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
+      await waitFor(() => expect(screen.getByText(/Dry run:/)).toBeTruthy(), ASYNC_TIMEOUT);
+
+      // Now a successful import — a minimal valid single-step document.
+      openRawJsonPane();
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      fireEvent.change(screen.getByLabelText("Import JSON"), {
+        target: {
+          value: JSON.stringify({
+            name: "Imported",
+            steps: [{ mode: "single", pactCode: "(+ 9 9)" }],
+          }),
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Capture & parse" }));
+      await waitFor(() => expect(screen.queryByLabelText("Import JSON")).toBeNull(), ASYNC_TIMEOUT);
+
+      // The stale dry-run panel from BEFORE the import is gone (`sim` reset).
+      expect(screen.queryByText(/Dry run:/)).toBeNull();
+
+      // `fieldsTab` is back on "Step config" (not left on "Whole cronoton" /
+      // its "Description" sub-tab) — the Name/Description fields no longer
+      // render at all.
+      expect(screen.queryByPlaceholderText("StoicismRewardFlow")).toBeNull();
+      // ...and `selected` is back to a VALID index (0) into the new,
+      // 1-step state — if it had stayed at the old index (1, now out of
+      // range), the Fields pane would show "Select a step." instead of the
+      // real per-step tab strip.
+      expect(screen.queryByText("Select a step.")).toBeNull();
+      expect(screen.getByRole("button", { name: "Gas Payer" })).toBeTruthy();
+
+      // Reopening "Paste / import" right after a SUCCESSFUL capture starts
+      // with an empty textarea and no leftover error text (only the Cancel
+      // path was previously proven to clear these).
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      expect((screen.getByLabelText("Import JSON") as HTMLTextAreaElement).value).toBe("");
+      expect(screen.queryByText(/Invalid JSON/)).toBeNull();
+    },
+    TEST_TIMEOUT,
+  );
+});

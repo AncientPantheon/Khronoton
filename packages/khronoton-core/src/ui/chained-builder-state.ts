@@ -23,7 +23,11 @@ import type { CodexGasPayer, CodexSigner, CodexTxConfig } from "../server/index.
 import type { ChainCommitBody, ChainSingleTxFirst, ChainStepInput } from "../handlers/chain.js";
 import {
   builderToCommit,
+  freshSignerId,
+  isPlainObject,
   makeEmptyBuilderState,
+  toGasPayerState,
+  toRawPayloadState,
   validateConfig,
   validateGasPayer,
   validatePayload,
@@ -244,6 +248,253 @@ export function chainedBuilderToCommit(state: ChainedBuilderState): ChainCommitB
     body.singleTxFirst = singleTxVariantToInput(state.singleTxVariant);
   }
   return body;
+}
+
+// ── Deserialization: JSON text → ChainedBuilderState (the inverse) ────────────
+
+/** `jsonToChainedBuilderState`'s result — never throws; a parse failure carries
+ *  a human-readable reason and leaves the caller's own state untouched. */
+export type ChainedBuilderImportResult =
+  | { ok: true; state: ChainedBuilderState }
+  | { ok: false; error: string };
+
+/** The primitive type `coerce` returns for a given `kind` literal — ties `T`
+ *  to `kind` structurally so a mismatched pair (e.g. `kind:"string"` with a
+ *  `boolean` fallback) is a compile error instead of an unchecked cast. */
+type PrimitiveFor<K extends "string" | "number" | "boolean"> = K extends "string"
+  ? string
+  : K extends "number"
+    ? number
+    : boolean;
+
+/** `v ?? fallback`, but only when `v` is actually of type `kind` — a present-
+ *  but-wrong-typed field degrades to the default the same as an absent one. */
+function coerce<K extends "string" | "number" | "boolean">(
+  v: unknown,
+  kind: K,
+  fallback: PrimitiveFor<K>,
+): PrimitiveFor<K> {
+  return typeof v === kind ? (v as PrimitiveFor<K>) : fallback;
+}
+
+/** `CodexTxConfig` (wire, possibly malformed) → `BuilderConfig`, one field at a
+ *  time — mirrors `detailToBuilderState`'s own `gasPriceBufferAnu ?? 0` idiom,
+ *  just per-field instead of object-level, so ONE bad field degrades alone. */
+function toBuilderConfigFromWire(raw: unknown): BuilderConfig {
+  const empty = makeEmptyBuilderState().config;
+  if (!isPlainObject(raw)) return empty;
+  return {
+    chainId: coerce(raw.chainId, "string", empty.chainId),
+    gasPriceBufferAnu: coerce(raw.gasPriceBufferAnu, "number", empty.gasPriceBufferAnu),
+    gasLimit: coerce(raw.gasLimit, "number", empty.gasLimit),
+    autoGasLimit: coerce(raw.autoGasLimit, "boolean", empty.autoGasLimit),
+    ttl: coerce(raw.ttl, "number", empty.ttl),
+  };
+}
+
+/** A raw (untrusted) payload value → `PayloadState`, always in raw mode — the
+ *  same "lossless raw mode" convention `detailToBuilderState` already uses for
+ *  a stored row's `payload_json`. A non-object payload degrades to `{}`. */
+function toPayloadStateFromWire(raw: unknown): PayloadState {
+  const obj = isPlainObject(raw) ? raw : {};
+  return toRawPayloadState(obj);
+}
+
+/** `CodexGasPayer` (wire, possibly malformed) → `GasPayerState`, reusing the
+ *  single-tx builder's own mapping (`toGasPayerState`) once the shape is
+ *  confirmed well-formed enough to pass it (a valid `type` discriminant). */
+function toGasPayerStateFromWire(raw: unknown): GasPayerState {
+  if (isPlainObject(raw)) {
+    const type = raw.type;
+    if (type === "gas-station") {
+      const key = raw.gasStationSignerKey;
+      return toGasPayerState({ type, gasStationSignerKey: typeof key === "string" ? key : undefined });
+    }
+    if (type === "codex") {
+      const address = raw.address;
+      return toGasPayerState({ type, address: typeof address === "string" ? address : undefined });
+    }
+  }
+  return makeEmptyBuilderState().gasPayer;
+}
+
+/** `CodexSigner[]` (wire, possibly malformed) → `SignerRow[]` — an individual
+ *  malformed entry (not an object, or no string `publicKey`) is DROPPED rather
+ *  than failing the whole step, matching the design's leaf-level tolerance.
+ *  Fresh ids via the single-tx builder's own counter (`freshSignerId`), same
+ *  `label:"", source:"foreign"` convention `detailToBuilderState` uses. */
+function toSignerRowsFromWire(raw: unknown): SignerRow[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: SignerRow[] = [];
+  for (const entry of raw) {
+    if (!isPlainObject(entry) || typeof entry.publicKey !== "string") continue;
+    rows.push({
+      id: freshSignerId(),
+      publicKey: entry.publicKey,
+      label: "",
+      source: "foreign",
+      capabilityMode: entry.capabilityMode === "scoped" ? "scoped" : "pure",
+      capabilities: coerce(entry.capabilities, "string", ""),
+    });
+  }
+  return rows;
+}
+
+/** The `{pactCode, config, payload, gasPayer, signers}` tuple shared by a
+ *  `"single"`-mode step AND the `singleTxFirst` variant (identical sub-shape
+ *  minus `yieldAs`/`idempotent`/planner fields, none of which exist on
+ *  `ChainSingleTxFirst`'s type at all) — built once here, not twice. */
+function stepEnvelopeFromWire(raw: Record<string, unknown>): {
+  pactCode: string;
+  config: BuilderConfig;
+  payload: PayloadState;
+  gasPayer: GasPayerState;
+  signers: SignerRow[];
+} {
+  return {
+    pactCode: coerce(raw.pactCode, "string", ""),
+    config: toBuilderConfigFromWire(raw.config),
+    payload: toPayloadStateFromWire(raw.payload),
+    gasPayer: toGasPayerStateFromWire(raw.gasPayer),
+    signers: toSignerRowsFromWire(raw.signers),
+  };
+}
+
+/** One `ChainStepInput` (wire, already shape-checked for a valid `mode` by the
+ *  caller) → `StepState`. Lenient on everything below `mode` — a malformed or
+ *  absent sub-field degrades to `makeEmptyStepState`'s own default. */
+function toStepStateFromWire(raw: Record<string, unknown>): StepState {
+  const mode: "single" | "planner" = raw.mode === "planner" ? "planner" : "single";
+  const base = makeEmptyStepState(mode);
+  if (mode === "planner") {
+    const config = toBuilderConfigFromWire(raw.config);
+    const gasPayer = toGasPayerStateFromWire(raw.gasPayer);
+    const signers = toSignerRowsFromWire(raw.signers);
+    return {
+      ...base,
+      plannerName: coerce(raw.plannerName, "string", ""),
+      plannerParamsJson: "plannerParams" in raw ? JSON.stringify(raw.plannerParams, null, 2) : "",
+      config,
+      gasPayer,
+      signers,
+      idempotent: coerce(raw.idempotent, "boolean", false),
+      yieldAs: coerce(raw.yieldAs, "string", ""),
+    };
+  }
+  const env = stepEnvelopeFromWire(raw);
+  return {
+    ...base,
+    pactCode: env.pactCode,
+    config: env.config,
+    payload: env.payload,
+    gasPayer: env.gasPayer,
+    signers: env.signers,
+    idempotent: coerce(raw.idempotent, "boolean", false),
+    yieldAs: coerce(raw.yieldAs, "string", ""),
+  };
+}
+
+/** The `singleTxFirst` variant (wire, already known to be a plain object) →
+ *  `StepState` — always `mode:"single"`; `yieldAs`/`idempotent`/planner fields
+ *  don't exist on `ChainSingleTxFirst`'s type, so they stay at the fresh-step
+ *  default rather than being read from anywhere. */
+function toVariantStepStateFromWire(raw: Record<string, unknown>): StepState {
+  const base = makeEmptyStepState("single");
+  const env = stepEnvelopeFromWire(raw);
+  return { ...base, ...env };
+}
+
+/** A structurally plausible `{mode, config}` schedule is trusted as-is — the
+ *  same level of trust `detailToBuilderState` already gives a stored row's
+ *  `schedule_config_json` (re-validating the full `ScheduleMode`/
+ *  `ScheduleConfig` union here would duplicate `schedule.ts`'s own validation
+ *  for no real benefit: a bad schedule just renders oddly in the shared
+ *  `ScheduleStep`, same as a hand-corrupted edit would today). */
+function toScheduleStateFromWire(raw: unknown): BuilderScheduleState | null {
+  if (!isPlainObject(raw) || typeof raw.mode !== "string" || !isPlainObject(raw.config)) {
+    return null;
+  }
+  return { mode: raw.mode as BuilderScheduleState["mode"], config: raw.config as BuilderScheduleState["config"] };
+}
+
+/**
+ * Parse raw JSON TEXT (the Raw JSON pane's import textarea, or an uploaded
+ * `.json` file's content) into a `ChainedBuilderState` — the inverse of
+ * {@link chainedBuilderToCommit}. NEVER throws.
+ *
+ * STRICT (a hard error) only on the load-bearing shape — a malformed document
+ * here is worse to silently paper over than to refuse clearly: invalid JSON
+ * syntax, a non-object top level, and a missing/non-array/empty `steps` (the
+ * last three share `chained-validation.ts`'s OWN "a chained cronoton needs at
+ * least one step" wording, so the author sees one voice across import and the
+ * commit gate). Any step whose `mode` isn't `"single"`/`"planner"` is the same
+ * deal, same wording, with the step's index.
+ *
+ * LENIENT (coerce-to-default) on everything else — `name`/`description`
+ * default to `""`; a missing/malformed per-step `config`/`payload`/`gasPayer`/
+ * `signers` falls back to `makeEmptyBuilderState()`'s own per-field defaults;
+ * an individually malformed signer entry is dropped, not fatal to its step.
+ * The existing `canCommitChain` gate re-surfaces anything genuinely missing
+ * (e.g. "Name is required.") once imported — this function's only job is to
+ * populate state faithfully, not to pre-validate commit-readiness, since the
+ * author may be loading a deliberately incomplete draft to keep editing it.
+ */
+export function jsonToChainedBuilderState(text: string): ChainedBuilderImportResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!isPlainObject(parsed)) {
+    return { ok: false, error: "Expected a JSON object (the canonical chained-cronoton shape)." };
+  }
+
+  const rawSteps = parsed.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    return { ok: false, error: "a chained cronoton needs at least one step" };
+  }
+  for (let i = 0; i < rawSteps.length; i += 1) {
+    const s = rawSteps[i];
+    if (!isPlainObject(s) || (s.mode !== "single" && s.mode !== "planner")) {
+      return { ok: false, error: `step ${i}: mode must be 'single' or 'planner'` };
+    }
+  }
+
+  const base = makeEmptyChainedBuilderState();
+  // A step's payload / plannerParams was already successfully JSON.parse'd
+  // above, but re-serializing it below (to seed the raw-JSON pane's pretty
+  // text) is its OWN recursive walk with its OWN stack limit — a
+  // pathologically deep-but-valid document can parse fine and still blow
+  // the stack here. Caught so this function's "NEVER throws" contract holds
+  // regardless of how deep a pasted/uploaded document goes.
+  let steps: StepState[];
+  let singleTxVariant: StepState | null;
+  try {
+    steps = (rawSteps as Record<string, unknown>[]).map(toStepStateFromWire);
+    const singleTxFirst = parsed.singleTxFirst;
+    singleTxVariant = isPlainObject(singleTxFirst) ? toVariantStepStateFromWire(singleTxFirst) : null;
+  } catch (e) {
+    return {
+      ok: false,
+      error: `Could not serialize a field back to JSON: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+
+  const externalFireable = parsed.externalFireable === true;
+  const schedule = externalFireable ? base.schedule : toScheduleStateFromWire(parsed.schedule) ?? base.schedule;
+
+  return {
+    ok: true,
+    state: {
+      name: coerce(parsed.name, "string", ""),
+      description: coerce(parsed.description, "string", ""),
+      schedule,
+      externalFireable,
+      singleTxVariant,
+      steps,
+    },
+  };
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────

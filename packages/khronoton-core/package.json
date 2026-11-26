@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -37,6 +37,8 @@
       "require": "./dist/ui/index.js"
     },
     "./ui.css": "./dist/ui.css",
+    "./schema/raw-cronoton.schema.json": "./dist/schema/raw-cronoton.schema.json",
+    "./schema/raw-cronoton.md": "./dist/schema/raw-cronoton.md",
     "./blockchain/stoachain": {
       "types": "./dist/blockchain/stoachain.d.ts",
       "import": "./dist/blockchain/stoachain.js",
@@ -56,7 +58,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsup && node scripts/bundle-css.mjs",
+    "build": "tsc -p tsconfig.build.json && tsup && node scripts/bundle-css.mjs && node scripts/generate-raw-cronoton-schema.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -134,11 +136,13 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@uiw/react-codemirror": "^4.23.10",
+    "ajv": "^8.17.1",
     "better-sqlite3": "^12.11.1",
     "jsdom": "^29.1.1",
     "lucide-react": "^0.475.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "tsup": "^8.4.0"
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.2"
   }
 }

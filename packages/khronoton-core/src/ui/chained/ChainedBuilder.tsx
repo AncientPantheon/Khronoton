@@ -37,6 +37,7 @@ import {
   clearVariantIfOrphaned,
   earlierYields,
   isSingleStepChain,
+  jsonToChainedBuilderState,
   makeEmptyChainedBuilderState,
   makeEmptyStepState,
   moveStep,
@@ -237,6 +238,12 @@ export function ChainedBuilder({
   const [sim, setSim] = useState<ChainSimulateView | null>(null);
   const [simulating, setSimulating] = useState(false);
 
+  // Raw JSON pane's unlock/paste/import affordance (the pane itself stays
+  // read-only — this is a separate, explicit "load a new state" flow).
+  const [importOpen, setImportOpen] = useState(false);
+  const [importDraft, setImportDraft] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+
   // ── Panes / columns ──────────────────────────────────────────────────────────
   // The three panes (Pact / Fields / Raw JSON) are ALWAYS present; `fit` only
   // changes how many show side-by-side. Each pane has a MAX width (PANE_MAX) so
@@ -310,14 +317,34 @@ export function ChainedBuilder({
 
   // Pager: toggle a pane on/off. Adding one past the `fit` cap drops the oldest,
   // so at most `fit` render and the strip stays scroll-free. Never empties.
+  //
+  // While an import is open, "raw" is PINNED — never one of the dropped-oldest
+  // panes — because the entire import UI (textarea, draft, Capture/Cancel, any
+  // inline error) only renders inside the `p.key === "raw"` branch below; were
+  // it evicted mid-edit by clicking some OTHER pane's chip, the whole thing
+  // would unmount with zero on-screen trace that anything was pending (the
+  // state itself survives, but there's no way to see or Cancel it until "Raw
+  // JSON" is toggled back on). Evict the next-oldest NON-"raw" pane(s) instead;
+  // if there's no room left once "raw" is excluded, the newly-toggled pane
+  // simply doesn't fit yet (same as any other fit-capacity miss).
   const togglePane = useCallback(
     (key: string) =>
       setVisiblePanes((cur) => {
         if (cur.includes(key)) return cur.length > 1 ? cur.filter((k) => k !== key) : cur;
         const next = [...cur, key];
-        return next.length > fit ? next.slice(next.length - fit) : next;
+        if (next.length <= fit) return next;
+        if (importOpen && next.includes("raw")) {
+          const toDrop = next.length - fit;
+          const dropped = new Set<string>();
+          for (const k of next) {
+            if (dropped.size >= toDrop) break;
+            if (k !== "raw") dropped.add(k);
+          }
+          return next.filter((k) => !dropped.has(k));
+        }
+        return next.slice(next.length - fit);
       }),
-    [fit],
+    [fit, importOpen],
   );
 
   // Signer descriptors (once) — the Gas Payer + Signatures pickers read them.
@@ -464,6 +491,48 @@ export function ChainedBuilder({
       setSimulating(false);
     }
   }, [adapter, config.onNeedConfirm, state]);
+
+  // ── Raw JSON pane: unlock / paste / import ───────────────────────────────────
+  // The pane itself stays read-only by default (no accidental typing) — these
+  // three only control the IMPORT affordance layered on top of it.
+  const handleCaptureImport = useCallback(() => {
+    const result = jsonToChainedBuilderState(importDraft);
+    if (!result.ok) {
+      setImportError(result.error);
+      return;
+    }
+    // A LOAD, not a merge — the new state's shape may not match the old
+    // selection/dry-run at all, so reset every bit of derived UI state that
+    // assumed the PREVIOUS state's shape, same as a fresh mount would.
+    setState(result.state);
+    setSelected(0);
+    setFieldsTab("step");
+    setWholeField("name");
+    setSim(null);
+    setImportOpen(false);
+    setImportDraft("");
+    setImportError(null);
+  }, [importDraft]);
+
+  const handleImportFile = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setImportDraft(reader.result);
+        setImportError(null);
+      } else {
+        setImportError("Could not read the selected file.");
+      }
+    };
+    reader.onerror = () => setImportError("Could not read the selected file.");
+    reader.readAsText(file);
+  }, []);
+
+  const closeImportPanel = useCallback(() => {
+    setImportOpen(false);
+    setImportDraft("");
+    setImportError(null);
+  }, []);
 
   // ── Schedule (reuse ScheduleStep via a synthesized BuilderState) ─────────────
   const scheduleHostState: BuilderState = {
@@ -823,27 +892,137 @@ export function ChainedBuilder({
 
                 {p.key === "raw" && (
                   <div style={{ ...panel, flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                    <div style={colTitle}>Raw cronoton JSON (read-only)</div>
-                    <pre
-                      style={{
-                        margin: 0,
-                        flex: 1,
-                        overflow: "auto",
-                        background: "var(--khr-inset)",
-                        border: "1px solid var(--khr-border)",
-                        borderRadius: "var(--khr-radius)",
-                        padding: 10,
-                        fontFamily: "var(--khr-mono-font)",
-                        fontSize: 12,
-                        color: "var(--khr-mono)",
-                        whiteSpace: "pre",
-                      }}
-                    >
-                      {codeText}
-                    </pre>
-                    <p style={{ fontSize: 10, color: "var(--khr-text-dim2)", marginTop: 6 }}>
-                      The form drives this live. Pasting your own raw code (unlock) is a follow-on.
-                    </p>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <div style={colTitle}>Raw cronoton JSON{importOpen ? " — import" : " (read-only)"}</div>
+                      <button
+                        type="button"
+                        onClick={() => (importOpen ? closeImportPanel() : setImportOpen(true))}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 10px",
+                          borderRadius: "var(--khr-radius)",
+                          border: "1px solid var(--khr-border)",
+                          background: importOpen ? "var(--khr-accent-tint)" : "transparent",
+                          color: importOpen ? "var(--khr-accent)" : "var(--khr-text-dim)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {importOpen ? "Close" : "Paste / import"}
+                      </button>
+                    </div>
+
+                    {importOpen ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
+                        <p style={{ fontSize: 10, color: "var(--khr-text-dim2)", margin: 0 }}>
+                          Paste a raw chained-cronoton JSON document, or upload a <code>.json</code> file, then
+                          Capture — this REPLACES the whole form below with what you load.
+                        </p>
+                        <label
+                          style={{
+                            fontSize: 11,
+                            color: "var(--khr-accent)",
+                            cursor: "pointer",
+                            alignSelf: "flex-start",
+                          }}
+                        >
+                          Upload .json file
+                          <input
+                            type="file"
+                            accept=".json,application/json"
+                            style={{ display: "none" }}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleImportFile(file);
+                              e.target.value = "";
+                            }}
+                          />
+                        </label>
+                        <textarea
+                          aria-label="Import JSON"
+                          value={importDraft}
+                          onChange={(e) => {
+                            setImportDraft(e.target.value);
+                            setImportError(null);
+                          }}
+                          spellCheck={false}
+                          placeholder='{ "name": "...", "steps": [ ... ] }'
+                          style={{
+                            flex: 1,
+                            minHeight: 120,
+                            resize: "none",
+                            background: "var(--khr-inset)",
+                            border: "1px solid var(--khr-border)",
+                            borderRadius: "var(--khr-radius)",
+                            padding: 10,
+                            fontFamily: "var(--khr-mono-font)",
+                            fontSize: 12,
+                            color: "var(--khr-text)",
+                          }}
+                        />
+                        {importError && (
+                          <p style={{ fontSize: 11, color: "var(--khr-error)", margin: 0, fontFamily: "var(--khr-mono-font)" }}>
+                            {importError}
+                          </p>
+                        )}
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            type="button"
+                            onClick={handleCaptureImport}
+                            disabled={importDraft.trim().length === 0}
+                            style={{
+                              fontSize: 12,
+                              padding: "6px 14px",
+                              borderRadius: "var(--khr-radius)",
+                              border: "1px solid var(--khr-accent)",
+                              background: "var(--khr-accent)",
+                              color: "var(--khr-bg)",
+                              cursor: importDraft.trim().length === 0 ? "default" : "pointer",
+                              opacity: importDraft.trim().length === 0 ? 0.5 : 1,
+                            }}
+                          >
+                            Capture &amp; parse
+                          </button>
+                          <button
+                            type="button"
+                            onClick={closeImportPanel}
+                            style={{
+                              fontSize: 12,
+                              padding: "6px 14px",
+                              borderRadius: "var(--khr-radius)",
+                              border: "1px solid var(--khr-border)",
+                              background: "transparent",
+                              color: "var(--khr-text-dim)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <pre
+                          style={{
+                            margin: 0,
+                            flex: 1,
+                            overflow: "auto",
+                            background: "var(--khr-inset)",
+                            border: "1px solid var(--khr-border)",
+                            borderRadius: "var(--khr-radius)",
+                            padding: 10,
+                            fontFamily: "var(--khr-mono-font)",
+                            fontSize: 12,
+                            color: "var(--khr-mono)",
+                            whiteSpace: "pre",
+                          }}
+                        >
+                          {codeText}
+                        </pre>
+                        <p style={{ fontSize: 10, color: "var(--khr-text-dim2)", marginTop: 6 }}>
+                          The form drives this live. Use "Paste / import" above to load your own raw JSON instead.
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
               </section>

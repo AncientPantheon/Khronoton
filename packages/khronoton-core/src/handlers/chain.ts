@@ -68,6 +68,11 @@ export interface ChainCommitBody {
   externalFireable?: boolean;
   /** Opt-in single-tx-first variant. */
   singleTxFirst?: ChainSingleTxFirst;
+  /**
+   * A chained cronoton needs at least one step — enforced identically at
+   * commit time by `server/pure/chained-validation.ts`'s `validateChain`.
+   * @minItems 1
+   */
   steps: ChainStepInput[];
 }
 

@@ -54,27 +54,36 @@ export type ScheduleMode =
 
 export type DailyAtUtcConfig = {
   mode: 'daily-at-utc';
+  /** UTC hour-of-day, one or more. @minimum 0 @maximum 23 */
   hours: number[];
+  /** @minimum 0 @maximum 59 */
   minute: number;
 };
 
 export type EveryNMinutesConfig = {
   mode: 'every-n-minutes';
   startDate: string;
+  /** @minimum 1 */
   intervalMinutes: number;
 };
 
 export type WeeklyConfig = {
   mode: 'weekly';
+  /** 0 (Sunday) through 6 (Saturday), one or more. @minimum 0 @maximum 6 */
   daysOfWeek: number[];
+  /** @minimum 0 @maximum 23 */
   hour: number;
+  /** @minimum 0 @maximum 59 */
   minute: number;
 };
 
 export type MonthlyConfig = {
   mode: 'monthly';
+  /** 1 through 31, one or more. @minimum 1 @maximum 31 */
   daysOfMonth: number[];
+  /** @minimum 0 @maximum 23 */
   hour: number;
+  /** @minimum 0 @maximum 59 */
   minute: number;
 };
 

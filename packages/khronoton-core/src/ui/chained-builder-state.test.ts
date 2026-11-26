@@ -14,6 +14,7 @@ import {
   clearVariantIfOrphaned,
   earlierYields,
   isSingleStepChain,
+  jsonToChainedBuilderState,
   KNOWN_PLANNERS,
   makeEmptyChainedBuilderState,
   makeEmptyStepState,
@@ -309,5 +310,216 @@ describe("isSingleStepChain — the commit-routing predicate (plain `adapter.com
     const state = makeEmptyChainedBuilderState();
     state.steps = [makeEmptyStepState("single"), makeEmptyStepState("single")];
     expect(isSingleStepChain(state)).toBe(false);
+  });
+});
+
+describe("jsonToChainedBuilderState — the inverse of chainedBuilderToCommit", () => {
+  function fixtureState(): ChainedBuilderState {
+    const base = makeEmptyChainedBuilderState();
+    const step1: StepState = {
+      ...makeEmptyStepState("single"),
+      pactCode: "(+ 1 2)",
+      yieldAs: "amount",
+      config: { chainId: "1", gasPriceBufferAnu: 5, gasLimit: 2000, autoGasLimit: false, ttl: 300 },
+      payload: { entries: [], keysets: [], rawMode: true, rawJson: '{"foo":"bar"}' },
+      gasPayer: { type: "gas-station", signingKey: "alice-key" },
+      signers: [
+        { id: "x", publicKey: "alice-pub", label: "Alice", source: "derived", capabilityMode: "pure", capabilities: "" },
+      ],
+    };
+    const step2: StepState = {
+      ...makeEmptyStepState("planner"),
+      plannerName: "ouronet.stoa-wrap",
+      plannerParamsJson: JSON.stringify({ amount: { $yield: "amount" } }),
+      idempotent: true,
+      config: { chainId: "1", gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: true, ttl: 600 },
+      gasPayer: { type: "codex", address: "k:bob-address" },
+      signers: [
+        { id: "y", publicKey: "bob-pub", label: "Bob", source: "foreign", capabilityMode: "scoped", capabilities: "(coin.GAS)" },
+      ],
+    };
+    const variant: StepState = {
+      ...makeEmptyStepState("single"),
+      pactCode: "(whole-chain-as-one-tx)",
+      gasPayer: { type: "gas-station", signingKey: "variant-key" },
+      signers: [
+        { id: "z", publicKey: "variant-pub", label: "", source: "derived", capabilityMode: "pure", capabilities: "" },
+      ],
+    };
+    return { ...base, name: "My Chain", description: "a test chain", singleTxVariant: variant, steps: [step1, step2] };
+  }
+
+  it("round-trips name/description/schedule through chainedBuilderToCommit -> JSON -> import", () => {
+    const original = fixtureState();
+    const text = JSON.stringify(chainedBuilderToCommit(original));
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.name).toBe("My Chain");
+    expect(result.state.description).toBe("a test chain");
+    expect(result.state.externalFireable).toBe(false);
+    expect(result.state.schedule).toEqual(original.schedule);
+  });
+
+  it("round-trips a 'single' step's pactCode/config/gasPayer/payload/yieldAs/idempotent", () => {
+    const original = fixtureState();
+    const text = JSON.stringify(chainedBuilderToCommit(original));
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [step1] = result.state.steps;
+    expect(step1.mode).toBe("single");
+    expect(step1.pactCode).toBe("(+ 1 2)");
+    expect(step1.yieldAs).toBe("amount");
+    expect(step1.idempotent).toBe(false);
+    expect(step1.config).toEqual({ chainId: "1", gasPriceBufferAnu: 5, gasLimit: 2000, autoGasLimit: false, ttl: 300 });
+    expect(step1.gasPayer).toEqual({ type: "gas-station", signingKey: "alice-key" });
+    // Payload round-trips structurally (re-pretty-printed text, not byte-identical).
+    expect(step1.payload.rawMode).toBe(true);
+    expect(JSON.parse(step1.payload.rawJson)).toEqual({ foo: "bar" });
+    // Signers round-trip the WIRE fields exactly; id/label/source are fresh
+    // ephemeral values (the forward direction already drops them), matching
+    // `detailToBuilderState`'s own established rehydration convention.
+    expect(step1.signers).toHaveLength(1);
+    expect(step1.signers[0].publicKey).toBe("alice-pub");
+    expect(step1.signers[0].capabilityMode).toBe("pure");
+    expect(step1.signers[0].capabilities).toBe("");
+    expect(step1.signers[0].label).toBe("");
+    expect(step1.signers[0].source).toBe("foreign");
+  });
+
+  it("round-trips a 'planner' step's plannerName/plannerParams/idempotent/gasPayer/signers", () => {
+    const original = fixtureState();
+    const text = JSON.stringify(chainedBuilderToCommit(original));
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [, step2] = result.state.steps;
+    expect(step2.mode).toBe("planner");
+    expect(step2.plannerName).toBe("ouronet.stoa-wrap");
+    expect(step2.idempotent).toBe(true);
+    expect(JSON.parse(step2.plannerParamsJson)).toEqual({ amount: { $yield: "amount" } });
+    expect(step2.gasPayer).toEqual({ type: "codex", address: "k:bob-address" });
+    expect(step2.signers).toHaveLength(1);
+    expect(step2.signers[0]).toMatchObject({ publicKey: "bob-pub", capabilityMode: "scoped", capabilities: "(coin.GAS)" });
+  });
+
+  it("round-trips the singleTxFirst variant into singleTxVariant", () => {
+    const original = fixtureState();
+    const text = JSON.stringify(chainedBuilderToCommit(original));
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.singleTxVariant).not.toBeNull();
+    const variant = result.state.singleTxVariant!;
+    expect(variant.mode).toBe("single");
+    expect(variant.pactCode).toBe("(whole-chain-as-one-tx)");
+    expect(variant.gasPayer).toEqual({ type: "gas-station", signingKey: "variant-key" });
+    expect(variant.signers).toHaveLength(1);
+    expect(variant.signers[0].publicKey).toBe("variant-pub");
+    // A variant has no plannerName/plannerParams/yieldAs/idempotent on the wire
+    // at all — these come through as the fresh-step defaults.
+    expect(variant.plannerName).toBe("");
+    expect(variant.plannerParamsJson).toBe("");
+    expect(variant.yieldAs).toBe("");
+    expect(variant.idempotent).toBe(false);
+  });
+
+  it("accepts a minimal doc, defaulting every omitted field to makeEmptyBuilderState's own defaults", () => {
+    const result = jsonToChainedBuilderState(JSON.stringify({ name: "Minimal", steps: [{ mode: "single" }] }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.name).toBe("Minimal");
+    expect(result.state.description).toBe("");
+    expect(result.state.externalFireable).toBe(false);
+    expect(result.state.singleTxVariant).toBeNull();
+    expect(result.state.steps).toHaveLength(1);
+    const [step] = result.state.steps;
+    expect(step.pactCode).toBe("");
+    expect(step.config).toEqual({ chainId: "0", gasPriceBufferAnu: 0, gasLimit: 1500, autoGasLimit: true, ttl: 600 });
+    expect(step.gasPayer).toEqual({ type: "gas-station" });
+    expect(step.signers).toEqual([]);
+    expect(JSON.parse(step.payload.rawJson)).toEqual({});
+  });
+
+  it("drops an individually malformed signer entry rather than failing the whole step", () => {
+    const result = jsonToChainedBuilderState(
+      JSON.stringify({
+        name: "X",
+        steps: [{ mode: "single", signers: [{}, { publicKey: "bob", capabilityMode: "pure", capabilities: "" }] }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.steps[0].signers).toHaveLength(1);
+    expect(result.state.steps[0].signers[0].publicKey).toBe("bob");
+  });
+
+  it("externalFireable:true wins over a stray schedule key present in the same doc", () => {
+    const result = jsonToChainedBuilderState(
+      JSON.stringify({
+        name: "X",
+        externalFireable: true,
+        schedule: { mode: "daily-at-utc", config: { mode: "daily-at-utc", hours: [1], minute: 0 } },
+        steps: [{ mode: "single" }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.externalFireable).toBe(true);
+    // The default schedule, not the stray hours:[1] one from the doc.
+    expect(result.state.schedule).toEqual(makeEmptyChainedBuilderState().schedule);
+  });
+
+  it("rejects invalid JSON syntax with a clear message, state untouched by the caller", () => {
+    const result = jsonToChainedBuilderState("{not valid json");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Invalid JSON/);
+  });
+
+  it.each([
+    ["[]", "[]"],
+    ["null", "null"],
+    ['"hello"', '"hello"'],
+    ["42", "42"],
+  ])("rejects a non-object top level (%s)", (_label, text) => {
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.toLowerCase()).toContain("object");
+  });
+
+  it.each([
+    ['{"name":"X"}', "missing steps"],
+    ['{"name":"X","steps":[]}', "empty steps"],
+    ['{"name":"X","steps":"nope"}', "non-array steps"],
+  ])("rejects %s using chained-validation.ts's own wording (%s)", (text) => {
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("a chained cronoton needs at least one step");
+  });
+
+  it("rejects an invalid step mode using chained-validation.ts's own wording", () => {
+    const result = jsonToChainedBuilderState(JSON.stringify({ name: "X", steps: [{ mode: "bogus" }] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("step 0: mode must be 'single' or 'planner'");
+  });
+
+  it("returns ok:false (never throws) when a step's payload is so deeply nested that re-serializing it would blow the call stack", () => {
+    // JSON.parse tolerates far deeper nesting than JSON.stringify's own
+    // recursive serializer, so a validly-parsed document can still blow the
+    // stack when toPayloadStateFromWire re-stringifies it for the raw-JSON
+    // pane. Built via string repeat (not JSON.stringify) since constructing
+    // the fixture itself must not hit the same recursion limit.
+    const depth = 50_000;
+    const deepArrayJson = "[".repeat(depth) + "]".repeat(depth);
+    const text = `{"name":"X","steps":[{"mode":"single","payload":{"deep":${deepArrayJson}}}]}`;
+    const result = jsonToChainedBuilderState(text);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/serialize/i);
   });
 });
