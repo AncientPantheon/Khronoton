@@ -260,6 +260,14 @@ export interface KhronotonAdapter {
    * {@link commitChain}.
    */
   simulateChain?(body: ChainCommitBody, opts?: ConfirmOpts): Promise<ChainSimulateView>;
+  /**
+   * Update an EXISTING chained cronoton in place (the `ChainedBuilder` edit-mode
+   * Save action — `editId` set, never `commitChain`). OPTIONAL, same as
+   * {@link commitChain}: an adapter whose backend has no chained-update route
+   * omits it and the builder's Save disables with a clear message rather than
+   * silently falling back to a create.
+   */
+  updateChain?(id: string, body: ChainCommitBody, opts?: ConfirmOpts): Promise<ChainCommitView>;
 }
 
 /** The 16 method names an object must carry to be a {@link KhronotonAdapter}. */

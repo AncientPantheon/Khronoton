@@ -20,11 +20,20 @@
  *
  * Commit routing: exactly ONE `single` step + no variant → `adapter.commit`
  * (a plain single cronoton, the "Step 0" case); otherwise → `adapter.commitChain`.
- * Whole-chain dry-run → `adapter.simulateChain`.
+ * Whole-chain dry-run → `adapter.simulateChain`. EDIT mode (`editId` set)
+ * overrides all of this: Save always goes through `adapter.updateChain`
+ * with the chain shape, regardless of step count or variant — the existing
+ * row was created through the chain store, so an edit must update through
+ * the same store regardless of how few steps it currently has.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
-import type { ChainSimulateView, CodexSignerDescriptor, CommitBody } from "../../handlers/index.js";
+import type {
+  ChainCommitBody,
+  ChainSimulateView,
+  CodexSignerDescriptor,
+  CommitBody,
+} from "../../handlers/index.js";
 import { useKhronotonAdapter, useKhronotonConfig } from "../../provider/context.js";
 import { runGated } from "../../provider/runGated.js";
 import { canMutate, type Access } from "../access.js";
@@ -185,6 +194,26 @@ export interface ChainedBuilderProps {
   onDone?: (id?: string) => void;
   robots?: string;
   /**
+   * Present → EDIT mode: Save calls `adapter.updateChain(editId, …)` in place
+   * (never `adapter.commit`/`adapter.commitChain`) and `onDone` is called with
+   * this id, not whatever the response echoes. Absent → create (unchanged).
+   * Mirrors the single-tx `Builder`'s own `editId` contract.
+   */
+  editId?: string;
+  /**
+   * The existing cronoton, as the SAME document shape `chainedBuilderToCommit`
+   * emits — read ONCE at mount to seed the builder (via the same Raw-JSON
+   * import logic the in-builder "Paste / import" affordance uses), ignored on
+   * any subsequent prop change. A host that needs to switch edit targets on an
+   * already-mounted instance should `key={editId}` the element to force a
+   * remount, rather than relying on this prop being reactive — re-seeding on
+   * every render where the host happens to pass a fresh (even if logically
+   * identical) object reference would silently discard in-progress edits.
+   * Only meaningful alongside `editId`; a parse failure renders a clear error
+   * instead of a blank editable form.
+   */
+  initialDocument?: ChainCommitBody;
+  /**
    * Per-pane width cap in pixels — above this a pane just wastes width on a
    * wide monitor, so it caps + the whole workspace centres instead. Default
    * `600`. Clamped to never be less than the resolved `paneMinWidth` (a
@@ -238,10 +267,25 @@ const paneStyle: CSSProperties = {
   gap: 12,
 };
 
+/** `JSON.stringify` has no depth cap of its own — a pathologically deep (but
+ *  otherwise valid) hand-typed raw-JSON payload/planner-params value can
+ *  overflow the call stack (see the 0.19.1 fix for `codeText`, the read-only
+ *  preview's own prior instance of exactly this). Shared by `codeText` AND
+ *  the edit-mode dirty check below, so there's one try/catch, not two. */
+function safeStringifyOrNull(value: unknown): string | null {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
 export function ChainedBuilder({
   access,
   onDone,
   robots = DEFAULT_CHAINED_BUILDER_ROBOTS,
+  editId,
+  initialDocument,
   paneMaxWidth = 600,
   paneMinWidth = 360,
   railWidth = 210,
@@ -250,7 +294,39 @@ export function ChainedBuilder({
   const config = useKhronotonConfig();
   const liveFloorAnu = useLiveGasFloor();
 
-  const [state, setState] = useState<ChainedBuilderState>(() => makeEmptyChainedBuilderState());
+  // Edit-mode seed: computed ONCE at mount (never re-run on a later prop
+  // change — see `initialDocument`'s own doc comment for why), reusing the
+  // SAME Raw-JSON import logic the in-builder "Paste / import" affordance
+  // uses, so an existing cronoton's document round-trips through the exact
+  // same parser a pasted document would. All three results (seeded state,
+  // any load error, the dirty-check baseline) come from ONE parse, not three.
+  const [{ initialState, loadError, baselineDocJson }] = useState<{
+    initialState: ChainedBuilderState;
+    loadError: string | null;
+    baselineDocJson: string | null;
+  }>(() => {
+    if (!initialDocument) {
+      return { initialState: makeEmptyChainedBuilderState(), loadError: null, baselineDocJson: null };
+    }
+    const result = jsonToChainedBuilderState(JSON.stringify(initialDocument));
+    if (!result.ok) {
+      return { initialState: makeEmptyChainedBuilderState(), loadError: result.error, baselineDocJson: null };
+    }
+    // The baseline is derived from the ROUND-TRIPPED state, never the raw
+    // `initialDocument` text — `jsonToChainedBuilderState` is deliberately
+    // LENIENT (e.g. a missing `description` defaults to `""`) and
+    // `chainedBuilderToCommit` always emits some fields the source document
+    // may have omitted (e.g. an explicit `payload: {}` on a single-mode
+    // step). Diffing against the raw prop would flag a freshly-loaded,
+    // UNTOUCHED cronoton as "dirty" purely from this round-trip
+    // normalization, not from anything the operator actually changed.
+    return {
+      initialState: result.state,
+      loadError: null,
+      baselineDocJson: safeStringifyOrNull(chainedBuilderToCommit(result.state)),
+    };
+  });
+  const [state, setState] = useState<ChainedBuilderState>(initialState);
   const [selected, setSelected] = useState<number>(0);
   const [signers, setSigners] = useState<CodexSignerDescriptor[]>([]);
   const [committing, setCommitting] = useState(false);
@@ -407,10 +483,32 @@ export function ChainedBuilder({
     };
   }, [adapter]);
 
+  const isEdit = Boolean(editId);
+  // An editId without a document yet (the host's own fetch still in flight,
+  // if it mounts eagerly rather than waiting) stays gated — the alternative
+  // is a confusingly blank CREATE-shaped form rendered under an "edit" label.
+  // A document that failed to parse (`loadError`) stays gated too, with a
+  // DISTINCT message below — never treated the same as "still loading."
+  const editReady = !isEdit || (Boolean(initialDocument) && loadError === null);
+
   // The commit-routing predicate + the single-cronoton body it routes to, both
   // needed up front: `codeText` (below) must preview whichever shape
-  // `handleCommit` will actually send, not always the chain shape.
+  // `handleCommit` will actually send, not always the chain shape. Edit mode
+  // ALWAYS uses the chain shape via `updateChain` regardless of this
+  // predicate — the existing row was created through the chain store (it has
+  // rows in `codex_cronoton_steps` already), so routing an edit through the
+  // single-tx `adapter.commit`/`edit` would target the wrong store entirely.
   const isSingleCronoton = isSingleStepChain(state);
+  // What `codeText` (the Raw JSON preview) and the header title should
+  // actually DISPLAY as — NOT the same as the raw `isSingleCronoton`
+  // predicate. In edit mode Save always sends the chain shape via
+  // `updateChain` regardless of step count (see `handleCommit`'s own `isEdit`
+  // branch, which never consults `isSingleCronoton`), so the preview/title
+  // must stay pinned to the chain shape in edit mode too — otherwise an
+  // operator editing a chain down to one step would be SHOWN a plain
+  // single-cronoton preview while a different (chain-shaped) document is
+  // what actually gets persisted on Save.
+  const previewAsSingle = !isEdit && isSingleCronoton;
 
   const singleCronotonBody = useCallback((): CommitBody => {
     const step = state.steps[0];
@@ -449,12 +547,43 @@ export function ChainedBuilder({
   // on — it must guard itself, or the whole component crashes on render
   // instead of the Raw JSON pane merely failing to preview.
   const codeText = useMemo(() => {
-    try {
-      return JSON.stringify(isSingleCronoton ? singleCronotonBody() : commitBody, null, 2);
-    } catch (e) {
-      return `Could not render the Raw JSON preview: ${errorMessage(e)}`;
-    }
-  }, [commitBody, isSingleCronoton, singleCronotonBody]);
+    const text = safeStringifyOrNull(previewAsSingle ? singleCronotonBody() : commitBody);
+    return text ?? "Could not render the Raw JSON preview: value is too deeply nested to serialize.";
+  }, [commitBody, previewAsSingle, singleCronotonBody]);
+  // Edit-mode dirty check: the CHAIN shape (never the single-cronoton shape —
+  // Save always diffs/sends the chain body regardless of `isSingleCronoton`)
+  // against the baseline captured once at mount. A stringify failure on
+  // EITHER side is treated as dirty ("can't prove it's clean" must never
+  // silently disable Save; only "can prove it's clean" may).
+  const commitBodyJson = useMemo(() => safeStringifyOrNull(commitBody), [commitBody]);
+  const isDirty = baselineDocJson === null || commitBodyJson === null || commitBodyJson !== baselineDocJson;
+
+  // The primary action's label/enable state — "Save changes" only enables
+  // once the commit gate passes AND the state has actually diverged from the
+  // loaded baseline (requirement: a strong, explicit Save, never implicitly
+  // armed on a no-op "edit"). `editReady` gates it too, defensively — the
+  // button is never rendered at all while `!editReady` (see the top-level
+  // return below), but keeping it in the disabled expression costs nothing
+  // and avoids a future refactor accidentally exposing it early.
+  const primaryLabel = committing
+    ? isEdit
+      ? "Saving…"
+      : "Creating…"
+    : isEdit
+      ? "Save changes"
+      : isSingleCronoton
+        ? "Create cronoton"
+        : "Create chained cronoton";
+  const primaryDisabled =
+    committing || !canMutate(access) || !gate.ok || (isEdit && (!editReady || !isDirty));
+  // Styling mirrors `primaryDisabled` (so the button visually reflects the
+  // dirty check too) ONLY in edit mode — the CREATE path's styling formula
+  // is left untouched byte-for-byte (`gate.ok` alone for colors; the
+  // `canMutate`-omitting `committing || !gate.ok` for cursor is a harmless
+  // pre-existing quirk this change does not touch), since create must behave
+  // identically whether or not this feature exists.
+  const primaryLooksEnabled = isEdit ? !primaryDisabled : gate.ok;
+  const primaryCursorEnabled = isEdit ? !primaryDisabled : !(committing || !gate.ok);
 
   // ── Mutations ────────────────────────────────────────────────────────────────
   const patchStep = useCallback(
@@ -508,7 +637,23 @@ export function ChainedBuilder({
   const handleCommit = useCallback(async () => {
     setCommitting(true);
     try {
-      if (isSingleCronoton) {
+      if (isEdit && editId) {
+        // Edit mode ALWAYS updates in place via the chain shape — never
+        // `adapter.commit`/`adapter.commitChain` (create), regardless of
+        // `isSingleCronoton`; see that predicate's own comment for why. Goes
+        // through the SAME `runGated`/`onNeedConfirm` path create uses — no
+        // new client confirm plumbing. `onDone` gets the KNOWN `editId`, not
+        // whatever the response echoes back — never ambiguous about which
+        // row was just saved.
+        if (!adapter.updateChain) {
+          window.alert("This backend does not support updating chained cronotons (no updateChain).");
+          return;
+        }
+        await runGated((opts) => adapter.updateChain!(editId, commitBody, opts), {
+          onNeedConfirm: config.onNeedConfirm,
+        });
+        onDone?.(editId);
+      } else if (isSingleCronoton) {
         const res = await runGated((opts) => adapter.commit(singleCronotonBody(), opts), {
           onNeedConfirm: config.onNeedConfirm,
         });
@@ -528,7 +673,7 @@ export function ChainedBuilder({
     } finally {
       setCommitting(false);
     }
-  }, [adapter, config.onNeedConfirm, isSingleCronoton, onDone, singleCronotonBody, state]);
+  }, [adapter, commitBody, config.onNeedConfirm, editId, isEdit, isSingleCronoton, onDone, singleCronotonBody, state]);
 
   // ── Simulate the whole chain ─────────────────────────────────────────────────
   const handleSimulate = useCallback(async () => {
@@ -624,14 +769,26 @@ export function ChainedBuilder({
       <meta name="robots" content={robots} />
       <style>{`@keyframes khr-attn-pulse{0%,100%{opacity:1}50%{opacity:.4}}.khr-attn{animation:khr-attn-pulse 1.1s ease-in-out infinite;color:var(--khr-amber)!important;}`}</style>
 
-      {/* Header: title only — all display controls now live on the control line. */}
+      {/* Header: title only — all display controls now live on the control line.
+          No `Builder.tsx`-style `EDIT_BANNER` block here (yet) — deliberately
+          out of scope for this pass, same as the design doc's "unsaved
+          changes?" confirm; the "Edit " title prefix is the one minimal,
+          unambiguous edit-mode signal this pass adds. */}
       <div style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>
-        {isSingleCronoton ? "Cronoton" : "Chained cronoton"} builder
+        {isEdit ? "Edit " : ""}
+        {previewAsSingle ? "Cronoton" : "Chained cronoton"} builder
       </div>
 
-      {/* The workspace fills the remaining height: left column (actions + gate +
+      {loadError ? (
+        <p style={{ color: "var(--khr-error)", padding: "1rem 0" }}>
+          Could not load this cronoton for editing: {loadError}
+        </p>
+      ) : !editReady ? (
+        <p style={{ color: "var(--khr-text-dim)", padding: "1rem 0" }}>Loading cronoton…</p>
+      ) : (
+      /* The workspace fills the remaining height: left column (actions + gate +
           step rail) + the panes. Both columns are height-bounded here, so the
-          rail and the panes scroll on their own instead of growing the page. */}
+          rail and the panes scroll on their own instead of growing the page. */
       <div
         data-testid="chained-builder-body"
         style={{ flex: 1, minHeight: 0, width: "100%", maxWidth: bodyMaxWidth, alignSelf: "center", display: "flex", gap: 14, alignItems: "stretch" }}
@@ -650,20 +807,20 @@ export function ChainedBuilder({
             <button
               type="button"
               onClick={() => void handleCommit()}
-              disabled={committing || !gate.ok || !canMutate(access)}
+              disabled={primaryDisabled}
               style={{
                 width: "100%",
                 padding: "9px 12px",
                 borderRadius: "var(--khr-radius)",
                 border: "1px solid var(--khr-accent)",
-                background: gate.ok ? "var(--khr-accent)" : "var(--khr-inset)",
-                color: gate.ok ? "var(--khr-bg)" : "var(--khr-text-dim)",
-                cursor: committing || !gate.ok ? "default" : "pointer",
+                background: primaryLooksEnabled ? "var(--khr-accent)" : "var(--khr-inset)",
+                color: primaryLooksEnabled ? "var(--khr-bg)" : "var(--khr-text-dim)",
+                cursor: primaryCursorEnabled ? "pointer" : "default",
                 fontSize: 13,
                 fontWeight: 600,
               }}
             >
-              {committing ? "Creating…" : isSingleCronoton ? "Create cronoton" : "Create chained cronoton"}
+              {primaryLabel}
             </button>
             <button
               type="button"
@@ -1109,6 +1266,7 @@ export function ChainedBuilder({
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

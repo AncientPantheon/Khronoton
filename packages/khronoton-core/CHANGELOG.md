@@ -4,6 +4,58 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.21.0 — 2026-11-27
+
+**MINOR — `ChainedBuilder` gains an EDIT MODE: editing an existing cronoton now opens the SAME builder used to create, pre-loaded, with an explicit "Save changes" that updates it in place — mirroring the single-tx `Builder`'s own `editId` precedent. Purely additive; the create path is unchanged when the new props are absent.**
+
+`ChainedBuilder` was uncontrolled + create-only: no `editId`/`initialState`, always seeded
+`makeEmptyChainedBuilderState()`, and Save always called `adapter.commitChain` (create). A host had
+no way to inject an existing cronoton's state or update it in place.
+
+- **`ChainedBuilderProps` gains `editId?: string` + `initialDocument?: ChainCommitBody`.** The
+  document is read ONCE at mount (reusing the SAME `jsonToChainedBuilderState` import logic the
+  in-builder "Paste / import" affordance already uses — an existing cronoton's chain-JSON projection
+  round-trips through the exact same parser a pasted document would), never re-seeded on a later
+  prop change. A host that needs to switch edit targets on an already-mounted instance should
+  `key={editId}` the element to force a remount — re-seeding reactively would risk silently
+  discarding in-progress edits on any render where the host passes a fresh (even logically
+  identical) object reference.
+- **`KhronotonAdapter` gains an optional `updateChain?(id, body, opts): Promise<ChainCommitView>`**,
+  same optionality convention as `commitChain?`/`simulateChain?` — a host whose backend has no
+  chained-update route omits it and Save disables with a clear message.
+- **Save, in edit mode:** labelled "Save changes", enabled only once the commit gate passes AND the
+  state has genuinely diverged from the loaded baseline (a dirty check — never implicitly armed on
+  a no-op load). Always sends the CHAIN shape via `updateChain`, regardless of step count — the
+  existing row was created through the chain store, so an edit must update through the same store
+  even if it's been edited down to a single step (routing it through the single-tx `adapter.commit`
+  would target the wrong store entirely). Goes through the exact same `runGated`/`onNeedConfirm`
+  path create already uses — a stale confirm re-prompts identically, no new client plumbing. `onDone`
+  receives the KNOWN `editId`, never whatever the response happens to echo.
+- **Gating:** `editId` set without `initialDocument` yet (a host that mounts eagerly rather than
+  waiting on its own fetch) renders a loading placeholder, never a blank CREATE-shaped form under an
+  "edit" label; a document that fails to parse renders a distinct, clear error.
+
+Reviewed via nectar (correctness/conventions/tests; security omitted — pure client-side React state
+wiring reusing existing gated call paths). Correctness affirmatively verified the owner's two hardest
+requirements hold — "no-save ⇒ no-update" (no code path calls any adapter mutation method outside the
+explicit Save click) and the password/fresh-confirm gate (the edit branch's `runGated` wiring is
+identical to create's) — and caught one real MEDIUM: the Raw JSON preview and header title both
+branched on the raw single-vs-chain predicate unconditionally, so editing a chain down to exactly one
+step would have SHOWN a single-cronoton preview while a different (chain-shaped) document was what
+actually got saved; fixed. Conventions found 3 MEDIUM + 1 LOW doc-comment gaps (a stale "Commit
+routing" summary; the `Builder.tsx` `EDIT_BANNER` precedent silently dropped with no scope note; the
+test file's own docblock not mentioning the new coverage) — all fixed. Tests found 3 HIGH + 3 MEDIUM
+coverage gaps: the round-trip test only checked step count/one Pact-code string, not
+config/gasPayer/signers; the "Save sends the exact body" test's own comment claimed "everything else
+survived untouched" while never asserting on config/gasPayer/signers; no test proved "no-save ⇒
+no-update" or the fresh-confirm retry directly for the new branch; no test proved the documented
+one-time-seed contract or edit mode composing correctly with the pre-existing Raw JSON import
+affordance — all closed with new/strengthened tests, each confirmed to fail against the pre-fix code
+first.
+
+**1592 specs pass** (14 new/strengthened across `ChainedBuilder.test.tsx`). `npx tsc --noEmit` clean;
+`npm run build` clean.
+
 ## 0.20.0 — 2026-11-26
 
 **MINOR — two `ChainedBuilder` layout refinements: fixes the Pact editor not filling its pane's height, and adds three optional, backward-compatible props letting an integrator control pane/rail sizing instead of three hard-coded constants.**

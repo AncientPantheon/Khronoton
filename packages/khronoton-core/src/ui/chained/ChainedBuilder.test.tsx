@@ -10,6 +10,12 @@
 // wires that predicate's result to the right adapter call, mounting a real
 // provider over a fake adapter exactly as `Builder.test.tsx` does for the
 // sibling single-tx screen.
+//
+// Also covers (see the dedicated describe blocks further down): the pane
+// sizing props, the Raw JSON pane's unlock/paste/import affordance, and EDIT
+// MODE (`editId`/`initialDocument` — seeding from an existing document, the
+// dirty check, Save routing to `adapter.updateChain`, and the loading/error
+// gating states).
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -62,10 +68,13 @@ Object.defineProperty(HTMLElement.prototype, "clientWidth", {
 
 import { KhronotonProvider } from "../../provider/KhronotonProvider.js";
 import type { KhronotonAdapter } from "../../provider/adapter.js";
+import { NeedsConfirmError } from "../../provider/adapter.js";
 import { KhronotonUiRoot } from "../KhronotonUiRoot.js";
 import { ChainedBuilder } from "./ChainedBuilder.js";
 import { builderToCommit, makeEmptyBuilderState } from "../builder-state.js";
+import { chainedBuilderToCommit, jsonToChainedBuilderState } from "../chained-builder-state.js";
 import type { Access } from "../access.js";
+import type { ChainCommitBody } from "../../handlers/index.js";
 
 // Full-suite runs (100+ files, heavy parallel load) occasionally need more
 // than testing-library's 1000ms waitFor default — this file mounts a
@@ -92,6 +101,58 @@ const DESCRIPTORS = [
   { publicKey: "k:alice", display: "derived" as const },
   { publicKey: "k:bob", display: "foreign" as const },
 ];
+
+/** A realistic multi-step chain-JSON document, modeled on the Hub's real
+ *  `StoicismRewardFlow.json` shape (name/description/schedule/singleTxFirst +
+ *  2 `single`-mode steps, one with `yieldAs`) — trimmed for test readability,
+ *  but the SAME document shape `chainedBuilderToCommit` emits and the edit
+ *  path's `initialDocument` prop is meant to round-trip. Used by the edit-mode
+ *  describe block below. */
+const STOICISM_FIXTURE: ChainCommitBody = {
+  name: "StoicismRewardFlow",
+  description: "Drain -> wrap -> inject -> evict",
+  schedule: { mode: "daily-at-utc", config: { mode: "daily-at-utc", hours: [18], minute: 0 } },
+  singleTxFirst: {
+    pactCode: "(DSP.AA_StoicismFullRewardFlow)",
+    config: { chainId: "0", gasPrice: 10000, gasPriceBufferAnu: 0, gasLimit: 600000, autoGasLimit: true, ttl: 600 },
+    gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+    signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+  },
+  steps: [
+    {
+      mode: "single",
+      yieldAs: "amount",
+      pactCode: "(DSP.A_StoicismRewardFlowStepOne)",
+      config: { chainId: "0", gasPrice: 10000, gasPriceBufferAnu: 0, gasLimit: 180000, autoGasLimit: true, ttl: 600 },
+      gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+      signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+    },
+    {
+      mode: "single",
+      pactCode: "(DSP.B_StoicismRewardFlowStepTwo amount)",
+      config: { chainId: "0", gasPrice: 10000, gasPriceBufferAnu: 0, gasLimit: 150000, autoGasLimit: true, ttl: 600 },
+      gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+      signers: [{ publicKey: "k:bob", capabilityMode: "pure", capabilities: "" }],
+    },
+  ],
+};
+
+/**
+ * What `jsonToChainedBuilderState` + `chainedBuilderToCommit` ACTUALLY
+ * produce when round-tripping `STOICISM_FIXTURE` untouched — the real
+ * normalized shape (e.g. a `single`-mode step always gets an explicit
+ * `payload: {}` the hand-written fixture above never bothered to include).
+ * Tests that want to assert "this part came through UNCHANGED" compare
+ * against this, not the raw fixture literal — comparing against the raw
+ * fixture would flag every one of these normalization-only differences as a
+ * false "something changed," for reasons having nothing to do with whether
+ * the component under test actually preserved anything.
+ */
+function roundTripStoicismFixture(): ChainCommitBody {
+  const result = jsonToChainedBuilderState(JSON.stringify(STOICISM_FIXTURE));
+  if (!result.ok) throw new Error(`STOICISM_FIXTURE itself failed to round-trip: ${result.error}`);
+  return chainedBuilderToCommit(result.state);
+}
 
 /** A complete adapter fake, same pattern as `Builder.test.tsx`'s `makeAdapter`
  *  (16 required methods, inert except the overridden ones). `commitChain` /
@@ -751,4 +812,327 @@ describe("ChainedBuilder — integrator-settable pane sizing props (paneMaxWidth
       cleanup();
     }
   });
+});
+
+describe("ChainedBuilder — edit mode (editId + initialDocument)", () => {
+  it(
+    "round-trips a realistic multi-step document: step rail shows 2 steps + the single-tx variant, and the selected step's Pact code/config/gasPayer/signers all match the fixture (not just the step count)",
+    async () => {
+      // The signing-key `<select>` only renders an `<option>` per descriptor
+      // (`GasPayerTab.tsx`'s `descriptorOption`, no defensive "current value"
+      // fallback option) — without "k:gasstation" in the descriptor list, a
+      // controlled `<select value="k:gasstation">` with no matching `<option>`
+      // would NOT reliably read back as "k:gasstation" via `.value`, for
+      // reasons unrelated to whether the round-trip itself is correct.
+      const adapter = makeAdapter({
+        signers: vi.fn(async () => ({
+          ok: true as const,
+          signers: [...DESCRIPTORS, { publicKey: "k:gasstation", display: "foreign" as const }],
+        })),
+      });
+      mount(adapter, { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+
+      expect(screen.getByText("Steps (2)")).toBeTruthy();
+      expect(screen.getByText("Step 1")).toBeTruthy();
+      expect(screen.getByText("Step 2")).toBeTruthy();
+      expect(screen.getByText("Step 0")).toBeTruthy(); // the single-tx variant row
+      expect(screen.getByText("set")).toBeTruthy(); // variant present (not "empty")
+
+      // Step 1 (index 0) is selected by default — its Pact code should match
+      // the fixture's first step verbatim, proving the conversion actually
+      // reached the per-step Pact code, not just the step COUNT.
+      expect((screen.getByLabelText("PACT code") as HTMLTextAreaElement).value).toBe(
+        "(DSP.A_StoicismRewardFlowStepOne)",
+      );
+
+      // Config: the fixture's step 1 gasLimit (180000) — proves the
+      // per-field config mapping (`toBuilderConfigFromWire`), not just that
+      // SOME config object exists.
+      fireEvent.click(screen.getByRole("button", { name: "Config" }));
+      expect((screen.getByLabelText("Gas Limit") as HTMLInputElement).value).toBe("180000");
+
+      // Gas payer: the fixture's gas-station signing key — proves
+      // `toGasPayerStateFromWire`, not just that SOME gas payer exists. Wait
+      // for the async `adapter.signers()` fetch to resolve (the descriptor
+      // list, including the extra "k:gasstation" entry above) before
+      // asserting on the select's value.
+      fireEvent.click(screen.getByRole("button", { name: "Gas Payer" }));
+      await screen.findByRole("option", { name: "k:gasstation" });
+      expect((screen.getByLabelText("Signing Key (DALOS.GAS_PAYER capability)") as HTMLSelectElement).value).toBe(
+        "k:gasstation",
+      );
+
+      // Signers: the fixture's step 1 signer public key — proves
+      // `toSignerRowsFromWire`, not just that SOME signers array exists.
+      fireEvent.click(screen.getByRole("button", { name: "Signatures" }));
+      expect(screen.getByLabelText("Remove signer k:alice")).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "Save is disabled on a freshly-loaded, untouched edit, and enables after changing exactly one field",
+    () => {
+      mount(makeAdapter(), { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+      expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", true);
+
+      setPactCode("(DSP.EDITED-step-one)");
+      expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", false);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "Save calls adapter.updateChain with editId + the current commit body (never commit/commitChain), and onDone fires with editId — not whatever the response echoes",
+    async () => {
+      const updateChain = vi.fn(async (_id: string, _body: unknown) => ({
+        ok: true as const,
+        codexCronotonId: "SOME_OTHER_ID_FROM_THE_SERVER", // deliberately NOT "cr_1"
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const commit = vi.fn(async () => ({ ok: true as const, codexCronotonId: "x", nextFireAt: null }));
+      const commitChain = vi.fn(async () => ({
+        ok: true as const,
+        codexCronotonId: "x",
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const onDone = vi.fn();
+      const adapter = makeAdapter({
+        updateChain: updateChain as unknown as KhronotonAdapter["updateChain"],
+        commit: commit as unknown as KhronotonAdapter["commit"],
+        commitChain: commitChain as unknown as KhronotonAdapter["commitChain"],
+      });
+      mount(adapter, { editId: "cr_1", initialDocument: STOICISM_FIXTURE, onDone });
+
+      setPactCode("(DSP.EDITED-step-one)");
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => expect(updateChain).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
+      expect(commit).not.toHaveBeenCalled();
+      expect(commitChain).not.toHaveBeenCalled();
+
+      const [calledId, calledBody] = updateChain.mock.calls[0] as [string, ChainCommitBody];
+      expect(calledId).toBe("cr_1");
+
+      // Everything else survived untouched — the "diff is exactly that
+      // field, nothing else" acceptance requirement. Compared against the
+      // REAL round-trip of the untouched fixture (`roundTripStoicismFixture`),
+      // not the raw fixture literal — so this catches a mangled config/
+      // gasPayer/signers on the untouched step/variant too, not just a
+      // mangled pactCode (which the string-only checks before this fix could
+      // never have caught: `toEqual` here covers the WHOLE object).
+      const expected = roundTripStoicismFixture();
+      expect(calledBody.steps[0]).toEqual({ ...expected.steps[0], pactCode: "(DSP.EDITED-step-one)" });
+      expect(calledBody.steps[1]).toEqual(expected.steps[1]);
+      expect(calledBody.singleTxFirst).toEqual(expected.singleTxFirst);
+      expect(calledBody.name).toBe(expected.name);
+      expect(calledBody.description).toBe(expected.description);
+      expect(calledBody.schedule).toEqual(expected.schedule);
+
+      await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_1"), ASYNC_TIMEOUT);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it("renders 'Save changes' (not a Create label) and 'Saving…' while committing", async () => {
+    let resolveUpdate: (() => void) | undefined;
+    const updateChain = vi.fn(
+      () =>
+        new Promise<{ ok: true; codexCronotonId: string; nextFireAt: null; stepIds: string[] }>((resolve) => {
+          resolveUpdate = () => resolve({ ok: true, codexCronotonId: "cr_1", nextFireAt: null, stepIds: [] });
+        }),
+    );
+    const adapter = makeAdapter({ updateChain: updateChain as unknown as KhronotonAdapter["updateChain"] });
+    mount(adapter, { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+
+    expect(screen.queryByRole("button", { name: /Create/ })).toBeNull();
+    setPactCode("(DSP.EDITED)");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy(), ASYNC_TIMEOUT);
+    resolveUpdate?.();
+  });
+
+  it("editId without initialDocument yet renders a loading placeholder, not the builder", () => {
+    mount(makeAdapter(), { editId: "cr_1" });
+    expect(screen.getByText(/Loading cronoton/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    expect(screen.queryByText(/Steps \(/)).toBeNull();
+  });
+
+  it("an initialDocument that fails to parse (empty steps) renders a distinct error, not the loading placeholder and not a blank editable form", () => {
+    const invalidDoc = { ...STOICISM_FIXTURE, steps: [] } as unknown as ChainCommitBody;
+    mount(makeAdapter(), { editId: "cr_1", initialDocument: invalidDoc });
+    expect(screen.queryByText(/Loading cronoton/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    // chained-validation's own wording for this exact hard-error case.
+    expect(screen.getByText(/needs at least one step/)).toBeTruthy();
+  });
+
+  it(
+    "no-save ⇒ no-update: editing fields without ever clicking Save never calls adapter.updateChain",
+    async () => {
+      const updateChain = vi.fn(async () => ({
+        ok: true as const,
+        codexCronotonId: "cr_1",
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const adapter = makeAdapter({ updateChain: updateChain as unknown as KhronotonAdapter["updateChain"] });
+      mount(adapter, { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+
+      // Edit several different things — Pact code, then switch tabs and
+      // toggle the whole-cronoton name — none of this may write anything.
+      setPactCode("(DSP.NEVER-SAVED)");
+      openWholeCronotonTab();
+      fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
+        target: { value: "Renamed but not saved" },
+      });
+
+      // Give any stray microtask/effect a chance to fire before asserting
+      // the negative — `waitFor`'s own polling window is exactly this kind
+      // of "nothing happened, and nothing happens later either" check.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(updateChain).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "a stale confirm (NeedsConfirmError) on updateChain re-prompts and retries exactly once — the SAME runGated path create already uses, now proven for the edit branch too",
+    async () => {
+      let calls = 0;
+      const updateChain = vi.fn(async (_id: string, _body: unknown, opts?: { confirmed?: boolean }) => {
+        calls += 1;
+        if (calls === 1) throw new NeedsConfirmError();
+        return { ok: true as const, codexCronotonId: "cr_1", nextFireAt: null, stepIds: [], _opts: opts };
+      });
+      const adapter = makeAdapter({ updateChain: updateChain as unknown as KhronotonAdapter["updateChain"] });
+      const onNeedConfirm = vi.fn(async () => true);
+      const onDone = vi.fn();
+
+      render(
+        <KhronotonProvider adapter={adapter} onNeedConfirm={onNeedConfirm}>
+          <KhronotonUiRoot>
+            <ChainedBuilder access={ADMIN} editId="cr_1" initialDocument={STOICISM_FIXTURE} onDone={onDone} />
+          </KhronotonUiRoot>
+        </KhronotonProvider>,
+      );
+
+      setPactCode("(DSP.EDITED-with-stale-confirm)");
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => expect(updateChain).toHaveBeenCalledTimes(2), ASYNC_TIMEOUT);
+      expect(onNeedConfirm).toHaveBeenCalledTimes(1);
+      expect(updateChain.mock.calls[1][2]).toMatchObject({ confirmed: true });
+      await waitFor(() => expect(onDone).toHaveBeenCalledWith("cr_1"), ASYNC_TIMEOUT);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it("switching editId/initialDocument on an ALREADY-MOUNTED instance does not re-seed — the documented one-time-seed contract", () => {
+    const SECOND_FIXTURE: ChainCommitBody = {
+      name: "SomeOtherCronoton",
+      steps: [{ mode: "single", pactCode: "(totally different)" }],
+    };
+    const { rerender } = mount(makeAdapter(), { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+
+    expect(screen.getByText("Steps (2)")).toBeTruthy();
+
+    rerender(
+      <KhronotonProvider adapter={makeAdapter()}>
+        <KhronotonUiRoot>
+          <ChainedBuilder access={ADMIN} editId="cr_2" initialDocument={SECOND_FIXTURE} />
+        </KhronotonUiRoot>
+      </KhronotonProvider>,
+    );
+
+    // Still showing the FIRST document's seed — a reactive re-seed would
+    // show "Steps (1)" and the second fixture's Pact code instead.
+    expect(screen.getByText("Steps (2)")).toBeTruthy();
+    expect((screen.getByLabelText("PACT code") as HTMLTextAreaElement).value).toBe(
+      "(DSP.A_StoicismRewardFlowStepOne)",
+    );
+  });
+
+  it(
+    "composes with Raw JSON Paste/import: importing a brand-new document while editing marks the form dirty and Save still routes to updateChain, never commitChain",
+    async () => {
+      const updateChain = vi.fn(async (_id: string, _body: unknown) => ({
+        ok: true as const,
+        codexCronotonId: "cr_1",
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const commitChain = vi.fn(async () => ({
+        ok: true as const,
+        codexCronotonId: "x",
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const adapter = makeAdapter({
+        updateChain: updateChain as unknown as KhronotonAdapter["updateChain"],
+        commitChain: commitChain as unknown as KhronotonAdapter["commitChain"],
+      });
+      mount(adapter, { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+
+      openRawJsonPane();
+      fireEvent.click(screen.getByRole("button", { name: "Paste / import" }));
+      fireEvent.change(screen.getByLabelText("Import JSON"), {
+        target: {
+          // Needs a real gasPayer + signer, not just a name/pactCode — the
+          // commit gate (`canCommitChain`) requires both for a `single` step
+          // to pass; a bare minimal doc would leave Save disabled regardless
+          // of dirtiness, for reasons unrelated to what THIS test checks.
+          value: JSON.stringify({
+            name: "Imported mid-edit",
+            steps: [
+              {
+                mode: "single",
+                pactCode: "(+ 1 1)",
+                gasPayer: { type: "gas-station", gasStationSignerKey: "k:alice" },
+                signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+              },
+            ],
+          }),
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Capture & parse" }));
+      await waitFor(() => expect(screen.queryByLabelText("Import JSON")).toBeNull(), ASYNC_TIMEOUT);
+
+      expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", false);
+
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(updateChain).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
+      expect(commitChain).not.toHaveBeenCalled();
+      expect(updateChain.mock.calls[0][0]).toBe("cr_1");
+      expect((updateChain.mock.calls[0][1] as ChainCommitBody).name).toBe("Imported mid-edit");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "the Raw JSON preview + header title reflect the CHAIN shape in edit mode even when the edited state has shrunk to a single step (never the single-cronoton shape Save does NOT send)",
+    () => {
+      // Regression: `codeText`/the header title used to branch on the raw
+      // `isSingleCronoton` predicate unconditionally — in edit mode, Save
+      // always sends the chain shape via `updateChain` regardless of step
+      // count, so an editor who removed a step down to exactly one would be
+      // SHOWN a plain single-cronoton preview/title while a DIFFERENT
+      // (chain-shaped) document is what actually gets persisted.
+      const SINGLE_STEP_EDIT_FIXTURE: ChainCommitBody = {
+        name: "AlreadyChainedButOneStepNow",
+        steps: [{ mode: "single", pactCode: "(+ 1 1)" }],
+      };
+      mount(makeAdapter(), { editId: "cr_1", initialDocument: SINGLE_STEP_EDIT_FIXTURE });
+
+      expect(screen.getByText(/Edit Chained cronoton builder/)).toBeTruthy();
+      expect(screen.queryByText(/Edit Cronoton builder/)).toBeNull();
+
+      openRawJsonPane();
+      expect(screen.getByText(/"steps"/)).toBeTruthy(); // the chain shape has a `steps` array
+    },
+    TEST_TIMEOUT,
+  );
 });
