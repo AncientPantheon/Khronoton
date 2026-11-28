@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-import { executeCodexTransaction, __clearCeilingCacheForTests } from "./executor.js";
+import { executeCodexTransaction, dirtyReadPlan, __clearCeilingCacheForTests } from "./executor.js";
 import type { ExecutorCtx } from "./executor.js";
 import type { ChainRuntime, ChainClient, KeyResolver } from "./seams.js";
 import { AUTO_GAS_CEILING } from "./seams.js";
@@ -1227,3 +1227,75 @@ describe("executeCodexTransaction — submit mode", () => {
     expect(listen).not.toHaveBeenCalled();
   });
 });
+
+describe(
+  "dirtyReadPlan — a PURE on-chain read, never through the preflight/gas-payer pipeline",
+  () => {
+    it(
+      "calls client.dirtyRead, never client.preflightRead — regression for the bug where a " +
+        "planner's plan read inherited the step's AUTO-gas config and got routed through " +
+        "preflightRead (which runs the full buy-gas pipeline, enforcing GAS_PAYER's payable- " +
+        "module whitelist on a PURE READ that never needed gas sponsorship at all)",
+      async () => {
+        dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
+
+        await dirtyReadPlan(mockRuntime, "0", "(some-module.READ (read-string \"x\"))", { x: "y" });
+
+        expect(dirtyRead).toHaveBeenCalledTimes(1);
+        expect(preflightRead).not.toHaveBeenCalled();
+      },
+    );
+
+    it("builds the transaction with ZERO signers — a pure read needs no gas-payer capability, no signature, no sponsorship", async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 1 } });
+
+      await dirtyReadPlan(mockRuntime, "0", "(coin.get-balance (read-string \"a\"))", { a: "k:x" });
+
+      expect(findCall("addSigner")).toBeUndefined();
+    });
+
+    it("never calls the resolver/sign machinery — universalSignTransaction is untouched", async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 1 } });
+
+      await dirtyReadPlan(mockRuntime, "0", "(coin.get-balance (read-string \"a\"))", { a: "k:x" });
+
+      expect(universalSignTransaction).not.toHaveBeenCalled();
+    });
+
+    it("passes every payload entry through addData, in the given key/value form", async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
+
+      await dirtyReadPlan(mockRuntime, "0", "(x.READ (read-string \"fvt-id\"))", { "fvt-id": "f1" });
+
+      const addDataCalls = builderCalls.filter((c) => c.method === "addData");
+      expect(addDataCalls).toHaveLength(1);
+      expect(addDataCalls[0].args).toEqual(["fvt-id", "f1"]);
+    });
+
+    it("resolves { ok: true, data } straight from the read result's own data field on success", async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: ["a", "b"] } });
+
+      const result = await dirtyReadPlan(mockRuntime, "0", "(x.READ)", {});
+
+      expect(result).toEqual({ ok: true, data: ["a", "b"] });
+    });
+
+    it("resolves { ok: false, error } on a failed read, never throwing", async () => {
+      dirtyRead.mockResolvedValueOnce({
+        result: { status: "failure", error: { message: "row not found" } },
+      });
+
+      const result = await dirtyReadPlan(mockRuntime, "0", "(x.READ)", {});
+
+      expect(result).toEqual({ ok: false, error: "row not found" });
+    });
+
+    it("uses the chain id's own URL (createClient(getPactUrl(chainId)))", async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 1 } });
+
+      await dirtyReadPlan(mockRuntime, "2", "(x.READ)", {});
+
+      expect(getPactUrl).toHaveBeenCalledWith("2");
+    });
+  },
+);

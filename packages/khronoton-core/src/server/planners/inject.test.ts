@@ -110,12 +110,14 @@ describe("injectPlanner", () => {
     const { legs } = normalizePlannerResult(await injectPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
-    // The FULL namespaced pact code — `ouronet-ns.AQP-FVT`, built from
-    // `ctx.runtime.namespace`, never hardcoded — with every value read back
+    // The FULL pact code — routed through `ouronet-ns.TS02-C3` (Talos),
+    // built from `ctx.runtime.namespace`, never a direct `ouronet-ns.AQP-FVT`
+    // call (see inject.ts's own doc comment / docs/work/
+    // aqp-planners-talos-routing/design.md) — with every value read back
     // from `payload` (env-data), never string-concatenated into the Pact
     // source itself.
     expect(legs[0].pactCode).toBe(
-      '(ouronet-ns.AQP-FVT.CC_InjectFinalize (read-string "patron") (read-string "executor") ' +
+      '(ouronet-ns.TS02-C3.AQP-FVT|CC_InjectFinalize (read-string "patron") (read-string "executor") ' +
         '(read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))',
     );
     expect(legs[0].payload).toEqual({
@@ -142,7 +144,7 @@ describe("injectPlanner", () => {
     // entrypoint with its own argument list that deserves its own exact
     // assertion, not just "not the other one."
     expect(legs[0].pactCode).toBe(
-      '(ouronet-ns.AQP-FVT.CC_Inject (read-string "patron") (read-string "executor") ' +
+      '(ouronet-ns.TS02-C3.AQP-FVT|CC_Inject (read-string "patron") (read-string "executor") ' +
         '(read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))',
     );
     expect(legs[0].payload).toEqual({
@@ -295,5 +297,15 @@ describe("injectPlanner", () => {
 
     await expect(injectPlanner(step, makeCtx())).rejects.toThrow(/executor/);
     expect(dirtyRead).not.toHaveBeenCalled();
+  });
+
+  it("both candidate legs route through Talos (TS02-C3), never the core AQP-FVT module directly", async () => {
+    dirtyRead.mockResolvedValueOnce({ result: { status: "success" } }); // finalize succeeds
+
+    const { legs } = normalizePlannerResult(await injectPlanner(makeStepRow(), makeCtx()));
+
+    expect(legs).toHaveLength(1);
+    expect(legs[0].pactCode).toContain("ouronet-ns.TS02-C3.AQP-FVT|CC_InjectFinalize");
+    expect(legs[0].pactCode).not.toContain("ouronet-ns.AQP-FVT.CC_InjectFinalize");
   });
 });

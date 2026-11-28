@@ -16,6 +16,20 @@
  * when the second failure is specifically a gas refusal, so a caller can
  * react by inserting an `ouronet.aqp-unstall` step (see
  * `docs/work/inject-executor-fix/design.md`).
+ *
+ * Talos routing (docs/work/aqp-planners-talos-routing/design.md): BOTH
+ * candidate legs call `AQP-FVT` core entrypoints directly today, which fails
+ * BOTH of Ouronet's client-call gates (no calling module on a direct exec,
+ * and the exec code's prefix is absent from `GAS_PAYER`'s payable-module
+ * whitelist). `TS02-C3` (Talos) is the only client-reachable path, so both
+ * route through it — `AQP-FVT|CC_Inject`/`AQP-FVT|CC_InjectFinalize`, with the
+ * `|` part of the literal function name, not a namespace separator.
+ * Signatures are identical; this is a path change only. There is no plan
+ * read here to also fix (unlike `unstall.ts`/`evict.ts`): both candidate legs
+ * below are REAL future write transactions being simulated to decide which
+ * one to submit, which correctly stays on `executeCodexTransaction`/
+ * `preflightRead` — they genuinely need gas-sponsorship measurement, unlike
+ * a pure on-chain plan read.
  */
 import { executeCodexTransaction } from "../executor.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
@@ -166,15 +180,13 @@ export const injectPlanner: StepPlanner = async (
 
   const executorCtx = { runtime: ctx.runtime, resolver: ctx.resolver, config: ctx.config };
 
-  // `ouronet-ns.AQP-FVT` — the module's REAL, deployed, namespaced path
-  // (confirmed against the ported source's own `fvtOwnerSpecs.tsx`/
-  // `aqpConsumerSpecs.tsx` entrypoint strings and `05_FVT.pact`'s own
-  // `(namespace "ouronet-ns")` declaration; a bare `AQP-FVT.*` reference is
-  // unresolvable by Pact's namespace mechanism). Built from
-  // `ctx.runtime.namespace`, never hardcoded, so a consumer on a different
-  // namespace isn't silently wrong. NOTE: this is a DIFFERENT module than
-  // `evictPlanner`'s own `AQP-EVCT`.
-  const fvt = `${ctx.runtime.namespace}.AQP-FVT`;
+  // `ouronet-ns.TS02-C3` — Talos, the one client-reachable path into the core
+  // `AQP-FVT` entrypoints (see this module's own doc comment above for why a
+  // direct `AQP-FVT.*` exec fails both of Ouronet's client-call gates). Built
+  // from `ctx.runtime.namespace`, never hardcoded, so a consumer on a
+  // different namespace isn't silently wrong. NOTE: `evictPlanner` routes
+  // through the SAME `TS02-C3` module, just with `AQP-EVCT|`-prefixed members.
+  const talos = `${ctx.runtime.namespace}.TS02-C3`;
 
   // Every value below flows through `payload` (env-data, `addData` per
   // `executor.ts`'s `buildTransaction`) and is read back with
@@ -192,7 +204,7 @@ export const injectPlanner: StepPlanner = async (
   };
 
   const finalizeLeg: PlannedLeg = {
-    pactCode: `(${fvt}.CC_InjectFinalize (read-string "patron") (read-string "executor") (read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))`,
+    pactCode: `(${talos}.AQP-FVT|CC_InjectFinalize (read-string "patron") (read-string "executor") (read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))`,
     config,
     payload,
     gasPayer,
@@ -204,7 +216,7 @@ export const injectPlanner: StepPlanner = async (
   }
 
   const injectLeg: PlannedLeg = {
-    pactCode: `(${fvt}.CC_Inject (read-string "patron") (read-string "executor") (read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))`,
+    pactCode: `(${talos}.AQP-FVT|CC_Inject (read-string "patron") (read-string "executor") (read-string "fvt-id") (read-string "reward-dptf-id") (read-decimal "amount"))`,
     config,
     payload,
     gasPayer,

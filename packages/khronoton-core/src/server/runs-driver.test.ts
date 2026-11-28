@@ -700,10 +700,13 @@ describe("driveRunOnce — end-to-end with the real registered ouronet.aqp-evict
         "reward-dptf-id": plan[i].rewardDptfId,
       });
     });
-    // 5, not 3: the planner's own two `simulate` probes (plan-read,
-    // full-evict) each sign too, on top of the 3 real `submit`-mode signs —
-    // only `client.submit` itself (the actual chain broadcast) is 3.
-    expect(universalSignTransaction).toHaveBeenCalledTimes(5);
+    // 4, not 3: the planner's own `full-evict` simulate probe signs too, on
+    // top of the 3 real `submit`-mode signs — only `client.submit` itself
+    // (the actual chain broadcast) is 3. The plan-read (`URHC_BuildEvictPlans`)
+    // does NOT sign at all anymore: it goes through `dirtyReadPlan` (an
+    // unsigned, zero-signer `dirtyRead`), not `executeCodexTransaction`/
+    // `signTransaction` — see docs/work/aqp-planners-talos-routing/design.md.
+    expect(universalSignTransaction).toHaveBeenCalledTimes(4);
     expect(submit).toHaveBeenCalledTimes(3);
 
     // Poll all three as landed, then one more pass clears the barrier —

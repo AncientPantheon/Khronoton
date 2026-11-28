@@ -11,8 +11,18 @@
  * separately). `CCp_FvtFixSlice` is the parallel-safe, order-independent
  * repair entrypoint `FVT_FIX_SLICE` names — disjoint slices of stale users can
  * be sent together, which is exactly what `splitPlan`'s batches are.
+ *
+ * Talos routing + read-vs-write split (docs/work/aqp-planners-talos-routing/
+ * design.md): a direct `AQP-FVT.CCp_FvtFixSlice` exec fails BOTH of Ouronet's
+ * client-call gates (no calling module, and the exec code's prefix is absent
+ * from `GAS_PAYER`'s payable-module whitelist) — Talos (`TS02-C3`) is the
+ * only client-reachable path, so every WRITE leg routes through it. The plan
+ * READ stays on `AQP-FVT` directly (Talos has no reader), but executes via
+ * `dirtyReadPlan` — an unsigned, zero-signer `dirtyRead`, never the step's own
+ * AUTO-gas-eligible `executeCodexTransaction`/`preflightRead` path, which
+ * would otherwise run the full buy-gas pipeline on a pure read for no reason.
  */
-import { executeCodexTransaction } from "../executor.js";
+import { executeCodexTransaction, dirtyReadPlan } from "../executor.js";
 import { AUTO_GAS_CEILING } from "../seams.js";
 import { splitPlan, type ProbeOutcome } from "../pure/split-plan.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
@@ -88,29 +98,45 @@ export const unstallPlanner: StepPlanner = async (
 
   const executorCtx = { runtime: ctx.runtime, resolver: ctx.resolver, config: ctx.config };
 
-  // `ouronet-ns.AQP-FVT` — the module's REAL, deployed, namespaced path
+  // `ouronet-ns.AQP-FVT` — the CORE module's REAL, deployed, namespaced path
   // (confirmed against the ported source's own `fvtOwnerSpecs.tsx`
   // `FVT_FIX_SLICE`/`URH_FvtStalePresentUsers` entrypoint strings and
-  // `05_FVT.pact`'s own `(namespace "ouronet-ns")` declaration; a bare
-  // `AQP-FVT.*` reference is unresolvable by Pact's namespace mechanism).
-  // Built from `ctx.runtime.namespace`, never hardcoded, so a consumer on a
-  // different namespace isn't silently wrong. The SAME module `injectPlanner`
-  // targets — the two planners are a two-step sequence against one contract.
+  // `05_FVT.pact`'s own `(namespace "ouronet-ns")` declaration). Used ONLY for
+  // the plan READ below (`URH_FvtStalePresentUsers`) — Talos exposes client
+  // WRITE entrypoints only, by design, so there is no reader to route a read
+  // through (see docs/work/aqp-planners-talos-routing/design.md). The SAME
+  // module `injectPlanner` reads/writes — the two planners are a two-step
+  // sequence against one contract.
   const fvt = `${ctx.runtime.namespace}.AQP-FVT`;
 
-  const staleReadDefinition: PlannedLeg = {
-    pactCode: `(${fvt}.URH_FvtStalePresentUsers (read-string "fvt-id"))`,
-    config,
-    payload: { "fvt-id": fvtId },
-    gasPayer,
-    signers,
-  };
-  const staleReadResult = await executeCodexTransaction(staleReadDefinition, "simulate", executorCtx);
+  // The WRITE leg below (`CCp_FvtFixSlice`) does NOT call `AQP-FVT` directly —
+  // Ouronet's architecture refuses that two separate ways: the core entrypoint
+  // opens with `(P|UEV_IMC)` (an inter-module call gate with no calling module
+  // on a direct exec), and even if that passed, `DALOS.GAS_PAYER`'s payable-
+  // module whitelist only matches a `"(ouronet-ns.TS"` prefix, never
+  // `"(ouronet-ns.AQP-FVT."` — `AQP-FVT.*` can only ever fail to buy gas.
+  // `TS02-C3` is Talos, the one client-reachable path OuronetUI's own
+  // `fvtOwnerSpecs.tsx:328` already uses (`"TS02-C3.AQP-FVT|CCp_FvtFixSlice"`).
+  // The `|` is part of the literal function name, NOT a namespace separator —
+  // `AQP-FVT|CCp_FvtFixSlice` is one identifier on `TS02-C3`, not qualified
+  // access into `AQP-FVT`. Signatures are identical; this is a path change only.
+  const talos = `${ctx.runtime.namespace}.TS02-C3`;
+
+  // A PURE read, never through `executeCodexTransaction`/`preflightRead` — see
+  // `dirtyReadPlan`'s own doc for why a plan read must never inherit the
+  // step's AUTO-gas config (it would otherwise run the full buy-gas pipeline,
+  // enforcing `GAS_PAYER`'s whitelist on a read that needs no sponsorship).
+  const staleReadResult = await dirtyReadPlan(
+    ctx.runtime,
+    config.chainId,
+    `(${fvt}.URH_FvtStalePresentUsers (read-string "fvt-id"))`,
+    { "fvt-id": fvtId },
+  );
   if (!staleReadResult.ok) {
     throw new Error(staleReadResult.error ?? "URH_FvtStalePresentUsers read failed");
   }
 
-  const data = (staleReadResult.rawResult as { data?: unknown } | undefined)?.data;
+  const data = staleReadResult.data;
   if (!Array.isArray(data) || !data.every((s) => typeof s === "string")) {
     throw new Error(
       "ouronet.aqp-unstall: URH_FvtStalePresentUsers returned a non-array-of-strings result",
@@ -130,7 +156,7 @@ export const unstallPlanner: StepPlanner = async (
   // `(read-msg "users")` — env-data's generic JSON-value reader, since
   // `read-string`/`read-integer` are scalar-only; `addData` already
   // serializes array values as-is per `executor.ts`'s `buildTransaction`.
-  const fixSlicePactCode = `(${fvt}.CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") (read-string "reward-dptf-id") (read-msg "users"))`;
+  const fixSlicePactCode = `(${talos}.AQP-FVT|CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") (read-string "reward-dptf-id") (read-msg "users"))`;
 
   const probe = async (batch: readonly string[]): Promise<ProbeOutcome> => {
     const leg: PlannedLeg = {

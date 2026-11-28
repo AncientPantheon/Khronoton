@@ -18,6 +18,7 @@ const PUB_A = "aa".repeat(32);
 
 // ── mock ChainRuntime (modeled on evict.test.ts's own fixtures) ────────────
 const dirtyRead = vi.fn();
+const preflightRead = vi.fn();
 let currentClient: ChainClient;
 const createClient = vi.fn((..._a: unknown[]) => currentClient);
 const universalSignTransaction = vi.fn();
@@ -92,7 +93,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
 
 beforeEach(() => {
   vi.clearAllMocks();
-  currentClient = { dirtyRead, submit: vi.fn(), listen: vi.fn() };
+  currentClient = { dirtyRead, preflightRead, submit: vi.fn(), listen: vi.fn() };
   universalSignTransaction.mockResolvedValue({ cmd: "{}", hash: "SIGNED-HASH", sigs: [{ sig: "x" }] });
   isSignedTransaction.mockReturnValue(true);
   getKeyPairByPublicKey.mockResolvedValue({ publicKey: PUB_A, privateKey: "deadbeef", seedType: "koala" });
@@ -119,7 +120,7 @@ describe("unstallPlanner", () => {
 
     expect(legs).toHaveLength(1);
     expect(legs[0].pactCode).toBe(
-      '(ouronet-ns.AQP-FVT.CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") (read-string "reward-dptf-id") (read-msg "users"))',
+      '(ouronet-ns.TS02-C3.AQP-FVT|CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") (read-string "reward-dptf-id") (read-msg "users"))',
     );
     expect(legs[0].payload).toEqual({
       patron: "k:patron",
@@ -155,7 +156,7 @@ describe("unstallPlanner", () => {
     expect(legs).toHaveLength(3);
     expect(legs.map((l) => (l.payload.users as string[]).length)).toEqual([34, 33, 33]);
     const expectedPactCode =
-      '(ouronet-ns.AQP-FVT.CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") ' +
+      '(ouronet-ns.TS02-C3.AQP-FVT|CCp_FvtFixSlice (read-string "patron") (read-string "fvt-id") ' +
       '(read-string "reward-dptf-id") (read-msg "users"))';
     const seen = new Set<string>();
     for (const leg of legs) {
@@ -183,5 +184,35 @@ describe("unstallPlanner", () => {
     });
 
     await expect(unstallPlanner(makeStepRow(), makeCtx())).rejects.toThrow(/some other real Pact error/);
+  });
+
+  it(
+    "the stale-user plan read NEVER calls preflightRead, even when the step's own config is AUTO gas — regression for the bug where a plan read inherited the step's autoGasLimit and got routed through the full buy-gas pipeline, enforcing GAS_PAYER's payable-module whitelist on a pure read",
+    async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
+
+      await unstallPlanner(
+        makeStepRow({
+          config_json: JSON.stringify({ chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: true, ttl: 600 }),
+        }),
+        makeCtx(),
+      );
+
+      expect(dirtyRead).toHaveBeenCalledTimes(1);
+      expect(preflightRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the WRITE leg routes through Talos (TS02-C3), never the core AQP-FVT module directly", async () => {
+    const users = ["k:u1"];
+    dirtyRead
+      .mockResolvedValueOnce({ result: { status: "success", data: users } })
+      .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 1_000 });
+
+    const { legs } = normalizePlannerResult(await unstallPlanner(makeStepRow(), makeCtx()));
+
+    expect(legs).toHaveLength(1);
+    expect(legs[0].pactCode).toContain("ouronet-ns.TS02-C3.AQP-FVT|CCp_FvtFixSlice");
+    expect(legs[0].pactCode).not.toContain("ouronet-ns.AQP-FVT.CCp_FvtFixSlice");
   });
 });

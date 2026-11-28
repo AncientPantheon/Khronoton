@@ -24,6 +24,7 @@ const PUB_GASSTATION = "bb".repeat(32);
 
 // ── mock ChainRuntime (modeled on evict.test.ts's own fixtures) ────────────
 const dirtyRead = vi.fn();
+const preflightRead = vi.fn();
 let currentClient: ChainClient;
 const createClient = vi.fn((..._a: unknown[]) => currentClient);
 const universalSignTransaction = vi.fn();
@@ -98,7 +99,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
 
 beforeEach(() => {
   vi.clearAllMocks();
-  currentClient = { dirtyRead, submit: vi.fn(), listen: vi.fn() };
+  currentClient = { dirtyRead, preflightRead, submit: vi.fn(), listen: vi.fn() };
   universalSignTransaction.mockResolvedValue({ cmd: "{}", hash: "SIGNED-HASH", sigs: [{ sig: "x" }] });
   isSignedTransaction.mockReturnValue(true);
   getKeyPairByPublicKey.mockResolvedValue({ publicKey: PUB_A, privateKey: "deadbeef", seedType: "koala" });
@@ -355,4 +356,21 @@ describe("stoaWrapPlanner", () => {
     expect(result).toHaveProperty("yield", "5.0");
     expect(result.legs[0].payload.amount).toBe(result.yield);
   });
+
+  it(
+    "the coin.get-balance plan read NEVER calls preflightRead, even when the step's own config is AUTO gas — regression for the bug where a plan read inherited the step's autoGasLimit and got routed through the full buy-gas pipeline, enforcing GAS_PAYER's payable-module whitelist on a pure read",
+    async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: 5 } });
+
+      await stoaWrapPlanner(
+        makeStepRow({
+          config_json: JSON.stringify({ chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: true, ttl: 600 }),
+        }),
+        makeCtx(),
+      );
+
+      expect(dirtyRead).toHaveBeenCalledTimes(1);
+      expect(preflightRead).not.toHaveBeenCalled();
+    },
+  );
 });

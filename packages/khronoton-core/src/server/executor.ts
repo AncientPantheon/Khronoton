@@ -788,3 +788,53 @@ export async function executeCodexTransaction(
     };
   }
 }
+
+/** The outcome of {@link dirtyReadPlan} — never a throw on a chain-side read failure. */
+export type DirtyReadPlanResult = { ok: true; data: unknown } | { ok: false; error: string };
+
+/**
+ * Execute a PURE on-chain read as an unsigned, zero-signer `ChainRuntime.dirtyRead`
+ * — never through {@link executeCodexTransaction}'s simulate path, and never
+ * `preflightRead`.
+ *
+ * Why this exists (see `docs/work/aqp-planners-talos-routing/design.md`): every
+ * AQP step planner's "plan read" (e.g. `URH_FvtStalePresentUsers`,
+ * `URHC_BuildEvictPlans`, a live `coin.get-balance` probe) used to go through
+ * `executeCodexTransaction(leg, "simulate", ctx)`, inheriting the STEP's own
+ * `autoGasLimit` config verbatim. Under AUTO gas, `runSimulate` calls
+ * `client.preflightRead(tx)` — Kadena's `/local` preflight mode runs the FULL
+ * submission pipeline, including the coin contract's `buy-gas`/`redeem-gas`,
+ * which enforces `GAS_PAYER`'s payable-module whitelist even though nothing is
+ * actually being submitted. A pure read has no business triggering a gas-buy
+ * check at all; switching the step to MANUAL gas doesn't fix this properly
+ * either — it happens to land on `dirtyRead` today only as a side effect of
+ * `runSimulate`'s own AUTO/MANUAL branch, not because anything here actually
+ * decided a read should never consult the gas station.
+ *
+ * Builds the bare minimum transaction — `Pact.builder.execution(pactCode)` +
+ * `setMeta({chainId})` + `setNetworkId` + an `addData` loop over `payload` —
+ * with NO signer, NO gas meta, NO gas payer at all (mirrors `tx-size.ts`'s own
+ * `estimateTxSize`, which already proves the SDK's builder accepts a
+ * zero-signer `createTransaction()` for an unrelated purpose). `dirtyRead` never
+ * runs `buy-gas`/`redeem-gas`, so a read built and executed this way can never
+ * hit the payable-module gate, regardless of the caller's own gas mode.
+ */
+export async function dirtyReadPlan(
+  runtime: ChainRuntime,
+  chainId: string,
+  pactCode: string,
+  payload: Record<string, unknown>,
+): Promise<DirtyReadPlanResult> {
+  const builder = runtime.Pact.builder.execution(pactCode) as PactBuilder;
+  builder.setMeta({ chainId }).setNetworkId(runtime.networkId);
+  for (const [key, value] of Object.entries(payload)) {
+    builder.addData(key, value);
+  }
+  const tx = builder.createTransaction();
+  const client = runtime.createClient(runtime.getPactUrl(chainId));
+  const read = await client.dirtyRead(tx);
+  if (read.result.status === "failure") {
+    return { ok: false, error: read.result.error?.message ?? "dirty read failed" };
+  }
+  return { ok: true, data: read.result.data };
+}

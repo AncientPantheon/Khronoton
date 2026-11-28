@@ -9,20 +9,24 @@
  * Shape: always exactly one leg. Unlike `stoa-wrap.ts` (whose `amount` is a
  * LIVE balance read), this planner's `amount` is an explicit, validated
  * `planner_params_json` param — no confirmed "unwrap the full balance"
- * semantic exists yet (design.md §B). Two `dirtyRead`s resolve whether the
- * target StoaChain account needs creating before the real
- * `LQD|C_UnwrapStoa` call is built: `DALOS.UR_AccountKadena` resolves the
- * target address, then `coin.get-balance` (wrapped in `try false`, bare
- * `coin`, no namespace prefix — `coin` is Kadena's own root/system module,
- * confirmed against OuronetUI's own bare `coin.get-balance`/`coin.TRANSFER`
- * calls, unlike `ouronet-ns`-namespaced modules such as `TS01-C2`/`DALOS`)
- * probes whether it already exists. When it doesn't, `coin.C_CreateAccount`
- * is composed as a second top-level form ahead of the unwrap call in one
- * `pactCode` string (two env-data-only forms joined by a newline — a real,
- * independently-rendered-forms mechanism per OuronetUI's own registry, not
+ * semantic exists yet (design.md §B). Two {@link dirtyReadPlan} calls (an
+ * unsigned, zero-signer `dirtyRead` — see that helper's own doc,
+ * docs/work/aqp-planners-talos-routing/design.md, for why a pure read must
+ * never go through `executeCodexTransaction`'s AUTO-gas-eligible
+ * `preflightRead` path) resolve whether the target StoaChain account needs
+ * creating before the real `LQD|C_UnwrapStoa` call is built:
+ * `DALOS.UR_AccountKadena` resolves the target address, then
+ * `coin.get-balance` (wrapped in `try false`, bare `coin`, no namespace
+ * prefix — `coin` is Kadena's own root/system module, confirmed against
+ * OuronetUI's own bare `coin.get-balance`/`coin.TRANSFER` calls, unlike
+ * `ouronet-ns`-namespaced modules such as `TS01-C2`/`DALOS`) probes whether
+ * it already exists. When it doesn't, `coin.C_CreateAccount` is composed as
+ * a second top-level form ahead of the unwrap call in one `pactCode` string
+ * (two env-data-only forms joined by a newline — a real, independently-
+ * rendered-forms mechanism per OuronetUI's own registry, not
  * string-splicing of untrusted text).
  */
-import { executeCodexTransaction } from "../executor.js";
+import { dirtyReadPlan } from "../executor.js";
 import { stripPrefix } from "../executor-signers.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { CodexGasPayer, CodexSigner, CodexTxConfig } from "../types.js";
@@ -123,26 +127,28 @@ export const stoaUnwrapPlanner: StepPlanner = async (
   const config = parseJson<CodexTxConfig>(step.config_json, {} as CodexTxConfig);
   const gasPayer = parseJson<CodexGasPayer>(step.gas_payer_json, { type: "gas-station" });
 
-  const executorCtx = { runtime: ctx.runtime, resolver: ctx.resolver, config: ctx.config };
-
   // `ouronet-ns.DALOS` — the module's REAL, deployed, namespaced path, built
   // from `ctx.runtime.namespace`, never hardcoded (same discipline as every
   // other planner's own namespaced module reference).
   const dalos = `${ctx.runtime.namespace}.DALOS`;
 
-  const resolveDefinition: PlannedLeg = {
-    pactCode: `(${dalos}.UR_AccountKadena (read-string "patron"))`,
-    config,
-    payload: { patron: patronAccount },
-    gasPayer,
-    signers,
-  };
-  const resolveResult = await executeCodexTransaction(resolveDefinition, "simulate", executorCtx);
+  // Both probes below are PURE reads, never through
+  // `executeCodexTransaction`/`preflightRead` — see `dirtyReadPlan`'s own doc
+  // (docs/work/aqp-planners-talos-routing/design.md) for why a plan read must
+  // never inherit the step's own AUTO-gas config (it would otherwise run the
+  // full buy-gas pipeline, enforcing `GAS_PAYER`'s payable-module whitelist
+  // on a read that needs no sponsorship at all).
+  const resolveResult = await dirtyReadPlan(
+    ctx.runtime,
+    config.chainId,
+    `(${dalos}.UR_AccountKadena (read-string "patron"))`,
+    { patron: patronAccount },
+  );
   if (!resolveResult.ok) {
     throw new Error(resolveResult.error ?? "UR_AccountKadena read failed");
   }
 
-  const targetData = (resolveResult.rawResult as { data?: unknown } | undefined)?.data;
+  const targetData = resolveResult.data;
   // This value IS chain-read-sourced, unlike `patronAccount` above — the
   // same "chain reads are not trusted" posture as `evict.ts`'s own
   // `isWellFormedEvictLeg` guard — so it is shape-guarded before it reaches
@@ -154,19 +160,17 @@ export const stoaUnwrapPlanner: StepPlanner = async (
   }
   const targetAccount = targetData;
 
-  const existenceDefinition: PlannedLeg = {
-    pactCode: '(try false (coin.get-balance (read-string "target")))',
-    config,
-    payload: { target: targetAccount },
-    gasPayer,
-    signers,
-  };
-  const existenceResult = await executeCodexTransaction(existenceDefinition, "simulate", executorCtx);
+  const existenceResult = await dirtyReadPlan(
+    ctx.runtime,
+    config.chainId,
+    '(try false (coin.get-balance (read-string "target")))',
+    { target: targetAccount },
+  );
   if (!existenceResult.ok) {
     throw new Error(existenceResult.error ?? "coin.get-balance existence probe failed");
   }
 
-  const existenceData = (existenceResult.rawResult as { data?: unknown } | undefined)?.data;
+  const existenceData = existenceResult.data;
   let needsCreate: boolean;
   if (existenceData === false) {
     needsCreate = true;

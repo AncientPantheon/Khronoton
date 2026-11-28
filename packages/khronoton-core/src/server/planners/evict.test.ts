@@ -17,6 +17,7 @@ const PUB_A = "aa".repeat(32);
 
 // ── mock ChainRuntime (modeled on runs-driver.test.ts's own fixtures) ───────
 const dirtyRead = vi.fn();
+const preflightRead = vi.fn();
 let currentClient: ChainClient;
 const createClient = vi.fn((..._a: unknown[]) => currentClient);
 const universalSignTransaction = vi.fn();
@@ -91,7 +92,7 @@ function makeStepRow(over: Partial<CodexCronotonStepRow> = {}): CodexCronotonSte
 
 beforeEach(() => {
   vi.clearAllMocks();
-  currentClient = { dirtyRead, submit: vi.fn(), listen: vi.fn() };
+  currentClient = { dirtyRead, preflightRead, submit: vi.fn(), listen: vi.fn() };
   universalSignTransaction.mockResolvedValue({ cmd: "{}", hash: "SIGNED-HASH", sigs: [{ sig: "x" }] });
   isSignedTransaction.mockReturnValue(true);
   getKeyPairByPublicKey.mockResolvedValue({ publicKey: PUB_A, privateKey: "deadbeef", seedType: "koala" });
@@ -117,12 +118,15 @@ describe("evictPlanner", () => {
     const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
 
     expect(legs).toHaveLength(1);
-    // The FULL namespaced pact code — `ouronet-ns.AQP-EVCT`, the module's
-    // real deployed path, never a bare `AQP-EVCT` reference — with every
-    // value read back from `payload` (env-data), never string-concatenated
-    // into the Pact source itself.
+    // The FULL pact code — routed through `ouronet-ns.TS02-C3` (Talos),
+    // never a direct `ouronet-ns.AQP-EVCT` call (see evict.ts's own doc
+    // comment / docs/work/aqp-planners-talos-routing/design.md) — with the
+    // `AQP-EVCT|CC_FullEvictRewards` member name's `|` as part of the
+    // literal function name, not a namespace separator. Every value is
+    // read back from `payload` (env-data), never string-concatenated into
+    // the Pact source itself.
     expect(legs[0].pactCode).toBe(
-      '(ouronet-ns.AQP-EVCT.CC_FullEvictRewards (read-string "patron") (read-string "executor") (read-string "fvt-id"))',
+      '(ouronet-ns.TS02-C3.AQP-EVCT|CC_FullEvictRewards (read-string "patron") (read-string "executor") (read-string "fvt-id"))',
     );
     expect(legs[0].payload).toEqual({
       patron: "k:patron",
@@ -148,7 +152,7 @@ describe("evictPlanner", () => {
 
     expect(legs).toHaveLength(3);
     const expectedPactCode =
-      '(ouronet-ns.AQP-EVCT.CC_EvictSingleReward (read-string "patron") (read-string "executor") ' +
+      '(ouronet-ns.TS02-C3.AQP-EVCT|CC_EvictSingleReward (read-string "patron") (read-string "executor") ' +
       '(read-string "fvt-id") (read-string "beneficiary") (read-integer "score-entity-type") ' +
       '(read-string "score-entity-id") (read-string "reward-dptf-id"))';
     legs.forEach((leg, i) => {
@@ -243,5 +247,39 @@ describe("evictPlanner", () => {
     });
 
     await expect(evictPlanner(makeStepRow(), makeCtx())).rejects.toThrow(/malformed plan entry/);
+  });
+
+  it(
+    "the URHC_BuildEvictPlans plan read NEVER calls preflightRead, even when the step's own config is AUTO gas — regression for the bug where a plan read inherited the step's autoGasLimit and got routed through the full buy-gas pipeline, enforcing GAS_PAYER's payable-module whitelist on a pure read",
+    async () => {
+      dirtyRead.mockResolvedValueOnce({ result: { status: "success", data: [] } });
+
+      await evictPlanner(
+        makeStepRow({
+          config_json: JSON.stringify({ chainId: "0", gasPrice: 0, gasLimit: 1000, autoGasLimit: true, ttl: 600 }),
+        }),
+        makeCtx(),
+      );
+
+      expect(dirtyRead).toHaveBeenCalledTimes(1);
+      expect(preflightRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("both WRITE legs route through Talos (TS02-C3), never the core AQP-EVCT module directly", async () => {
+    dirtyRead
+      .mockResolvedValueOnce({
+        result: {
+          status: "success",
+          data: [{ beneficiary: "k:ben-1", scoreEntityType: 1, scoreEntityId: "se-1", rewardDptfId: "dptf-1" }],
+        },
+      })
+      .mockResolvedValueOnce({ result: { status: "success", data: null }, gas: 5000000 }); // full-evict refused
+
+    const { legs } = normalizePlannerResult(await evictPlanner(makeStepRow(), makeCtx()));
+
+    expect(legs).toHaveLength(1);
+    expect(legs[0].pactCode).toContain("ouronet-ns.TS02-C3.AQP-EVCT|CC_EvictSingleReward");
+    expect(legs[0].pactCode).not.toContain("ouronet-ns.AQP-EVCT.CC_EvictSingleReward");
   });
 });

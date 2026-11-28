@@ -111,7 +111,8 @@ export type { ScheduleMode, ScheduleConfig } from "../schedule.js";
 // `LISTEN_TIMEOUT_MS` is NOT re-exported here — the seam-defaults group above is
 // its single barrel source (identical 300_000 constant), so re-exporting the
 // executor's own copy would be a duplicate named export.
-export { executeCodexTransaction } from "./executor.js";
+export { executeCodexTransaction, dirtyReadPlan } from "./executor.js";
+export type { DirtyReadPlanResult } from "./executor.js";
 export type { ExecutorCtx } from "./executor.js";
 export { effectiveSigners } from "./executor-signers.js";
 

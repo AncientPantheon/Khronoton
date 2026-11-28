@@ -22,7 +22,7 @@
  * root/system module, confirmed against OuronetUI's own bare
  * `coin.get-balance`/`coin.TRANSFER` calls (`tokenOpSpecs.tsx`).
  */
-import { executeCodexTransaction } from "../executor.js";
+import { dirtyReadPlan } from "../executor.js";
 import type { CodexCronotonStepRow } from "../store/steps.js";
 import type { CodexGasPayer, CodexSigner, CodexTxConfig } from "../types.js";
 import {
@@ -136,9 +136,12 @@ function formatPactDecimal(n: number): string {
  * 3. If `params.amountOverride` is set, shape-guard it against
  *    `/^\d+\.\d+$/` and use it directly as the amount — skipping steps 4-5
  *    below entirely (no live probe at all). Otherwise, read the patron's
- *    live STOA balance via `coin.get-balance` (a `dirtyRead` simulate,
- *    never a signed tx) — a failed read is a genuine error, never "balance
- *    is zero".
+ *    live STOA balance via `coin.get-balance` through {@link dirtyReadPlan}
+ *    (an unsigned, zero-signer `dirtyRead` — see that helper's own doc,
+ *    docs/work/aqp-planners-talos-routing/design.md, for why a pure read
+ *    must never go through `executeCodexTransaction`'s AUTO-gas-eligible
+ *    `preflightRead` path) — a failed read is a genuine error, never
+ *    "balance is zero".
  * 4. Validate the read result is numeric; `0` -> `[]` (the step is
  *    trivially satisfied — mirrors `unstallPlanner`'s own "zero stale
  *    users -> `[]`" convention).
@@ -177,8 +180,6 @@ export const stoaWrapPlanner: StepPlanner = async (
   const config = parseJson<CodexTxConfig>(step.config_json, {} as CodexTxConfig);
   const gasPayer = parseJson<CodexGasPayer>(step.gas_payer_json, { type: "gas-station" });
 
-  const executorCtx = { runtime: ctx.runtime, resolver: ctx.resolver, config: ctx.config };
-
   let amount: string;
   if (params.amountOverride !== undefined) {
     if (!/^\d+\.\d+$/.test(params.amountOverride)) {
@@ -200,20 +201,24 @@ export const stoaWrapPlanner: StepPlanner = async (
     amount = params.amountOverride;
   } else {
     // Bare `coin.get-balance` — `coin` is Kadena's root/system module, never
-    // namespaced under `ctx.runtime.namespace` (see module doc above).
-    const probeDefinition: PlannedLeg = {
-      pactCode: '(coin.get-balance (read-string "patron"))',
-      config,
-      payload: { patron: patronAccount },
-      gasPayer,
-      signers,
-    };
-    const result = await executeCodexTransaction(probeDefinition, "simulate", executorCtx);
+    // namespaced under `ctx.runtime.namespace` (see module doc above). A PURE
+    // read, never through `executeCodexTransaction`/`preflightRead` — see
+    // `dirtyReadPlan`'s own doc (docs/work/aqp-planners-talos-routing/
+    // design.md) for why a plan read must never inherit the step's own
+    // AUTO-gas config (it would otherwise run the full buy-gas pipeline,
+    // enforcing `GAS_PAYER`'s payable-module whitelist on a read that needs
+    // no sponsorship at all).
+    const result = await dirtyReadPlan(
+      ctx.runtime,
+      config.chainId,
+      '(coin.get-balance (read-string "patron"))',
+      { patron: patronAccount },
+    );
     if (!result.ok) {
       throw new Error(result.error ?? "coin.get-balance read failed");
     }
 
-    const data = (result.rawResult as { data?: unknown } | undefined)?.data;
+    const data = result.data;
     if (typeof data !== "number") {
       throw new Error("ouronet.stoa-wrap: coin.get-balance returned a non-numeric result");
     }

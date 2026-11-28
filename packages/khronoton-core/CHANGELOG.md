@@ -4,6 +4,50 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.26.0 — 2026-11-28
+
+**MINOR — fix the three AQP write planners (`ouronet.aqp-unstall`/`ouronet.aqp-inject`/`ouronet.aqp-evict`) calling core Pact modules directly, which Ouronet's architecture refuses two independent ways; and stop every plan read across all AQP/STOA planners from accidentally consulting the gas station at all.**
+
+**Measured on a live 13-step dry run** (`OuroMinterStageTwoV2`, signed `/local` true mode): every
+`ouronet.aqp-unstall` step failed with `"Failed to buy gas: Payable Modules / form count not
+satisfied"`, while every hand-written `ouronet-ns.DSP`/`TS*` step in the SAME run passed.
+
+**Gate 1/2 — not a payable module, no calling module.** `unstall.ts`/`inject.ts`/`evict.ts` built
+WRITE legs calling `ouronet-ns.AQP-FVT`/`AQP-EVCT` entrypoints directly. Ouronet's
+`DALOS.GAS_PAYER` whitelists a single-form exec by prefix (`"(coin.C_"`, `"(ouronet-ns.TS"`,
+`"(ouronet-ns.DSP"`, `"(ouronet-ns.STOAICO."`) — `AQP-FVT.*`/`AQP-EVCT.*` match none of these, so
+gas can never be bought; separately, the core entrypoints themselves refuse any call with no
+calling module. `TS02-C3` (Talos) is the only client-reachable path — OuronetUI's own UI already
+routes through it. Fixed: every write leg in these three planners now calls through
+`TS02-C3.<Module>|<Entrypoint>` (e.g. `TS02-C3.AQP-FVT|CCp_FvtFixSlice`) — the `|` is part of the
+literal function name, not a namespace separator; signatures and argument order are identical,
+this is a path change only. Plan reads (pure on-chain reads) stay on the core module directly —
+Talos exposes client write entrypoints only, by design.
+
+**The read-only bug — the one that actually blocks today.** Measured proof: three of the five
+failing vaults have zero stale users, and a zero-stale vault returns `[]` BEFORE ever building a
+write leg — yet still failed. Every plan read (`unstall.ts`'s `URH_FvtStalePresentUsers`,
+`evict.ts`'s `URHC_BuildEvictPlans`, `stoa-wrap.ts`'s/`stoa-unwrap.ts`'s balance/account probes)
+went through `executeCodexTransaction(leg, "simulate", ctx)`, inheriting the step's own AUTO-gas
+config. Under AUTO gas that calls `client.preflightRead`, which runs Kadena's full local-preflight
+pipeline — including `buy-gas`/`redeem-gas`, exactly where the Gate-1 whitelist is enforced — even
+though nothing is being submitted. Switching a step to MANUAL gas does not fix this properly
+either; it only happens to land on `dirtyRead` as a side effect of `runSimulate`'s own branch.
+Fixed: a new `dirtyReadPlan(runtime, chainId, pactCode, payload)` helper (`executor.ts`, re-exported
+from `/server`) builds a bare, unsigned, zero-signer transaction (no gas meta, no gas payer at all)
+and reads it via `runtime.createClient(...).dirtyRead(tx)` directly — never through
+`executeCodexTransaction`, never `preflightRead`-eligible, regardless of the step's own gas mode.
+Applies to every plan read across `unstall.ts`/`evict.ts`/`stoa-wrap.ts`/`stoa-unwrap.ts`. NOT
+applied to `inject.ts`, which has no plan read — its two `simulate` calls are real candidate WRITE
+transactions being probed to decide which to submit, and correctly keep their gas-sponsorship
+measurement.
+
+Reviewed via nectar (full correctness + conventions lens dispatch — business-logic changes across
+5 planner files plus a new executor primitive warranted the full pass, not a single focused one).
+Correctness: no findings. Conventions: 2 MEDIUM — two test files had a leftover comment still
+describing the OLD direct-module call target two lines above an already-updated, Talos-routed
+assertion; both rewritten. **1650 specs pass.**
+
 ## 0.25.0 — 2026-11-28
 
 **MINOR — two ChainedBuilder UX follow-ups (post-0.24.0): a bounded "Result" pane fixing a real page-height-blowout bug, and a Raw JSON pane line-number gutter via CodeMirror.**
