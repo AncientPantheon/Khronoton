@@ -1136,3 +1136,177 @@ describe("ChainedBuilder — edit mode (editId + initialDocument)", () => {
     TEST_TIMEOUT,
   );
 });
+
+describe("ChainedBuilder — server resolver", () => {
+  const RESOLVER_OPTIONS = [
+    { value: "stoicism-mint", label: "Stoicism Mint" }, // deliberately no `note` — exercises the generic-fallback hint path
+    {
+      value: "pool-payout",
+      label: "Pool Payout",
+      note: "Fans out cross-chain burns + a bulk transfer.",
+    }, // has its own `note` — exercises the per-option override path
+    { value: "", label: "SHOULD BE FILTERED (base option is the component's own)" },
+  ];
+
+  it("defaults to 'None (ordinary cronoton)' and writes the selection into the commit body when changed", () => {
+    mount(makeAdapter(), { serverResolverOptions: RESOLVER_OPTIONS });
+    openWholeCronotonTab();
+    const select = screen.getByLabelText("Server resolver") as HTMLSelectElement;
+    expect(select.value).toBe("");
+    // The registry's own stray "" entry must not produce a SECOND "None"
+    // option — exactly one <option value="">.
+    expect(screen.getAllByText("None (ordinary cronoton)")).toHaveLength(1);
+
+    fireEvent.change(select, { target: { value: "stoicism-mint" } });
+    openRawJsonPane();
+    expect(screen.getByText(/"serverResolver": ?"stoicism-mint"/)).toBeTruthy();
+  });
+
+  it(
+    "actually reaches adapter.commit's real envelope on CREATE — not just the Raw JSON preview text (the exact bug singleCronotonBody() previously had)",
+    async () => {
+      const commit = vi.fn(async (_body: unknown) => ({
+        ok: true as const,
+        codexCronotonId: "cr_single",
+        nextFireAt: null,
+      }));
+      const adapter = makeAdapter({ commit: commit as unknown as KhronotonAdapter["commit"] });
+      mount(adapter, { serverResolverOptions: RESOLVER_OPTIONS });
+
+      setPactCode("(+ 1 2)");
+      await setGasStationKey("k:alice");
+      openWholeCronotonTab();
+      fireEvent.change(screen.getByLabelText("Server resolver"), { target: { value: "stoicism-mint" } });
+      fireEvent.change(screen.getByPlaceholderText("StoicismRewardFlow"), {
+        target: { value: "Nightly chain" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Create cronoton" }));
+      await waitFor(() => expect(commit).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
+
+      const sentBody = commit.mock.calls[0][0] as { envelope: { serverResolver?: string } };
+      expect(sentBody.envelope.serverResolver).toBe("stoicism-mint");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it("selecting 'None' after a resolver was previously set clears it back to undefined — never leaves a stale empty string", () => {
+    mount(makeAdapter(), { serverResolverOptions: RESOLVER_OPTIONS });
+    openWholeCronotonTab();
+    const select = screen.getByLabelText("Server resolver") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "stoicism-mint" } });
+    expect(select.value).toBe("stoicism-mint");
+
+    fireEvent.change(select, { target: { value: "" } });
+    expect(select.value).toBe("");
+    openRawJsonPane();
+    expect(screen.queryByText(/"serverResolver"/)).toBeNull();
+  });
+
+  it("shows the generic fallback hint for an option with no note, and the option's OWN note when it has one", () => {
+    mount(makeAdapter(), { serverResolverOptions: RESOLVER_OPTIONS });
+    openWholeCronotonTab();
+    const select = screen.getByLabelText("Server resolver");
+    expect(screen.queryByText(/server-resolved/i)).toBeNull();
+
+    fireEvent.change(select, { target: { value: "stoicism-mint" } }); // no note
+    expect(screen.getByText(/server-resolved/i)).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "pool-payout" } }); // has a note
+    expect(screen.getByText("Fans out cross-chain burns + a bulk transfer.")).toBeTruthy();
+    expect(screen.queryByText(/server-resolved/i)).toBeNull();
+  });
+
+  it(
+    "pre-selects from initialDocument.serverResolver, appending a synthetic '<value> (system cronoton)' option when the persisted value isn't in serverResolverOptions — never silently falling back to None",
+    () => {
+      const fixture: ChainCommitBody = {
+        name: "Mystery System Cronoton",
+        serverResolver: "mystery-resolver", // NOT in RESOLVER_OPTIONS
+        steps: [
+          {
+            mode: "single",
+            pactCode: "(placeholder)",
+            gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+            signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+          },
+        ],
+      };
+      mount(makeAdapter(), {
+        editId: "cr_1",
+        initialDocument: fixture,
+        serverResolverOptions: RESOLVER_OPTIONS,
+      });
+      openWholeCronotonTab();
+      const select = screen.getByLabelText("Server resolver") as HTMLSelectElement;
+      expect(select.value).toBe("mystery-resolver");
+      expect(screen.getByText("mystery-resolver (system cronoton)")).toBeTruthy();
+      // Never mislabeled as "None" just because it's absent from the options.
+      expect(screen.queryByDisplayValue("None (ordinary cronoton)")).toBeNull();
+    },
+  );
+
+  it("does NOT append a synthetic '(system cronoton)' option when the persisted resolver IS already in serverResolverOptions — no duplicate option, real label shown", () => {
+    const fixture: ChainCommitBody = {
+      name: "Daily Pool Payout",
+      serverResolver: "pool-payout", // genuinely IN RESOLVER_OPTIONS this time
+      steps: [
+        {
+          mode: "single",
+          pactCode: "(placeholder)",
+          gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+          signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+        },
+      ],
+    };
+    mount(makeAdapter(), { editId: "cr_1", initialDocument: fixture, serverResolverOptions: RESOLVER_OPTIONS });
+    openWholeCronotonTab();
+    const select = screen.getByLabelText("Server resolver") as HTMLSelectElement;
+    expect(select.value).toBe("pool-payout");
+    expect(screen.queryByText(/\(system cronoton\)/)).toBeNull();
+    expect(screen.getAllByText("Pool Payout")).toHaveLength(1); // exactly one, no duplicate
+  });
+
+  it(
+    "AUTO gas with no authoring-time Simulate does not block Save once a server resolver is set — the acceptance scenario (Daily Pool Payout, schedule-only edit, resolver survives)",
+    async () => {
+      const updateChain = vi.fn(async (_id: string, _body: unknown) => ({
+        ok: true as const,
+        codexCronotonId: "cr_1",
+        nextFireAt: null,
+        stepIds: [],
+      }));
+      const adapter = makeAdapter({ updateChain: updateChain as unknown as KhronotonAdapter["updateChain"] });
+      const fixture: ChainCommitBody = {
+        name: "Daily Pool Payout",
+        serverResolver: "pool-payout",
+        schedule: { mode: "daily-at-utc", config: { mode: "daily-at-utc", hours: [12], minute: 0 } },
+        steps: [
+          {
+            mode: "single",
+            pactCode: "(placeholder)",
+            config: { chainId: "0", gasPrice: 10000, gasPriceBufferAnu: 0, gasLimit: 150000, autoGasLimit: true, ttl: 600 },
+            gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+            signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+          },
+        ],
+      };
+      mount(adapter, { editId: "cr_1", initialDocument: fixture });
+
+      // Edit ONLY the schedule — never touch the resolver field. AUTO gas is
+      // on and there was never an authoring-time Simulate; if the gate
+      // blocked on that, Save would stay disabled despite the schedule edit.
+      openWholeCronotonTab();
+      fireEvent.change(screen.getByLabelText("Minute"), { target: { value: "45" } });
+
+      expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", false);
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => expect(updateChain).toHaveBeenCalledTimes(1), ASYNC_TIMEOUT);
+      const sentBody = updateChain.mock.calls[0][1] as ChainCommitBody;
+      expect(sentBody.serverResolver).toBe("pool-payout");
+      expect(sentBody.schedule?.config).toMatchObject({ minute: 45 });
+    },
+    TEST_TIMEOUT,
+  );
+});

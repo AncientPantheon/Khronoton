@@ -72,6 +72,18 @@ describe("commitChainedCronoton — success write order", () => {
     expect(steps.map((s) => s.pact_code)).toEqual(["(step-0)", "(step-1)"]);
     expect(steps.map((s) => s.id)).toEqual(result.stepIds);
   });
+
+  it("persists serverResolver on the parent row — regression: this was previously silently dropped for every chained/single-tx-variant commit, even though the single-tx commitCodexCronoton path already supported it", () => {
+    const result = commitChainedCronoton(validChainInput({ serverResolver: "pool-payout" }), { db });
+    const parent = getCodexCronoton(result.id, { db });
+    expect(parent!.server_resolver).toBe("pool-payout");
+  });
+
+  it("omits serverResolver (persists null) when absent — the ordinary-cronoton default is unchanged", () => {
+    const result = commitChainedCronoton(validChainInput(), { db });
+    const parent = getCodexCronoton(result.id, { db });
+    expect(parent!.server_resolver).toBeNull();
+  });
 });
 
 describe("commitChainedCronoton — validateChain rejection short-circuits before any write", () => {

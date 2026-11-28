@@ -35,6 +35,7 @@ import type {
   CommitBody,
 } from "../../handlers/index.js";
 import { useKhronotonAdapter, useKhronotonConfig } from "../../provider/context.js";
+import type { ServerResolverOption } from "../../provider/context.js";
 import { runGated } from "../../provider/runGated.js";
 import { canMutate, type Access } from "../access.js";
 import { builderToCommit, makeEmptyBuilderState, type BuilderState } from "../builder-state.js";
@@ -229,6 +230,19 @@ export interface ChainedBuilderProps {
   paneMinWidth?: number;
   /** Left rail column width in pixels (actions + gate + step rail). Default `210`. */
   railWidth?: number;
+  /**
+   * Registry-driven server-resolver options for the "Server resolver"
+   * select — mirrors `BuilderHeader`'s own `serverResolverOptions` prop
+   * (the single-tx builder's internal header subcomponent; `Builder` itself
+   * does not currently thread such a prop through, so this is a NEW
+   * top-level capability for `ChainedBuilder`, not parity with an existing
+   * one). Falls back to `useKhronotonConfig().serverResolverOptions` when
+   * omitted, same fallback precedent `BuilderHeader` already uses. The base
+   * "None (ordinary cronoton)" option is always added by this component
+   * itself (any `value: ""` entry in this list is filtered out, not
+   * duplicated) — a host does not need to remember to include it.
+   */
+  serverResolverOptions?: ServerResolverOption[];
 }
 
 const field: CSSProperties = {
@@ -289,6 +303,7 @@ export function ChainedBuilder({
   paneMaxWidth = 600,
   paneMinWidth = 360,
   railWidth = 210,
+  serverResolverOptions,
 }: ChainedBuilderProps): ReactNode {
   const adapter = useKhronotonAdapter();
   const config = useKhronotonConfig();
@@ -523,6 +538,7 @@ export function ChainedBuilder({
       signers: step.signers,
       schedule: state.schedule,
       externalFireable: state.externalFireable,
+      serverResolver: state.serverResolver,
     };
     return builderToCommit(synthetic);
   }, [state]);
@@ -745,6 +761,30 @@ export function ChainedBuilder({
   };
   const onScheduleChange = (next: BuilderState) =>
     setState((s) => ({ ...s, schedule: next.schedule }));
+
+  // ── Server resolver (mirrors BuilderHeader's own registry-driven select) ────
+  // The prop, else the provider config — same precedent as the single-tx
+  // `Builder`'s `BuilderHeader`. The base "None" option is OWNED by this
+  // component (never relies on the host remembering to include it), and any
+  // stray `value:""` entry the host passes is filtered, not duplicated.
+  const resolverRegistry = (serverResolverOptions ?? config.serverResolverOptions).filter(
+    (opt) => opt.value !== "",
+  );
+  const resolverOptions: ServerResolverOption[] = [
+    { value: "", label: "None (ordinary cronoton)" },
+    ...resolverRegistry,
+    // CRITICAL (per the handoff): a persisted resolver that isn't in the
+    // registry (e.g. a system-only binding operators can't pick fresh) must
+    // still display correctly — a <select> with no matching <option> would
+    // otherwise silently read back as "" and mislabel a system cronoton as
+    // "None". Appended last so it never shadows a real registry entry.
+    ...(state.serverResolver && !resolverRegistry.some((opt) => opt.value === state.serverResolver)
+      ? [{ value: state.serverResolver, label: `${state.serverResolver} (system cronoton)` }]
+      : []),
+  ];
+  const selectedResolverNote = state.serverResolver
+    ? resolverRegistry.find((opt) => opt.value === state.serverResolver)?.note
+    : undefined;
 
   const selectedStep: StepState | null =
     selected === VARIANT_SELECTION ? state.singleTxVariant : state.steps[selected] ?? null;
@@ -1099,6 +1139,42 @@ export function ChainedBuilder({
                                 onChange={(e) => setState((s) => ({ ...s, description: e.target.value }))}
                                 placeholder="What this cronoton does (optional)"
                               />
+                            )}
+                          </div>
+
+                          {/* Server resolver: fire-time payload-filling binding (e.g.
+                              `stoicism-mint`/`pool-payout`). "None" is this
+                              component's OWN base option — a host never needs to
+                              remember to include it, mirroring `BuilderHeader`'s own
+                              base-option/registry handling. The hint below is a
+                              deliberate SUPERSET of `BuilderHeader`'s own hint,
+                              not byte-for-byte parity: it always shows once a
+                              resolver is selected, with a generic fallback line
+                              when the option has no `note` of its own — unlike
+                              `BuilderHeader`, which shows nothing at all in that
+                              case. */}
+                          <div>
+                            <div style={{ fontSize: 11, color: "var(--khr-text-dim)", marginBottom: 4 }}>
+                              Server resolver
+                            </div>
+                            <select
+                              aria-label="Server resolver"
+                              style={field}
+                              value={state.serverResolver ?? ""}
+                              onChange={(e) =>
+                                setState((s) => ({ ...s, serverResolver: e.target.value || undefined }))
+                              }
+                            >
+                              {resolverOptions.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                            {state.serverResolver && (
+                              <p style={{ fontSize: 10, color: "var(--khr-accent)", margin: "4px 0 0" }}>
+                                {selectedResolverNote ?? "⟳ Server-resolved: payload filled at fire time."}
+                              </p>
                             )}
                           </div>
 

@@ -58,6 +58,17 @@ export interface CommitChainedCronotonInput {
   externalFireable?: boolean;
   singleTxFirst?: CommitChainSingleTxFirst;
   steps: CommitChainStepInput[];
+  /**
+   * Fire-time server resolver, if any — threaded straight into the parent
+   * row's `CommitCodexCronotonInput.serverResolver` below, so a chained
+   * commit gets the EXACT SAME resolver handling a single-tx commit already
+   * gets: the one-resolver-per-cronoton uniqueness guard, the `evented`
+   * auto-detection, and persistence to the `server_resolver` column. Was
+   * previously silently dropped here — a chained/single-tx-variant cronoton
+   * with a resolver selected in the builder would persist with
+   * `server_resolver = null` regardless of what was authored.
+   */
+  serverResolver?: string | null;
   createdBy: string;
 }
 
@@ -128,6 +139,7 @@ export function commitChainedCronoton(
     scheduleConfig: schedule.config,
     createdBy: input.createdBy,
     externalFireable: input.externalFireable,
+    serverResolver: input.serverResolver ?? undefined,
   };
   const { id, nextFireAt } = commitCodexCronoton(parentInput, { db: dep.db });
 

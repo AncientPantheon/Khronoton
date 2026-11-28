@@ -74,6 +74,18 @@ export interface ChainCommitBody {
    * @minItems 1
    */
   steps: ChainStepInput[];
+  /**
+   * The fire-time server resolver this cronoton is bound to (e.g.
+   * `"stoicism-mint"`, `"pool-payout"`), if any. `null`/absent = an ordinary
+   * cronoton. A resolver FILLS the tx payload from live server data at fire
+   * time (the authored `pactCode`/`payload` may be a placeholder) and is
+   * exempt from the "AUTO gas needs a successful Simulate" gate, since the
+   * payload can't be resolved at authoring time either. A resolver and real
+   * chain `steps` are NOT mutually exclusive — some resolvers (e.g.
+   * `pool-payout`) are genuinely multi-tx/cross-chain flows, not a single
+   * placeholder tx; see `ChainedBuilder`'s own doc for the full design note.
+   */
+  serverResolver?: string | null;
 }
 
 /** `POST /chain` body — the new id, its first fire, and the step ids. */
@@ -190,6 +202,7 @@ function toCommitChainInput(body: unknown, createdBy: string): CommitChainedCron
     externalFireable: b.externalFireable as boolean | undefined,
     singleTxFirst: b.singleTxFirst as ChainSingleTxFirst | undefined,
     steps: (b.steps as ChainStepInput[] | undefined) ?? [],
+    serverResolver: (b.serverResolver as string | null | undefined) ?? undefined,
     createdBy,
   };
 }

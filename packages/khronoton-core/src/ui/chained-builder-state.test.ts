@@ -22,6 +22,7 @@ import {
   removeStep,
   replaceStep,
   selectedAfterMove,
+  stepBuilderState,
   stepLabel,
   stepStateToStepInput,
   type ChainedBuilderState,
@@ -202,6 +203,18 @@ describe("chainedBuilderToCommit — TOTAL on an empty state", () => {
     // external off → a schedule is emitted and no single-tx-first variant.
     expect(body.schedule).toBeDefined();
     expect(body.singleTxFirst).toBeUndefined();
+    // No server resolver by default — an ordinary cronoton.
+    expect(body.serverResolver).toBeUndefined();
+  });
+
+  it("writes serverResolver when set, omits it (not even as an empty string) when unset", () => {
+    const withResolver = makeEmptyChainedBuilderState();
+    withResolver.serverResolver = "pool-payout";
+    expect(chainedBuilderToCommit(withResolver).serverResolver).toBe("pool-payout");
+
+    const without = makeEmptyChainedBuilderState();
+    without.serverResolver = undefined;
+    expect(chainedBuilderToCommit(without).serverResolver).toBeUndefined();
   });
 });
 
@@ -239,6 +252,46 @@ describe("canCommitChain — commit gate", () => {
       expect(canCommitChain(state, precomputed)).toEqual(canCommitChain(state));
     }
   });
+
+  it("threads the envelope's serverResolver into every step's AND the single-tx variant's synthetic gas-waiver state", () => {
+    // `validateStep`'s own unconditional `simulateCalibrated: true` currently
+    // masks whether this threading actually changes canCommitChain's verdict
+    // (AUTO gas is never blocked per-step regardless of resolver today — see
+    // that call site's own comment) — so this asserts on `stepBuilderState`'s
+    // OWN output directly, the only way to observe the wiring itself rather
+    // than a verdict that would look identical whether the wiring exists or
+    // not. Forward-looking: if per-step calibration is ever made conditional,
+    // this threading is what will correctly protect a server-resolver
+    // cronoton from suddenly blocking.
+    const step = makeEmptyStepState("single");
+    expect(stepBuilderState(step, "pool-payout").serverResolver).toBe("pool-payout");
+    expect(stepBuilderState(step).serverResolver).toBeUndefined();
+
+    const state = validState();
+    state.serverResolver = "pool-payout";
+    // Still ok — confirms the (currently redundant) threading introduces no
+    // regression, not just that it compiles.
+    expect(canCommitChain(state).ok).toBe(true);
+  });
+
+  // A further-strengthened test was attempted here: spying on the real
+  // exported `stepBuilderState` (via a namespace import) while driving the
+  // call through the public `canCommitChain` entry point, to prove
+  // `canCommitChain` → `validateStep` actually FORWARD `state.serverResolver`
+  // (the one hop the test above cannot observe, since it calls
+  // `stepBuilderState` directly with explicit arguments). That attempt does
+  // NOT work: `canCommitChain`/`validateStep` call `stepBuilderState`
+  // directly (same module), and native ESM binds that call to the live
+  // local binding, not through the exported namespace object — `vi.spyOn`
+  // on the namespace import never observes an internal same-module call
+  // here (confirmed empirically: the spy recorded zero calls while
+  // `canCommitChain` plainly still worked). Proving this ONE hop would
+  // require either weakening the module's own internals (e.g. routing the
+  // call through an injectable seam) purely for a test, or waiting for
+  // `validateStep`'s masking `simulateCalibrated: true` hardcode to become
+  // conditional (at which point the forwarding becomes independently
+  // OBSERVABLE via a real verdict change, and a meaningful test becomes
+  // possible without any of this). Left untested now rather than faked.
 });
 
 describe("stepLabel — the Step-0 renumbering rule, shared by rail + per-step headings", () => {
@@ -346,10 +399,17 @@ describe("jsonToChainedBuilderState — the inverse of chainedBuilderToCommit", 
         { id: "z", publicKey: "variant-pub", label: "", source: "derived", capabilityMode: "pure", capabilities: "" },
       ],
     };
-    return { ...base, name: "My Chain", description: "a test chain", singleTxVariant: variant, steps: [step1, step2] };
+    return {
+      ...base,
+      name: "My Chain",
+      description: "a test chain",
+      singleTxVariant: variant,
+      steps: [step1, step2],
+      serverResolver: "pool-payout",
+    };
   }
 
-  it("round-trips name/description/schedule through chainedBuilderToCommit -> JSON -> import", () => {
+  it("round-trips name/description/schedule/serverResolver through chainedBuilderToCommit -> JSON -> import", () => {
     const original = fixtureState();
     const text = JSON.stringify(chainedBuilderToCommit(original));
     const result = jsonToChainedBuilderState(text);
@@ -359,6 +419,32 @@ describe("jsonToChainedBuilderState — the inverse of chainedBuilderToCommit", 
     expect(result.state.description).toBe("a test chain");
     expect(result.state.externalFireable).toBe(false);
     expect(result.state.schedule).toEqual(original.schedule);
+    expect(result.state.serverResolver).toBe("pool-payout");
+  });
+
+  it("serverResolver: null (an ordinary cronoton, per ChainCommitBody's own doc), absent, and every non-string JSON type (number/boolean/object/array) all degrade to undefined — lenient, not a hard error", () => {
+    for (const text of [
+      '{"name":"X","steps":[{"mode":"single"}],"serverResolver":null}',
+      '{"name":"X","steps":[{"mode":"single"}]}', // absent entirely
+      '{"name":"X","steps":[{"mode":"single"}],"serverResolver":42}',
+      '{"name":"X","steps":[{"mode":"single"}],"serverResolver":false}',
+      // Structurally different from a primitive — a naive future rewrite of
+      // the coercion (e.g. `String(parsed.serverResolver)`) could handle
+      // primitives correctly while mishandling these ("[object Object]" is a
+      // non-empty string that would NOT degrade to undefined).
+      '{"name":"X","steps":[{"mode":"single"}],"serverResolver":{"foo":"bar"}}',
+      '{"name":"X","steps":[{"mode":"single"}],"serverResolver":["pool-payout"]}',
+    ]) {
+      const result = jsonToChainedBuilderState(text);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.state.serverResolver).toBeUndefined();
+    }
+  });
+
+  it("an empty-string serverResolver also degrades to undefined, matching chainedBuilderToCommit's own omit-when-falsy convention", () => {
+    const result = jsonToChainedBuilderState('{"name":"X","steps":[{"mode":"single"}],"serverResolver":""}');
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.state.serverResolver).toBeUndefined();
   });
 
   it("round-trips a 'single' step's pactCode/config/gasPayer/payload/yieldAs/idempotent", () => {

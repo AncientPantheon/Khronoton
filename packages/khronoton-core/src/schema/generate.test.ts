@@ -26,7 +26,7 @@ describe("generateRawCronotonSchema", () => {
     const { jsonSchema } = generateRawCronotonSchema(program, BUILTIN_DESCRIPTORS);
     expect(jsonSchema.required).toEqual(["name", "steps"]);
     expect(Object.keys(jsonSchema.properties ?? {}).sort()).toEqual(
-      ["description", "externalFireable", "name", "schedule", "singleTxFirst", "steps"].sort(),
+      ["description", "externalFireable", "name", "schedule", "serverResolver", "singleTxFirst", "steps"].sort(),
     );
   });
 

@@ -4,6 +4,71 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.22.0 — 2026-11-28
+
+**MINOR — `ChainedBuilder` surfaces the fire-time SERVER RESOLVER, so system cronotons (`pool-payout`, `stoicism-mint`, …) can finally be edited in the packaged builder instead of being shunted to the hub's legacy editor. Purely additive; create + ordinary edit are unchanged when the new field/prop are absent.**
+
+Builds on 0.21.0's `ChainedBuilder` edit mode. `ChainCommitBody` gains `serverResolver?: string |
+null` (mirrors `description`'s own nullable convention in this interface); `chainedBuilderToCommit`
+writes it, `jsonToChainedBuilderState` reads it leniently (null/absent/any non-string JSON type all
+degrade to unset, never a hard error). `ChainedBuilder` gains a `serverResolverOptions?:
+ServerResolverOption[]` prop — the SAME type the single-tx `Builder`'s own `BuilderHeader` already
+uses, falling back to the provider config when omitted — rendering a "Server resolver" select at the
+envelope level (Whole-cronoton tab): a package-owned "None (ordinary cronoton)" base option a host
+never has to remember to include; pre-selects from `initialDocument.serverResolver`; and, critically,
+a persisted resolver absent from the options list (a system-only binding an operator can't pick
+fresh) gets a synthetic `"<value> (system cronoton)"` option appended rather than silently falling
+back to "None" and mislabeling a system cronoton — exactly the mislabel bug the hub had just fixed in
+its own legacy editor. A hint line appears once a resolver is selected, preferring the option's own
+`note` (reusing the existing `ServerResolverOption.note` field) over a generic fallback. A resolver
+and real chain `steps` are never mutually exclusive anywhere in this implementation — deliberately,
+per the design doc's own forward-looking note: `pool-payout` is really a dynamic multi-tx
+cross-chain flow that belongs as a multichained planner cronoton eventually, not a single
+placeholder tx, and this field must not paint that future migration into a corner.
+
+**Two real bugs caught by nectar review, both now fixed, both in the "silently drops the resolver"
+class — the second considerably more severe than the first:**
+- A MEDIUM found while building the UI tests themselves: `singleCronotonBody()` (the CREATE-mode
+  single-tx commit body AND its own Raw JSON preview, for a single-step cronoton) never threaded
+  `state.serverResolver` through its synthetic `BuilderState` — selecting a resolver on a brand-new,
+  exactly-one-step cronoton would have been silently dropped from both the commit body and its own
+  preview.
+- A **CRITICAL** found by the correctness lens: `commitChainedCronoton` (the CREATE-path store
+  function for the CHAIN shape — any multi-step cronoton, or one with a single-tx-first variant)
+  silently discarded `serverResolver` across all three layers it passes through (the handler adapter
+  never read it off the wire body; the store input type had no such field; the parent-row input built
+  for `commitCodexCronoton` never set it) — even though the single-tx `commitCodexCronoton` path has
+  supported `serverResolver` (including its one-resolver-per-cronoton uniqueness guard and `evented`
+  auto-detection) for a long time. Exactly the handoff's own §6 scenario: a resolver-bound cronoton
+  created as a genuine multi-step chain would have persisted as an ordinary cronoton, the binding
+  silently gone. Fixed by threading `serverResolver` through `handlers/chain.ts`'s
+  `toCommitChainInput` → `store/chain.ts`'s `CommitChainedCronotonInput` → the `parentInput` passed
+  to `commitCodexCronoton`, with a new store-level regression test against a real in-memory DB.
+
+Also: the gas-gate waiver (`validateConfig`'s existing `autoGasWaived = Boolean(serverResolver) ||
+isTriggerOnly(...)`, already shipped for the single-tx builder) is threaded through
+`stepBuilderState`/`validateStep`/`canCommitChain` for forward-compatibility — currently redundant
+with `validateStep`'s own unconditional `simulateCalibrated: true` bypass (AUTO gas is never blocked
+by the chained gate today, resolver or not), but wired through anyway so a future change that makes
+per-step calibration conditional won't silently start blocking server-resolver cronotons.
+
+Reviewed via nectar (correctness/conventions/tests): conventions found 2 MEDIUM + 1 LOW doc-comment
+accuracy issues (two false "mirrors an existing precedent" claims, one overstated parity claim),
+fixed. Tests found 1 HIGH + 4 MEDIUM + 1 LOW coverage gaps (the `singleCronotonBody()` fix was only
+proven via preview text, never the real `adapter.commit` call args; the per-option `note` hint
+override and the synthetic-option logic's negative case were both completely untested; clearing a
+resolver back to "None" was untested; lenient-degrade coverage only covered primitives, not nested
+object/array values) — all closed except one, left honestly undone rather than faked: proving
+`canCommitChain`/`validateStep` forward `state.serverResolver` into `stepBuilderState` requires
+intercepting an internal same-module call, which native ESM's live-binding semantics make
+unobservable via `vi.spyOn` on a namespace import (confirmed empirically) — the gap is explained in
+a comment at the test site rather than papered over.
+
+**1605 specs pass.** `npx tsc --noEmit` clean; `npm run build` clean (the regenerated schema/field
+reference correctly discover `serverResolver` as a new top-level field, confirming the generator's
+own "generate from types, never hand-write" guarantee — one existing hardcoded-keys-list test needed
+a one-line update to include it).
+
 ## 0.21.0 — 2026-11-27
 
 **MINOR — `ChainedBuilder` gains an EDIT MODE: editing an existing cronoton now opens the SAME builder used to create, pre-loaded, with an explicit "Save changes" that updates it in place — mirroring the single-tx `Builder`'s own `editId` precedent. Purely additive; the create path is unchanged when the new props are absent.**

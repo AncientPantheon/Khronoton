@@ -88,6 +88,16 @@ export interface ChainedBuilderState {
   singleTxVariant: StepState | null;
   /** The chain: Step 1..N. */
   steps: StepState[];
+  /**
+   * The fire-time server resolver this cronoton is bound to, if any —
+   * `undefined` = ordinary cronoton (mirrors `BuilderState.serverResolver`'s
+   * own `string | undefined` convention; the WIRE shape `ChainCommitBody.
+   * serverResolver` uses `string | null` instead, converted at the boundary
+   * in `chainedBuilderToCommit`/`jsonToChainedBuilderState`, same as every
+   * other field here). NOT mutually exclusive with real `steps` — see
+   * `ChainCommitBody.serverResolver`'s own doc comment for why.
+   */
+  serverResolver: string | undefined;
 }
 
 // The committed wire shapes (`ChainStepInput` / `ChainSingleTxFirst` /
@@ -129,6 +139,7 @@ export function makeEmptyChainedBuilderState(): ChainedBuilderState {
     externalFireable: false,
     singleTxVariant: null,
     steps: [makeEmptyStepState("single")],
+    serverResolver: undefined,
   };
 }
 
@@ -157,8 +168,30 @@ function plannerParamsParseError(text: string): boolean {
   }
 }
 
-/** Synthesize a single-tx BuilderState from a step's per-tx subset. */
-function stepBuilderState(step: StepState): BuilderState {
+/**
+ * Synthesize a single-tx BuilderState from a step's per-tx subset. The
+ * optional `serverResolver` is the CRONOTON-ENVELOPE's resolver (not a
+ * per-step field) — threaded through purely so `validateStep`'s call into
+ * `validateConfig` sees the SAME `autoGasWaived = Boolean(serverResolver) ||
+ * isTriggerOnly(...)` waiver `BuilderState`'s own gate already has. This is
+ * currently redundant with `validateStep`'s own unconditional
+ * `simulateCalibrated: true` (see that call site's comment — the chained
+ * simulator calibrates gas at RUN time regardless of resolver), but wiring
+ * it through now means a future change that makes per-step calibration
+ * conditional won't silently start blocking server-resolver cronotons.
+ *
+ * Exported (despite the narrow, internal-sounding name) SOLELY so a test can
+ * reach it directly — `validateStep`'s own unconditional
+ * `simulateCalibrated: true` currently masks the waiver's effect, so a test
+ * going through the full `canCommitChain` gate can't observe whether this
+ * threading is correct, only that the (already-guaranteed) verdict doesn't
+ * regress. This is a DIFFERENT rationale from `toRawPayloadState`/
+ * `isPlainObject`'s own export (those are exported for genuine cross-module
+ * PRODUCTION reuse by this file's own JSON importer, which happens to also
+ * make them directly testable as a side effect) — this one has no other
+ * production consumer outside this file.
+ */
+export function stepBuilderState(step: StepState, serverResolver?: string): BuilderState {
   return {
     ...makeEmptyBuilderState(),
     pactCode: step.pactCode,
@@ -166,6 +199,7 @@ function stepBuilderState(step: StepState): BuilderState {
     payload: step.payload,
     gasPayer: step.gasPayer,
     signers: step.signers,
+    serverResolver,
   };
 }
 
@@ -247,6 +281,7 @@ export function chainedBuilderToCommit(state: ChainedBuilderState): ChainCommitB
   if (state.singleTxVariant) {
     body.singleTxFirst = singleTxVariantToInput(state.singleTxVariant);
   }
+  if (state.serverResolver) body.serverResolver = state.serverResolver;
   return body;
 }
 
@@ -483,6 +518,14 @@ export function jsonToChainedBuilderState(text: string): ChainedBuilderImportRes
 
   const externalFireable = parsed.externalFireable === true;
   const schedule = externalFireable ? base.schedule : toScheduleStateFromWire(parsed.schedule) ?? base.schedule;
+  // `null` (an ordinary cronoton, per `ChainCommitBody.serverResolver`'s own
+  // doc) and any other non-string/empty value both degrade to `undefined` —
+  // the same "present but wrong-typed degrades like absent" tolerance every
+  // other field here gets, not a hard-error case.
+  const serverResolver =
+    typeof parsed.serverResolver === "string" && parsed.serverResolver.length > 0
+      ? parsed.serverResolver
+      : undefined;
 
   return {
     ok: true,
@@ -493,6 +536,7 @@ export function jsonToChainedBuilderState(text: string): ChainedBuilderImportRes
       externalFireable,
       singleTxVariant,
       steps,
+      serverResolver,
     },
   };
 }
@@ -507,9 +551,11 @@ const MSG = {
   plannerSigner: "A planner step needs at least one signer (to sign its legs).",
 } as const;
 
-/** Blocking reasons for ONE step, prefixed with its label. */
-function validateStep(step: StepState, label: string): string[] {
-  const synthetic = stepBuilderState(step);
+/** Blocking reasons for ONE step, prefixed with its label. `serverResolver` is
+ *  the ENVELOPE's resolver (see `stepBuilderState`'s own doc for why it's
+ *  threaded through here). */
+function validateStep(step: StepState, label: string, serverResolver?: string): string[] {
+  const synthetic = stepBuilderState(step, serverResolver);
   const reasons: string[] = [];
   const prefix = (m: string) => `${label}: ${m}`;
 
@@ -550,10 +596,10 @@ export function canCommitChain(
   if (state.name.trim().length === 0) reasons.push(MSG.name);
 
   state.steps.forEach((step, i) => {
-    reasons.push(...validateStep(step, `Step ${i + 1}`));
+    reasons.push(...validateStep(step, `Step ${i + 1}`, state.serverResolver));
   });
   if (state.singleTxVariant) {
-    reasons.push(...validateStep(state.singleTxVariant, "Step 0 (single-tx)"));
+    reasons.push(...validateStep(state.singleTxVariant, "Step 0 (single-tx)", state.serverResolver));
   }
 
   // Pure chain rules over the mapped step inputs (yield graph + decimal tripwire).
