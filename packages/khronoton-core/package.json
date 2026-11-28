@@ -1,6 +1,6 @@
 {
   "name": "@ancientpantheon/khronoton-core",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Headless framework-agnostic scheduler engine: pure schedule math plus an injectable tick engine. No database, no job queue, no framework — hosts inject storage and firing via hooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -76,6 +76,7 @@
   },
   "license": "UNLICENSED",
   "peerDependencies": {
+    "@codemirror/lang-json": "^6.0.2",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.4",
@@ -89,6 +90,9 @@
   },
   "peerDependenciesMeta": {
     "react": {
+      "optional": true
+    },
+    "@codemirror/lang-json": {
       "optional": true
     },
     "react-dom": {
@@ -123,6 +127,7 @@
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
+    "@codemirror/lang-json": "^6.0.2",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.4",

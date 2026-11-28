@@ -63,7 +63,13 @@ export const KHRONOTON_EDITOR_THEME_SPEC = {
   ".cm-activeLineGutter": { backgroundColor: ACTIVE_LINE_BG },
 };
 
-const khronotonEditorTheme = EditorView.theme(KHRONOTON_EDITOR_THEME_SPEC, {
+/**
+ * Exported (not module-local) so `RawJsonCodeMirror.tsx` can reuse the exact
+ * same theme for the read-only Raw JSON pane, rather than duplicating it —
+ * the spec is fully stateless (no per-instance data), so sharing one built
+ * `Extension` across both editors is safe and carries zero drift risk.
+ */
+export const khronotonEditorTheme = EditorView.theme(KHRONOTON_EDITOR_THEME_SPEC, {
   dark: true,
 });
 

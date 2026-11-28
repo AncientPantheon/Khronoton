@@ -1,12 +1,19 @@
 /**
  * ChainedBuilder — the full-page multi-step cronoton builder, laid out as a
  * CENTERED, WIDTH-CAPPED FILMSTRIP: a fixed step rail on the left, then up to
- * `fit` panes side by side — Pact code / Fields / Raw JSON — each a toggle
- * chip (shown/hidden), never more than the measured width can hold, so there
- * is NO horizontal scroll at any width. Adding a pane past capacity drops the
- * oldest; the whole rail+panes block is measured via a `ResizeObserver` and
- * capped + centred so the void on an ultrawide splits evenly instead of all
- * trailing on the right.
+ * `fit` panes side by side — Pact code / Result / Fields / Raw JSON — each a
+ * toggle chip (shown/hidden), never more than the measured width can hold, so
+ * there is NO horizontal scroll at any width. Adding a pane past capacity
+ * drops the oldest; the whole rail+panes block is measured via a
+ * `ResizeObserver` and capped + centred so the void on an ultrawide splits
+ * evenly instead of all trailing on the right. "Result" (added post-0.24.0)
+ * holds the dry-run `SimPanel` output and the executed-run `RunHistory`
+ * block — both used to render as unbounded blocks appended below the whole
+ * filmstrip, which could blow out the page's height on a long chain; now
+ * they're bounded + internally scrollable INSIDE this pane, subject to the
+ * exact same fit/eviction math as any other pane (see `ensurePaneVisible`,
+ * which forces it on screen after a successful Simulate the same way a
+ * manual toggle-click would).
  *
  * The Pact pane and the Fields pane both reflect the SELECTED step (the
  * rail's selection). The Fields pane is itself split into two tabs — "Step
@@ -42,6 +49,7 @@ import type { CodexCronotonRunLegRow, CodexCronotonRunRow } from "../../server/i
 import { canMutate, type Access } from "../access.js";
 import { LegStatusBadge } from "../badges.js";
 import { ExplorerLink } from "../explorer.js";
+import { RawJsonViewer } from "../RawJsonViewer.js";
 import { builderToCommit, makeEmptyBuilderState, type BuilderState } from "../builder-state.js";
 import { errorMessage } from "../confirm-flows.js";
 import {
@@ -187,11 +195,15 @@ function SimPanel({ sim, cronotonName }: { sim: ChainSimulateView; cronotonName:
 }
 
 // ── Run history (edit mode only) — real EXECUTED-run observability, distinct
-// from `SimPanel` above (a DRY-RUN preview). Rendered below the pane filmstrip
-// (same tier as `{sim && <SimPanel/>}`), never as a 4th toggleable pane — the
-// pane-sizing system (`panes`/`fit`/PANE_MIN/PANE_MAX) is a fixed, heavily-
-// tuned 3-pane layout; a full-width block below it is zero-risk to that math.
-// See docs/work/chained-run-history/design.md.
+// from `SimPanel` above (a DRY-RUN preview). Rendered inside the "result"
+// pane (see the `panes` array + the `p.key === "result"` branch below),
+// ALONGSIDE `SimPanel` — both used to render as unbounded blocks appended
+// below the whole pane filmstrip, which could blow out the page's height on
+// a long chain (see docs/work/chained-builder-result-pane-and-json-gutter/
+// design.md); now both are bounded + internally scrollable inside one pane,
+// fully subject to the SAME `panes`/`fit`/PANE_MIN/PANE_MAX/eviction math as
+// every other pane, not exempt from it. See also
+// docs/work/chained-run-history/design.md for `RunHistory` itself.
 function groupLegsByStep(legs: CodexCronotonRunLegRow[]): Map<number, CodexCronotonRunLegRow[]> {
   const groups = new Map<number, CodexCronotonRunLegRow[]>();
   for (const l of legs) {
@@ -633,9 +645,20 @@ export function ChainedBuilder({
   const [fitMode, setFitMode] = useState<"auto" | 1 | 2 | 3>("auto");
   const [rootWidth, setRootWidth] = useState(0);
   // Which panes are on screen. We never render more than `fit`, so there is NO
-  // horizontal scroll — the pager toggles which panes occupy the slots. Default:
-  // the selected step's code + its fields.
-  const [visiblePanes, setVisiblePanes] = useState<string[]>(["pact", "fields"]);
+  // horizontal scroll — the pager toggles which panes occupy the slots.
+  //
+  // Default: the selected step's code + its fields — EXCEPT in edit mode
+  // when the adapter supports the read-only run-history tier (`listRuns`/
+  // `listRunLegs`, both optional), where "result" (the Run History block,
+  // see the `panes` array below) replaces "pact" as the second default pane.
+  // This preserves the 0.24.0 behavior an operator opening an existing
+  // cronoton always saw — Run History rendered unconditionally, no click
+  // required — while keeping the default pane COUNT at 2, same as create
+  // mode, rather than seeding 3 panes and immediately relying on the
+  // fit-capacity slice below to silently drop one of them.
+  const [visiblePanes, setVisiblePanes] = useState<string[]>(() =>
+    Boolean(editId) && adapter.listRuns && adapter.listRunLegs ? ["result", "fields"] : ["pact", "fields"],
+  );
   // The Fields pane is split into two top-level tabs so the step config (default,
   // dominant) isn't crowded by the whole-cronoton config (name / schedule).
   const [fieldsTab, setFieldsTab] = useState<"step" | "whole">("step");
@@ -645,6 +668,15 @@ export function ChainedBuilder({
   const panes = useMemo(
     () => [
       { key: "pact", label: "Pact code" },
+      // Between Pact code and Fields, per the handoff: the dry-run preview
+      // (SimPanel) and the real executed-run history (RunHistory) used to
+      // render as unbounded full-width blocks APPENDED below the whole pane
+      // filmstrip — on a long chain (13+ steps) either block could be taller
+      // than the viewport, dragging the whole page into one giant scroll
+      // instead of scrolling inside its own box. Now a pane like any other:
+      // bounded by the SAME `paneStyle` box every pane already uses, with its
+      // own internal scroll (see the `p.key === "result"` branch below).
+      { key: "result", label: "Result" },
       { key: "fields", label: "Fields" },
       { key: "raw", label: "Raw JSON" },
     ],
@@ -731,24 +763,44 @@ export function ChainedBuilder({
   // JSON" is toggled back on). Evict the next-oldest NON-"raw" pane(s) instead;
   // if there's no room left once "raw" is excluded, the newly-toggled pane
   // simply doesn't fit yet (same as any other fit-capacity miss).
+  // The shared "add `key`, evict-the-oldest-if-over-capacity" mechanics —
+  // factored out of `togglePane` so `ensurePaneVisible` (below) can force a
+  // pane on screen the SAME way a manual toggle-click would, without
+  // duplicating the "raw" pin-while-importing exception.
+  const addPaneEvictingOldest = useCallback(
+    (cur: string[], key: string): string[] => {
+      if (cur.includes(key)) return cur;
+      const next = [...cur, key];
+      if (next.length <= fit) return next;
+      if (importOpen && next.includes("raw")) {
+        const toDrop = next.length - fit;
+        const dropped = new Set<string>();
+        for (const k of next) {
+          if (dropped.size >= toDrop) break;
+          if (k !== "raw") dropped.add(k);
+        }
+        return next.filter((k) => !dropped.has(k));
+      }
+      return next.slice(next.length - fit);
+    },
+    [fit, importOpen],
+  );
+
   const togglePane = useCallback(
     (key: string) =>
       setVisiblePanes((cur) => {
         if (cur.includes(key)) return cur.length > 1 ? cur.filter((k) => k !== key) : cur;
-        const next = [...cur, key];
-        if (next.length <= fit) return next;
-        if (importOpen && next.includes("raw")) {
-          const toDrop = next.length - fit;
-          const dropped = new Set<string>();
-          for (const k of next) {
-            if (dropped.size >= toDrop) break;
-            if (k !== "raw") dropped.add(k);
-          }
-          return next.filter((k) => !dropped.has(k));
-        }
-        return next.slice(next.length - fit);
+        return addPaneEvictingOldest(cur, key);
       }),
-    [fit, importOpen],
+    [addPaneEvictingOldest],
+  );
+
+  // Forces `key` on screen (e.g. "result" right after a successful Simulate)
+  // — a no-op if it's already visible, otherwise the exact same add/evict
+  // mechanics a manual toggle-click on that pane's own chip would run.
+  const ensurePaneVisible = useCallback(
+    (key: string) => setVisiblePanes((cur) => addPaneEvictingOldest(cur, key)),
+    [addPaneEvictingOldest],
   );
 
   // Signer descriptors (once) — the Gas Payer + Signatures pickers read them.
@@ -981,12 +1033,17 @@ export function ChainedBuilder({
         onNeedConfirm: config.onNeedConfirm,
       });
       setSim(res);
+      // Surface the dry-run output where it actually lives now (the "Result"
+      // pane, bounded + internally scrollable) — mirrors the old behavior of
+      // always showing it the moment Simulate succeeds, just inside a pane
+      // slot instead of an unbounded block below the whole filmstrip.
+      ensurePaneVisible("result");
     } catch (e) {
       window.alert(errorMessage(e));
     } finally {
       setSimulating(false);
     }
-  }, [adapter, config.onNeedConfirm, state]);
+  }, [adapter, config.onNeedConfirm, state, ensurePaneVisible]);
 
   // ── Raw JSON pane: unlock / paste / import ───────────────────────────────────
   // The pane itself stays read-only by default (no accidental typing) — these
@@ -1491,6 +1548,24 @@ export function ChainedBuilder({
                   </div>
                 )}
 
+                {p.key === "result" && (
+                  <div style={{ ...panel, flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                    <div style={colTitle}>Result</div>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+                      {sim && <SimPanel sim={sim} cronotonName={state.name} />}
+                      {isEdit && editId && adapter.listRuns && adapter.listRunLegs && (
+                        <RunHistory id={editId} cronotonName={state.name} steps={state.steps} adapter={adapter} />
+                      )}
+                      {!sim && !(isEdit && editId && adapter.listRuns && adapter.listRunLegs) && (
+                        <p style={{ fontSize: 12, color: "var(--khr-text-dim)" }}>
+                          Run "Simulate chain" to preview a dry run, or open an existing cronoton to see its run
+                          history.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {p.key === "raw" && (
                   <div style={{ ...panel, flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
@@ -1602,24 +1677,7 @@ export function ChainedBuilder({
                       </div>
                     ) : (
                       <>
-                        <pre
-                          data-testid="chained-builder-raw-json-pre"
-                          style={{
-                            margin: 0,
-                            flex: 1,
-                            overflow: "auto",
-                            background: "var(--khr-inset)",
-                            border: "1px solid var(--khr-border)",
-                            borderRadius: "var(--khr-radius)",
-                            padding: 10,
-                            fontFamily: "var(--khr-mono-font)",
-                            fontSize: 12,
-                            color: "var(--khr-mono)",
-                            whiteSpace: "pre",
-                          }}
-                        >
-                          {codeText}
-                        </pre>
+                        <RawJsonViewer value={codeText} />
                         <p style={{ fontSize: 10, color: "var(--khr-text-dim2)", marginTop: 6 }}>
                           The form drives this live. Use "Paste / import" above to load your own raw JSON instead.
                         </p>
@@ -1630,27 +1688,6 @@ export function ChainedBuilder({
               </section>
             ))}
           </div>
-
-          {/* Dry-run results — appears under the panes after Simulate, spanning
-              the workspace width (its action button lives in the left column). */}
-          {sim && (
-            <div style={panel}>
-              <SimPanel sim={sim} cronotonName={state.name} />
-            </div>
-          )}
-
-          {/* Run history — real executed-run observability, edit mode only,
-              and only when the adapter actually supports the read-only
-              listRuns/listRunLegs tier (both optional; absent either, this
-              renders nothing — see docs/work/chained-run-history/design.md). */}
-          {isEdit && editId && adapter.listRuns && adapter.listRunLegs && (
-            <RunHistory
-              id={editId}
-              cronotonName={state.name}
-              steps={state.steps}
-              adapter={adapter}
-            />
-          )}
           </div>
         </div>
       </div>

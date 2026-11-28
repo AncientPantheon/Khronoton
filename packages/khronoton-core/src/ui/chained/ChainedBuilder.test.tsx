@@ -42,6 +42,19 @@ vi.mock("../PactCodeMirror.js", () => ({
   ),
 }));
 
+// Same rationale, same mechanism, for the Raw JSON pane's own lazy-loaded
+// CodeMirror (`RawJsonViewer.tsx`'s `lazy(() => import("./RawJsonCodeMirror.js"))`)
+// — mocked to a plain read-only `<pre>` so every existing Raw-JSON-pane test
+// (pretty-print text, newlines, resolver-select substring checks) keeps
+// reading the exact same deterministic markup it always has. No testid of its
+// own here — `RawJsonViewer.tsx`'s OWN wrapper div around the lazy component
+// already carries `data-testid="chained-builder-raw-json-pre"`; duplicating it
+// here would put two elements with the same testid in the tree (the wrapper
+// AND this mock), breaking `getByTestId`'s single-match contract.
+vi.mock("../RawJsonCodeMirror.js", () => ({
+  default: ({ value }: { value: string }) => <pre style={{ whiteSpace: "pre" }}>{value}</pre>,
+}));
+
 // jsdom implements neither `ResizeObserver` nor real layout (`clientWidth` is
 // always 0), but `ChainedBuilder`'s filmstrip sizes its panes from a
 // `ResizeObserver`-measured width — with both absent, its `fit` calculation
@@ -652,6 +665,14 @@ describe("ChainedBuilder — Raw JSON pane: unlock / paste / import", () => {
       // range), the Fields pane would show "Select a step." instead of the
       // real per-step tab strip.
       expect(screen.queryByText("Select a step.")).toBeNull();
+      // "Fields" was pushed out of the (still only 2-wide, at this stub's
+      // `fit`) visible set by the Simulate click above claiming the new
+      // "Result" pane slot, then by "Raw JSON" claiming another right after
+      // — re-opening it here is the real, intentional pane-capacity tradeoff
+      // this release makes (Simulate/Run-history now occupy a pane slot
+      // instead of an unbounded block always shown regardless of panes), not
+      // a workaround for a bug.
+      fireEvent.click(screen.getByRole("button", { name: "Fields" }));
       expect(screen.getByRole("button", { name: "Gas Payer" })).toBeTruthy();
 
       // Reopening "Paste / import" right after a SUCCESSFUL capture starts
@@ -1614,4 +1635,84 @@ describe("ChainedBuilder — Run history (edit mode, real executed-run observabi
     },
     TEST_TIMEOUT,
   );
+});
+
+describe("ChainedBuilder — bounded 'Result' pane (Simulate/Run-history no longer an unbounded block below the panes)", () => {
+  it("renders a 'Result' toggle chip in the pane strip", () => {
+    mount(makeAdapter());
+    expect(screen.getByRole("button", { name: "Result" })).toBeTruthy();
+  });
+
+  it("create mode, before Simulate: the Result pane is NOT shown by default (pact+fields only, same default as before this change)", () => {
+    mount(makeAdapter());
+    expect(screen.queryByTestId("chained-builder-pane-result")).toBeNull();
+    expect(screen.getByTestId("chained-builder-pane-pact")).toBeTruthy();
+    expect(screen.getByTestId("chained-builder-pane-fields")).toBeTruthy();
+  });
+
+  it(
+    "clicking Simulate auto-shows the Result pane with the dry-run output, inside an internally-scrollable box",
+    async () => {
+      const simulateChain = vi.fn(async () => ({
+        ok: true as const,
+        steps: [{ stepIndex: 0, mode: "single" as const, ok: true, gasUsed: 10 }],
+      }));
+      mount(makeAdapter({ simulateChain: simulateChain as unknown as KhronotonAdapter["simulateChain"] }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Simulate chain" }));
+      await waitFor(() => expect(screen.getByText(/Dry run:/)).toBeTruthy(), ASYNC_TIMEOUT);
+
+      const pane = screen.getByTestId("chained-builder-pane-result");
+      expect(pane).toBeTruthy();
+      // The scroll wrapper inside the pane is bounded + internally
+      // scrollable — structural proof (jsdom has no real layout engine to
+      // measure actual pixel heights against), the same idiom 0.20.0's own
+      // layout-fix tests used.
+      const scrollBox = pane.querySelector('div[style*="overflow-y"]') as HTMLElement | null;
+      expect(scrollBox).toBeTruthy();
+      expect(scrollBox?.style.overflowY).toBe("auto");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "edit mode + listRuns/listRunLegs adapter support: the Result pane is shown by default, with Run history visible without any click",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [], total: 0, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async () => ({ ok: true, legs: [], yields: {} }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      // No click at all — this is the "always visible before" discoverability
+      // the 0.24.0 Run History block had, preserved through the new pane.
+      await waitFor(() => expect(screen.getByText("Run history")).toBeTruthy(), ASYNC_TIMEOUT);
+      expect(listRuns).toHaveBeenCalledWith("cr_1");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it("shows a neutral empty-state message in the Result pane when neither a simulate nor a run-history mount applies", () => {
+    mount(makeAdapter());
+    fireEvent.click(screen.getByRole("button", { name: "Result" }));
+    expect(screen.getByText(/Run "Simulate chain" to preview a dry run/)).toBeTruthy();
+  });
+
+  it("neither SimPanel's output nor RunHistory render as a sibling block outside the pane track anymore", async () => {
+    const simulateChain = vi.fn(async () => ({
+      ok: true as const,
+      steps: [{ stepIndex: 0, mode: "single" as const, ok: true, gasUsed: 10 }],
+    }));
+    mount(makeAdapter({ simulateChain: simulateChain as unknown as KhronotonAdapter["simulateChain"] }));
+    fireEvent.click(screen.getByRole("button", { name: "Simulate chain" }));
+    await waitFor(() => expect(screen.getByText(/Dry run:/)).toBeTruthy(), ASYNC_TIMEOUT);
+
+    // The dry-run text's nearest `chained-builder-pane-*` ancestor must be
+    // the Result pane — proving it rendered INSIDE the filmstrip, not
+    // appended after it.
+    const dryRunNode = screen.getByText(/Dry run:/);
+    const paneAncestor = dryRunNode.closest('[data-testid^="chained-builder-pane-"]');
+    expect(paneAncestor?.getAttribute("data-testid")).toBe("chained-builder-pane-result");
+  });
 });

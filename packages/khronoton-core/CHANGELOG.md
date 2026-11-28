@@ -4,6 +4,48 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.25.0 — 2026-11-28
+
+**MINOR — two ChainedBuilder UX follow-ups (post-0.24.0): a bounded "Result" pane fixing a real page-height-blowout bug, and a Raw JSON pane line-number gutter via CodeMirror.**
+
+**Bug fix (priority) — the Simulate/Run-history output no longer blows out the page on long chains.**
+The dry-run `SimPanel` output and the 0.24.0 `RunHistory` block both used to render as unbounded,
+full-width `<div>`s appended BELOW the whole pane filmstrip. On a short chain this was a few lines
+and unnoticeable; on a 13+ step chain either block could be taller than the viewport, so the
+builder's overall height ballooned and the rail + panes (sized to fill a bounded parent, by this
+component's own documented mount contract) got dragged into one giant page-level scroll instead of
+each scrolling independently. Fixed by adding a 4th toggleable pane, `"Result"`, inserted into the
+existing pane filmstrip between Pact code and Fields — a strict extension of the already-generic
+`panes`/`fit`/eviction machinery (confirmed by reading it first: none of that math was hardcoded to
+3 panes, only the manual Fit-selector's button list is a fixed `[1,2,3]` set, unaffected since
+"Auto" already scales to `panes.length`). The pane's content gets a bounded, internally-scrollable
+box — a tall run history now scrolls INSIDE its own pane and never changes the builder's height.
+Discoverability preserved deliberately, not via a blanket "always show Result": a new
+`ensurePaneVisible("result")` fires right after a successful Simulate (mirroring a manual
+toggle-click), and the default `visiblePanes` seed swaps "pact" for "result" specifically in edit
+mode when the adapter supports `listRuns`/`listRunLegs` — exactly the condition under which
+`RunHistory` used to render unconditionally before this release.
+
+**Addition — the Raw JSON pane renders through CodeMirror with a line-number gutter.** New
+`RawJsonCodeMirror.tsx`/`RawJsonViewer.tsx`, mirroring the existing `PactCodeMirror.tsx`/
+`PactCodeEditor.tsx` SSR-safety split exactly (dynamic `import()`, mounted-gate, `forceFallback`
+test seam) — a real browser gets a read-only (`editable={false}`), JSON-mode, line-numbered
+CodeMirror instance (new peer dep `@codemirror/lang-json`, optional, same family as the
+already-required `@codemirror/*` packages); jsdom/SSR/`forceFallback` keep rendering the exact same
+`<pre data-testid="chained-builder-raw-json-pre">` this pane always has, so every pre-existing
+Raw-JSON-pane test passes unmodified.
+
+Reviewed via nectar (single focused correctness pass): one MEDIUM caught and fixed — two doc
+comments went stale the moment the implementation changed, with `RunHistory`'s own comment
+asserting the OPPOSITE of the new code (claiming it's "never a 4th toggleable pane" when that's
+now exactly what it is); rewritten to describe the real bounded-pane behavior. No logic bugs found:
+explicitly re-verified the `visiblePanes` lazy initializer reads real `editId`/`adapter` values, the
+Result pane's empty-state condition is the exact negation of its sibling render conditions, the old
+below-the-track blocks are genuinely removed (not duplicated), and the CodeMirror read-only wiring
+has no duplicate-testid break. One pre-existing test needed a one-line adaptation (re-opening
+"Fields" after a Simulate+Raw-JSON-toggle sequence, since Simulate now legitimately competes for a
+pane slot) — a real, intentional behavior tradeoff, not a coverage weakening. **1636 specs pass.**
+
 ## 0.24.0 — 2026-11-28
 
 **MINOR — surface a chained cronoton's EXECUTED run history in the packaged `ChainedBuilder`: a real "which step stopped it and why" view, distinct from the existing dry-run preview. Purely additive — absent adapter support, or outside edit mode, nothing changes.**
