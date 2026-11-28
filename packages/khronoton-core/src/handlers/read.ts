@@ -28,6 +28,7 @@ import {
   listRunsForCronoton,
   listRunLegs,
   getRun,
+  getYieldPool,
   type CodexCronotonRow,
   type CodexCronotonRunLegRow,
 } from "../server/index.js";
@@ -220,6 +221,13 @@ export async function runLegsHandler(
       return err(404, "not found");
     }
     const legs = listRunLegs(runId, { db: ctx.db }).map(redactLegRow);
-    return json(200, { ok: true, legs });
+    // The run's named-yield pool, riding along on this one response — see
+    // `docs/work/chained-run-history/design.md`: a step's captured on-chain
+    // return value (single) / planner-reported yield (planner) is otherwise
+    // only reachable by a second round trip a UI would have to make per step;
+    // this is the "distribution report" (one sentence per step) the handoff
+    // asked for, built entirely from data the engine already captures.
+    const yields = getYieldPool(runId, { db: ctx.db });
+    return json(200, { ok: true, legs, yields });
   });
 }

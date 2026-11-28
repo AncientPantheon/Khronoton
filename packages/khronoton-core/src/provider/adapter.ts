@@ -30,6 +30,8 @@
 import type {
   CodexCronotonRow,
   CodexCronotonFireRow,
+  CodexCronotonRunRow,
+  CodexCronotonRunLegRow,
   ManualBatchView,
   RuntimeArgs,
   ServerResolver,
@@ -105,6 +107,34 @@ export interface FiresView {
   total: number;
   limit: number;
   offset: number;
+}
+
+/** Optional filters for a chained cronoton's run history (mirrors {@link FiresQuery}'s own paging shape, minus `id` — that's the method's own first argument here, not a query field). */
+export interface RunsQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /[id]/runs` body — offset-paged run history, newest-first. */
+export interface RunsView {
+  ok: true;
+  runs: CodexCronotonRunRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * `GET /[id]/runs/[runId]` body — every leg of one run, plus that run's named-
+ * yield pool (`yields`), keyed by each step's own `yieldAs` name. The yield
+ * pool is what lets a caller render `formatStepResult`'s per-step sentence
+ * (the "distribution report") without a second round trip for step metadata —
+ * the caller already has the step list from its own builder state.
+ */
+export interface RunLegsView {
+  ok: true;
+  legs: CodexCronotonRunLegRow[];
+  yields: Record<string, unknown>;
 }
 
 /** `GET /signers` body — secret-free descriptors. */
@@ -268,6 +298,20 @@ export interface KhronotonAdapter {
    * silently falling back to a create.
    */
   updateChain?(id: string, body: ChainCommitBody, opts?: ConfirmOpts): Promise<ChainCommitView>;
+
+  /**
+   * Read-only run history for a chained cronoton (`GET /[id]/runs`), newest
+   * first. OPTIONAL, same posture as {@link commitChain}: an adapter whose
+   * backend has no such route simply omits it, and `ChainedBuilder`'s Run
+   * History block (edit mode only) does not render rather than erroring.
+   */
+  listRuns?(id: string, query?: RunsQuery): Promise<RunsView>;
+  /**
+   * Read-only leg detail for ONE run of a chained cronoton (`GET
+   * /[id]/runs/[runId]`) — every leg plus the run's named-yield pool.
+   * OPTIONAL, same posture as {@link listRuns}.
+   */
+  listRunLegs?(id: string, runId: string): Promise<RunLegsView>;
 }
 
 /** The 16 method names an object must carry to be a {@link KhronotonAdapter}. */

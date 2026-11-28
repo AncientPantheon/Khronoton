@@ -1366,3 +1366,252 @@ describe("ChainedBuilder — a visible resolver pill outside the Fields tab", ()
     expect(screen.queryByText(/⟳/)).toBeNull();
   });
 });
+
+// A 2-step chain fixture + the real executed-run data a run history block
+// reads: a "mint" step (step 0) fully confirmed with a captured yield, and a
+// planner-shaped step (step 1) with 2 planned legs, one still submitted.
+const RUN_HISTORY_FIXTURE: ChainCommitBody = {
+  name: "OuroMinterStageTwo",
+  steps: [
+    {
+      mode: "single",
+      yieldAs: "minted",
+      pactCode: "(mint)",
+      gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+      signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+    },
+    {
+      mode: "planner",
+      plannerName: "ouronet.aqp-unstall",
+      plannerParams: {},
+      pactCode: "",
+      gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+      signers: [],
+    },
+  ],
+};
+
+const RUN_ROW_NEW = {
+  id: "run_new",
+  codex_cronoton_id: "cr_1",
+  fire_id: null,
+  status: "advancing" as const,
+  step_index: 1,
+  step_count: 2,
+  started_at: "2026-11-20T00:00:00.000Z",
+  modified_at: "2026-11-20T00:05:00.000Z",
+  deadline_at: null,
+  attempt: 0,
+  context_json: null,
+};
+
+const RUN_ROW_OLD = { ...RUN_ROW_NEW, id: "run_old", started_at: "2026-11-01T00:00:00.000Z" };
+
+function leg(overrides: Partial<{
+  id: string;
+  step_index: number;
+  leg_index: number;
+  status: "pending" | "submitted" | "confirmed" | "failed";
+  request_key: string | null;
+  error_message: string | null;
+}>) {
+  return {
+    id: overrides.id ?? "leg_default",
+    run_id: "run_new",
+    step_index: overrides.step_index ?? 0,
+    leg_index: overrides.leg_index ?? 0,
+    status: overrides.status ?? "confirmed",
+    request_key: overrides.request_key ?? null,
+    chain_id: null,
+    definition_json: "{}",
+    error_message: overrides.error_message ?? null,
+    submitted_at: null,
+    confirmed_at: null,
+    attempt: 0,
+    claimed_at: null,
+  };
+}
+
+describe("ChainedBuilder — Run history (edit mode, real executed-run observability)", () => {
+  it("is absent in create mode even when the adapter has listRuns/listRunLegs (no cronoton id to query yet)", () => {
+    const listRuns = vi.fn();
+    mount(makeAdapter({ listRuns, listRunLegs: vi.fn() } as Partial<KhronotonAdapter>));
+    expect(screen.queryByText("Run history")).toBeNull();
+    expect(listRuns).not.toHaveBeenCalled();
+  });
+
+  it("is absent in edit mode when the adapter omits listRuns/listRunLegs", () => {
+    mount(makeAdapter(), { editId: "cr_1", initialDocument: RUN_HISTORY_FIXTURE });
+    expect(screen.queryByText("Run history")).toBeNull();
+  });
+
+  it(
+    "fetches and renders the newest run's legs by default, one row per leg colour-coded by status",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [RUN_ROW_NEW, RUN_ROW_OLD], total: 2, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async (_id: string, _runId: string) => ({
+        ok: true,
+        legs: [
+          leg({ id: "l0", step_index: 0, status: "confirmed" }),
+          leg({ id: "l1", step_index: 1, leg_index: 0, status: "confirmed", request_key: "req-key-1" }),
+          leg({ id: "l2", step_index: 1, leg_index: 1, status: "submitted" }),
+        ],
+        yields: { minted: "100.0 AURYN" },
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(() => expect(listRuns).toHaveBeenCalledWith("cr_1"), ASYNC_TIMEOUT);
+      // Defaults to the newest run (runs[0], not runs[1]).
+      await waitFor(() => expect(listRunLegs).toHaveBeenCalledWith("cr_1", "run_new"), ASYNC_TIMEOUT);
+
+      await waitFor(() => expect(screen.getAllByText("confirmed")).toHaveLength(2), ASYNC_TIMEOUT);
+      expect(screen.getByText("submitted…")).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "switching the run picker re-fetches legs for the newly-selected run",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [RUN_ROW_NEW, RUN_ROW_OLD], total: 2, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async () => ({ ok: true, legs: [], yields: {} }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+      await waitFor(() => expect(listRunLegs).toHaveBeenCalledWith("cr_1", "run_new"), ASYNC_TIMEOUT);
+
+      fireEvent.change(screen.getByLabelText("Select run"), { target: { value: "run_old" } });
+
+      await waitFor(() => expect(listRunLegs).toHaveBeenCalledWith("cr_1", "run_old"), ASYNC_TIMEOUT);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "shows a failed leg's error_message",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [RUN_ROW_NEW], total: 1, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async () => ({
+        ok: true,
+        legs: [leg({ id: "l0", step_index: 0, status: "failed", error_message: "insufficient funds" })],
+        yields: {},
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(() => expect(screen.getByText("insufficient funds")).toBeTruthy(), ASYNC_TIMEOUT);
+      expect(screen.getByText("failed")).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "renders an explorer link for a landed leg's request_key",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [RUN_ROW_NEW], total: 1, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async () => ({
+        ok: true,
+        legs: [leg({ id: "l0", step_index: 0, status: "confirmed", request_key: "req-abc" })],
+        yields: {},
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(() => expect(screen.getByText("explorer ↗")).toBeTruthy(), ASYNC_TIMEOUT);
+      const link = screen.getByText("explorer ↗").closest("a");
+      expect(link?.getAttribute("href")).toContain(encodeURIComponent("req-abc"));
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "a planner step with 0 planned legs on a SUCCEEDED run reads as the healthy 'nothing to do' case, not a bare 0 and not a failure",
+    async () => {
+      const listRuns = vi.fn(async () => ({
+        ok: true,
+        runs: [{ ...RUN_ROW_NEW, step_index: 1, status: "succeeded" }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      }));
+      const listRunLegs = vi.fn(async () => ({
+        ok: true,
+        legs: [leg({ id: "l0", step_index: 0, status: "confirmed" })], // step 1 (planner) planned nothing
+        yields: { minted: "100.0 AURYN" },
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(() => expect(screen.getByText(/nothing to do/)).toBeTruthy(), ASYNC_TIMEOUT);
+      expect(screen.queryByText(/failed/)).toBeNull();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "a step that aborted a FAILED run before planning any legs reads as a genuine failure, NOT 'nothing to do' and NOT a fabricated ok/yield sentence — regression for a nectar correctness-lens finding (the run's own terminal status was never consulted, so a plan-time throw with zero legs rendered identically to the healthy zero-legs case)",
+    async () => {
+      const listRuns = vi.fn(async () => ({
+        ok: true,
+        // The run failed AT step 1 (the planner step) before it ever wrote a
+        // single leg row — `runs-driver.ts`'s `handleReplanStep` terminalizes
+        // exactly this way when `stepHasAnyLegs === false`.
+        runs: [{ ...RUN_ROW_NEW, step_index: 1, status: "failed" }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      }));
+      const listRunLegs = vi.fn(async () => ({
+        ok: true,
+        legs: [leg({ id: "l0", step_index: 0, status: "confirmed" })], // step 0 (mint) genuinely succeeded + yielded
+        yields: { minted: "100.0 AURYN" },
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(
+        () => expect(screen.getByText(/run failed before this step planned any legs/)).toBeTruthy(),
+        ASYNC_TIMEOUT,
+      );
+      expect(screen.queryByText(/nothing to do/)).toBeNull();
+      // Step 0 (the step that genuinely succeeded) still shows its real
+      // result sentence — only the failing step's own line is suppressed.
+      expect(screen.getByText(/yields minted = "100\.0 AURYN"/)).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "shows formatStepResult's deterministic sentence once a yield-bearing step's legs are all confirmed",
+    async () => {
+      const listRuns = vi.fn(async () => ({ ok: true, runs: [RUN_ROW_NEW], total: 1, limit: 20, offset: 0 }));
+      const listRunLegs = vi.fn(async () => ({
+        ok: true,
+        legs: [leg({ id: "l0", step_index: 0, status: "confirmed" })],
+        yields: { minted: "100.0 AURYN" },
+      }));
+      mount(makeAdapter({ listRuns, listRunLegs } as Partial<KhronotonAdapter>), {
+        editId: "cr_1",
+        initialDocument: RUN_HISTORY_FIXTURE,
+      });
+
+      await waitFor(
+        () => expect(screen.getByText(/yields minted = "100\.0 AURYN"/)).toBeTruthy(),
+        ASYNC_TIMEOUT,
+      );
+    },
+    TEST_TIMEOUT,
+  );
+});

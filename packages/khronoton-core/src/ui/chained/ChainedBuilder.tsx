@@ -36,8 +36,12 @@ import type {
 } from "../../handlers/index.js";
 import { useKhronotonAdapter, useKhronotonConfig } from "../../provider/context.js";
 import type { ServerResolverOption } from "../../provider/context.js";
+import type { KhronotonAdapter } from "../../provider/adapter.js";
 import { runGated } from "../../provider/runGated.js";
+import type { CodexCronotonRunLegRow, CodexCronotonRunRow } from "../../server/index.js";
 import { canMutate, type Access } from "../access.js";
+import { LegStatusBadge } from "../badges.js";
+import { ExplorerLink } from "../explorer.js";
 import { builderToCommit, makeEmptyBuilderState, type BuilderState } from "../builder-state.js";
 import { errorMessage } from "../confirm-flows.js";
 import {
@@ -178,6 +182,260 @@ function SimPanel({ sim, cronotonName }: { sim: ChainSimulateView; cronotonName:
           })}
         />
       ))}
+    </div>
+  );
+}
+
+// ── Run history (edit mode only) — real EXECUTED-run observability, distinct
+// from `SimPanel` above (a DRY-RUN preview). Rendered below the pane filmstrip
+// (same tier as `{sim && <SimPanel/>}`), never as a 4th toggleable pane — the
+// pane-sizing system (`panes`/`fit`/PANE_MIN/PANE_MAX) is a fixed, heavily-
+// tuned 3-pane layout; a full-width block below it is zero-risk to that math.
+// See docs/work/chained-run-history/design.md.
+function groupLegsByStep(legs: CodexCronotonRunLegRow[]): Map<number, CodexCronotonRunLegRow[]> {
+  const groups = new Map<number, CodexCronotonRunLegRow[]>();
+  for (const l of legs) {
+    const group = groups.get(l.step_index) ?? [];
+    group.push(l);
+    groups.set(l.step_index, group);
+  }
+  return groups;
+}
+
+function RunHistory({
+  id,
+  cronotonName,
+  steps,
+  adapter,
+}: {
+  id: string;
+  cronotonName: string;
+  steps: StepState[];
+  adapter: Pick<KhronotonAdapter, "listRuns" | "listRunLegs">;
+}): ReactNode {
+  const config = useKhronotonConfig();
+  const [runs, setRuns] = useState<CodexCronotonRunRow[] | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [legs, setLegs] = useState<CodexCronotonRunLegRow[] | null>(null);
+  const [yields, setYields] = useState<Record<string, unknown>>({});
+  const [legsError, setLegsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRuns(null);
+    setRunsError(null);
+    adapter.listRuns!(id).then(
+      (view) => {
+        if (cancelled) return;
+        setRuns(view.runs);
+        setSelectedRunId(view.runs[0]?.id ?? null);
+      },
+      (error) => {
+        if (!cancelled) setRunsError(errorMessage(error));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // `adapter`/`id` are stable for the lifetime of a mounted edit session —
+    // intentionally NOT re-run on `steps` changing (an in-progress form edit
+    // must never silently re-fetch run history out from under the operator).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter, id]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setLegs(null);
+      setYields({});
+      return;
+    }
+    let cancelled = false;
+    setLegsError(null);
+    adapter.listRunLegs!(id, selectedRunId).then(
+      (view) => {
+        if (cancelled) return;
+        setLegs(view.legs);
+        setYields(view.yields);
+      },
+      (error) => {
+        if (!cancelled) setLegsError(errorMessage(error));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter, id, selectedRunId]);
+
+  if (runsError) {
+    return (
+      <div style={panel}>
+        <div style={colTitle}>Run history</div>
+        <p style={{ fontSize: 12, color: "var(--khr-error)" }}>{runsError}</p>
+      </div>
+    );
+  }
+  if (!runs) {
+    return (
+      <div style={panel}>
+        <div style={colTitle}>Run history</div>
+        <p style={{ fontSize: 12, color: "var(--khr-text-dim)" }}>Loading run history…</p>
+      </div>
+    );
+  }
+  if (runs.length === 0) {
+    return (
+      <div style={panel}>
+        <div style={colTitle}>Run history</div>
+        <p style={{ fontSize: 12, color: "var(--khr-text-dim)" }}>No runs yet.</p>
+      </div>
+    );
+  }
+
+  const selectedRun = runs.find((r) => r.id === selectedRunId) ?? null;
+  const groups = legs ? groupLegsByStep(legs) : new Map<number, CodexCronotonRunLegRow[]>();
+  // The step indexes to render: every index this run has REACHED (0..the run's
+  // own `step_index`, inclusive — the barrier it's currently working, or the
+  // last one it reached if terminal), unioned with any index that genuinely
+  // has leg rows (defensive). A step past the barrier has no data yet and is
+  // deliberately NOT rendered as "0 legs" — that would misrepresent "not
+  // reached" as "reached and planned nothing."
+  const stepIndexes = new Set<number>();
+  if (selectedRun) {
+    for (let i = 0; i <= selectedRun.step_index && i < steps.length; i += 1) stepIndexes.add(i);
+  }
+  for (const key of groups.keys()) stepIndexes.add(key);
+  const sortedStepIndexes = Array.from(stepIndexes).sort((a, b) => a - b);
+
+  return (
+    <div style={panel}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={colTitle}>Run history</div>
+        <select
+          aria-label="Select run"
+          value={selectedRunId ?? ""}
+          onChange={(e) => setSelectedRunId(e.target.value)}
+          style={{ ...field, width: "auto" }}
+        >
+          {runs.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.started_at} · {r.status}
+            </option>
+          ))}
+        </select>
+      </div>
+      {legsError && (
+        <p style={{ fontSize: 11, color: "var(--khr-error)" }}>{legsError}</p>
+      )}
+      {legs && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {sortedStepIndexes.map((stepIndex) => {
+            const stepLegs = groups.get(stepIndex) ?? [];
+            const step = steps[stepIndex];
+            const isPlanner = step?.mode === "planner";
+            // `stepIndex === selectedRun.step_index` is the CURRENT barrier —
+            // the step this run is (or was, if terminal) actively working.
+            // Zero legs there is ambiguous by itself: it's the healthy
+            // "planner decided nothing was owed, barrier cleared" case ONLY
+            // once the run is genuinely past it (an EARLIER index) or the
+            // whole run succeeded on this exact step; it's a REAL failure
+            // when the run terminalized `failed` at this exact step before a
+            // single leg was ever written (`runs-driver.ts`'s
+            // `handleReplanStep` catches a plan-time throw with
+            // `stepHasAnyLegs === false` and calls `handleFailRun` — leaving
+            // this step with no legs and no error_message to show, since
+            // there is no leg row to carry one). A review finding caught an
+            // earlier version of this file treating ALL three cases
+            // identically ("(nothing to do)" + a fabricated `ok: true`
+            // result sentence even on the step that aborted the run) —
+            // exactly the "which step stopped it and WHY" question this
+            // whole feature exists to answer, answered wrong.
+            const isCurrentBarrier = selectedRun !== null && stepIndex === selectedRun.step_index;
+            const stepFailedWithNoLegs =
+              stepLegs.length === 0 && isCurrentBarrier && selectedRun?.status === "failed";
+            const stepDoneWithNoLegs =
+              stepLegs.length === 0 && (!isCurrentBarrier || selectedRun?.status === "succeeded");
+            const allConfirmed =
+              !stepFailedWithNoLegs &&
+              (stepDoneWithNoLegs || (stepLegs.length > 0 && stepLegs.every((l) => l.status === "confirmed")));
+            const resultLine =
+              step?.yieldAs && allConfirmed
+                ? formatStepResult({
+                    cronotonName,
+                    stepIndex,
+                    totalSteps: steps.length,
+                    ok: true,
+                    yieldAs: step.yieldAs,
+                    yielded: yields[step.yieldAs],
+                  })
+                : undefined;
+            // The zero-legs annotation: exactly one of these three is ever
+            // true for a given step, so they're mutually exclusive branches,
+            // not independent conditions that could both render.
+            const zeroLegsNote = stepLegs.length === 0
+              ? stepFailedWithNoLegs
+                ? "run failed before this step planned any legs"
+                : stepDoneWithNoLegs
+                  ? "nothing to do"
+                  : "not yet planned"
+              : null;
+            return (
+              <div key={stepIndex} data-testid={`run-history-step-${stepIndex}`}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: stepFailedWithNoLegs ? "var(--khr-error)" : "var(--khr-text-dim)",
+                    marginBottom: 4,
+                  }}
+                >
+                  Step {stepIndex + 1}/{steps.length}
+                  {isPlanner && stepLegs.length > 0 && (
+                    <span> · {stepLegs.length} leg{stepLegs.length === 1 ? "" : "s"} planned</span>
+                  )}
+                  {zeroLegsNote && <span> · {zeroLegsNote}</span>}
+                </div>
+                {stepLegs.length === 0 ? null : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {stepLegs.map((l) => (
+                      <div key={l.id} style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                        <LegStatusBadge status={l.status} />
+                        {l.request_key && (
+                          <ExplorerLink requestKey={l.request_key} base={config.explorerBase} />
+                        )}
+                        {l.error_message && (
+                          <span
+                            style={{
+                              fontSize: 11,
+                              color: "var(--khr-error)",
+                              fontFamily: "var(--khr-mono-font)",
+                            }}
+                          >
+                            {l.error_message}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {resultLine && (
+                  <p
+                    style={{
+                      fontSize: 11,
+                      color: "var(--khr-text-dim)",
+                      fontFamily: "var(--khr-mono-font)",
+                      marginTop: 4,
+                    }}
+                  >
+                    {resultLine}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1379,6 +1637,19 @@ export function ChainedBuilder({
             <div style={panel}>
               <SimPanel sim={sim} cronotonName={state.name} />
             </div>
+          )}
+
+          {/* Run history — real executed-run observability, edit mode only,
+              and only when the adapter actually supports the read-only
+              listRuns/listRunLegs tier (both optional; absent either, this
+              renders nothing — see docs/work/chained-run-history/design.md). */}
+          {isEdit && editId && adapter.listRuns && adapter.listRunLegs && (
+            <RunHistory
+              id={editId}
+              cronotonName={state.name}
+              steps={state.steps}
+              adapter={adapter}
+            />
           )}
           </div>
         </div>

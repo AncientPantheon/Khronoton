@@ -4,6 +4,46 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.24.0 — 2026-11-28
+
+**MINOR — surface a chained cronoton's EXECUTED run history in the packaged `ChainedBuilder`: a real "which step stopped it and why" view, distinct from the existing dry-run preview. Purely additive — absent adapter support, or outside edit mode, nothing changes.**
+
+**Context.** The run/leg store readers (`getRun`/`listRunsForCronoton`/`listRunLegs`/`listInFlightRuns`) and
+their handler-layer counterparts (`runsHandler`/`runLegsHandler`, re-exported as `fetchRuns`/`fetchRunLegs`)
+already existed and were already re-exported from `/server` and `/handlers` — verified directly against the
+built `dist/` output before touching anything, rather than assuming a reported gap was real. The genuine gap
+was the client/UI layer: no `KhronotonAdapter` method reached those handlers, and `ChainedBuilder` had no
+run-history rendering at all. A multi-step chain only ever showed "succeeded or failed" for the WHOLE run;
+there was no way to see which step stopped it, why, how many legs a planner step planned, or the deterministic
+result sentence a confirmed step's captured yield produces.
+
+**`KhronotonAdapter` gains two optional read methods**, `listRuns?(id, query?)` and `listRunLegs?(id, runId)`,
+following the exact precedent of `commitChain?`/`updateChain?` — optional, not in `REQUIRED_METHODS`, left
+unimplemented by both reference adapters (a consumer wires its own routes). `runLegsHandler`'s response body
+also now carries the run's named-yield pool (`yields`) alongside `legs` — a "NICE TO HAVE" made possible with
+zero new endpoints, since `getYieldPool` already existed and the engine already populates it; this just rides
+it along on the one read a UI already has to make per run, instead of a second round trip for step metadata.
+
+**`ChainedBuilder` (edit mode only)** renders a new "Run history" block below the pane filmstrip — deliberately
+NOT a 4th toggleable pane (that layout's fit/width math is fixed and heavily tuned for exactly 3; a full-width
+block below it, the same tier the dry-run `SimPanel` already lives at, is zero-risk to that math). Gated on
+`isEdit && editId && adapter.listRuns && adapter.listRunLegs`; absent any of these, nothing renders. Shows one
+row per leg grouped by step, colour-coded by status (`LegStatusBadge`, new — `badges.tsx`), the error message on
+a failed leg, an `ExplorerLink` for a landed request key (the same atom `FireHistory` already uses), a leg-count
+line for a planner step ("N legs planned"), and `formatStepResult`'s deterministic sentence once a yield-bearing
+step's legs are all confirmed — reusing the SAME formatter the dry-run preview already uses, exactly per its own
+doc comment's stated intent ("reusable from either the UI... or a server-side fire log").
+
+**Nectar review (single correctness-lens pass) caught one real HIGH bug before it shipped**: the original
+zero-legs handling treated "0 legs" as unconditionally healthy, so a step where the run FAILED before planning
+any legs at all (`runs-driver.ts`'s `handleReplanStep` terminalizes exactly this way on a plan-time throw with
+no prior legs) rendered as "(nothing to do)" with a fabricated `ok: true` result sentence — the one step that
+aborted the run was the one step shown as succeeding, precisely inverting the feature's own purpose. Fixed by
+consulting the selected run's own `status`/`step_index`: a zero-leg step reads as healthy only once the run is
+genuinely past it (or succeeded there); as a real, highlighted failure when the run terminalized `failed` at
+that exact step; and as "not yet planned" for an in-flight run still sitting at that barrier. Confirmed red
+against the pre-fix logic, then green, via a dedicated regression test.
+
 ## 0.23.0 — 2026-11-28
 
 **MINOR — two small `ChainedBuilder` follow-ups found after the hub wired up 0.22.0: a bug fix (the Raw JSON pane was silently crammed onto one unreadable line) and a small additive visibility nicety (a resolver pill visible outside the Fields tab). Purely cosmetic; no other behavior change.**

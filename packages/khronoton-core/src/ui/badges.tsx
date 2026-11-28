@@ -5,6 +5,7 @@ import type {
   CodexCronotonFireRow,
   CodexFireMode,
 } from "../server/types.js";
+import type { CodexCronotonRunLegRow } from "../server/index.js";
 
 /**
  * Presentational status/mode atoms for the codex-cronoton surfaces. Every atom
@@ -16,6 +17,7 @@ import type {
 export type CronotonStatus = CodexCronotonRow["status"];
 export type FireStatus = CodexCronotonFireRow["status"];
 export type FireMode = CodexFireMode;
+export type LegStatus = CodexCronotonRunLegRow["status"];
 
 export interface BadgeStyle {
   /** Foreground token — also the dot color via `currentColor`. */
@@ -86,6 +88,36 @@ const FIRE_STATUS_STYLE: Record<FireStatus, BadgeStyle> = {
   },
 };
 
+/**
+ * The 4 real statuses of one `codex_cronoton_run_legs` row (`store/runs.ts`).
+ * `submitted` reuses `fireStatusStyle("running")`'s amber+pulse treatment —
+ * both mean "sent to chain, not yet landed" — and `confirmed`/`failed` reuse
+ * the ordinary success/error tokens, same as a fire's own terminal states.
+ */
+const LEG_STATUS_STYLE: Record<LegStatus, BadgeStyle> = {
+  pending: {
+    color: "var(--khr-text-dim)",
+    background: "color-mix(in srgb, var(--khr-text-dim) 16%, transparent)",
+    label: "pending",
+  },
+  submitted: {
+    color: "var(--khr-amber)",
+    background: "var(--khr-amber-bg)",
+    label: "submitted…",
+    pulse: true,
+  },
+  confirmed: {
+    color: "var(--khr-success)",
+    background: "var(--khr-success-bg)",
+    label: "confirmed",
+  },
+  failed: {
+    color: "var(--khr-error)",
+    background: "var(--khr-error-bg)",
+    label: "failed",
+  },
+};
+
 const MODE_CHIP_STYLE: Record<FireMode, ModeChipStyle> = {
   live: {
     color: "var(--khr-success)",
@@ -102,6 +134,10 @@ const MODE_CHIP_STYLE: Record<FireMode, ModeChipStyle> = {
 
 export function cronotonStatusStyle(status: CronotonStatus): BadgeStyle {
   return CRONOTON_STATUS_STYLE[status];
+}
+
+export function legStatusStyle(status: LegStatus): BadgeStyle {
+  return LEG_STATUS_STYLE[status];
 }
 
 export function fireStatusStyle(status: FireStatus): BadgeStyle {
@@ -179,6 +215,10 @@ export function CronotonStatusBadge({
 
 export function FireStatusBadge({ status }: { status: FireStatus }): ReactNode {
   return <DotBadge style={fireStatusStyle(status)} />;
+}
+
+export function LegStatusBadge({ status }: { status: LegStatus }): ReactNode {
+  return <DotBadge style={legStatusStyle(status)} />;
 }
 
 export function ModeChip({ mode }: { mode: FireMode }): ReactNode {

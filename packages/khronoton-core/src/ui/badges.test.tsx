@@ -12,9 +12,11 @@ import { render, screen, cleanup } from "@testing-library/react";
 import {
   cronotonStatusStyle,
   fireStatusStyle,
+  legStatusStyle,
   modeChipStyle,
   CronotonStatusBadge,
   FireStatusBadge,
+  LegStatusBadge,
   ModeChip,
   ServerResolverPill,
   ExternallyFireablePill,
@@ -81,6 +83,35 @@ describe("fireStatusStyle — success green / running amber+pulse / nothing oran
   });
 });
 
+describe("legStatusStyle — pending dim / submitted amber+pulse / confirmed green / failed red (a chained run leg's 4 real statuses)", () => {
+  it("maps pending to the dim-text gray token (not yet submitted to chain)", () => {
+    const s = legStatusStyle("pending");
+    expect(s.color).toBe("var(--khr-text-dim)");
+    expect(s.label).toBe("pending");
+    expect(s.pulse).toBeFalsy();
+  });
+
+  it("maps submitted to amber AND flags pulse, mirroring fireStatusStyle('running')'s in-flight treatment", () => {
+    const s = legStatusStyle("submitted");
+    expect(s.color).toBe("var(--khr-amber)");
+    expect(s.pulse).toBe(true);
+  });
+
+  it("maps confirmed to the success green token", () => {
+    const s = legStatusStyle("confirmed");
+    expect(s.color).toBe("var(--khr-success)");
+    expect(s.background).toBe("var(--khr-success-bg)");
+    expect(s.label).toBe("confirmed");
+  });
+
+  it("maps failed to the error red token with no pulse", () => {
+    const s = legStatusStyle("failed");
+    expect(s.color).toBe("var(--khr-error)");
+    expect(s.label).toBe("failed");
+    expect(s.pulse).toBeFalsy();
+  });
+});
+
 describe("modeChipStyle — LIVE success-bordered / TEST amber-bordered + provenance title", () => {
   it("maps live to a success-green border with no explanatory title", () => {
     const s = modeChipStyle("live");
@@ -140,5 +171,16 @@ describe("presentational atoms reach the DOM with the mapped token/label", () =>
   it("ExternallyFireablePill renders the verbatim external-fire caption", () => {
     render(<ExternallyFireablePill />);
     expect(screen.getByText("⚡ externally fireable")).toBeTruthy();
+  });
+
+  it("LegStatusBadge confirmed paints the mapped color and label", () => {
+    render(<LegStatusBadge status="confirmed" />);
+    const el = screen.getByText("confirmed");
+    expect(el.style.color).toBe("var(--khr-success)");
+  });
+
+  it("LegStatusBadge submitted carries the pulse animation", () => {
+    const { container } = render(<LegStatusBadge status="submitted" />);
+    expect(container.querySelector('[data-pulse="true"]')).not.toBeNull();
   });
 });

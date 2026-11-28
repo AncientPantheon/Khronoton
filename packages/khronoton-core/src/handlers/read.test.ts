@@ -14,6 +14,7 @@ import {
   registerServerResolver,
   createRun,
   insertRunLeg,
+  upsertYield,
   type KeyResolver,
 } from "../server/index.js";
 
@@ -305,6 +306,35 @@ describe("runLegsHandler — every leg of one specific run, scoped to its owning
     const res = await runLegsHandler(h.ctx, req({ params: { id, runId: "does-not-exist" } }));
 
     expect(res.status).toBe(404);
+  });
+
+  it("includes the run's named-yield pool alongside legs — the 'distribution report' a chain's steps write via yield_as, so a UI can render each step's result sentence from the ONE response it already fetches, no second round trip", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const runId = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    insertRunLeg({ runId, stepIndex: 0, legIndex: 0, definitionJson: "{}" }, { db: h.db });
+    upsertYield(
+      { runId, name: "leg1-settled", value: "40.07 AURYN to SnakesTreasury", stepIndex: 0 },
+      { db: h.db },
+    );
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id, runId } }));
+
+    expect(res.status).toBe(200);
+    const body = res.body as { ok: boolean; yields: Record<string, unknown> };
+    expect(body.yields).toEqual({ "leg1-settled": "40.07 AURYN to SnakesTreasury" });
+  });
+
+  it("returns an empty object (not undefined/omitted) for a run with no yields yet", async () => {
+    h = buildTestCtx();
+    const { id } = seedCronoton(h.db);
+    const runId = createRun({ codexCronotonId: id, stepCount: 1 }, { db: h.db });
+    insertRunLeg({ runId, stepIndex: 0, legIndex: 0, definitionJson: "{}" }, { db: h.db });
+
+    const res = await runLegsHandler(h.ctx, req({ params: { id, runId } }));
+
+    const body = res.body as { ok: boolean; yields: Record<string, unknown> };
+    expect(body.yields).toEqual({});
   });
 });
 
