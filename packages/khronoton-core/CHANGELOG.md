@@ -4,6 +4,43 @@ All notable changes to `@ancientpantheon/khronoton-core`.
 
 The engine's pre-extraction history lives in the AncientHoldings hub, whose inline scheduler ("Cronoton") this package extracts and generalises.
 
+## 0.23.0 — 2026-11-28
+
+**MINOR — two small `ChainedBuilder` follow-ups found after the hub wired up 0.22.0: a bug fix (the Raw JSON pane was silently crammed onto one unreadable line) and a small additive visibility nicety (a resolver pill visible outside the Fields tab). Purely cosmetic; no other behavior change.**
+
+**Bug fix — the Raw JSON pane's pretty-printing was a self-introduced regression.** `codeText`'s
+original (0.19.1-era) implementation called `JSON.stringify(value, null, 2)` directly. During
+0.21.0's edit-mode work, that call was factored into a shared `safeStringifyOrNull(value)` helper
+(reused by the dirty-check's own comparison values) — and the pretty-print arguments were silently
+dropped in the process, regressing the pane back to one long, unreadable line (later keys like
+`serverResolver` scrolled off the right edge, invisible). This went unnoticed through two full
+nectar review cycles because every test asserting on this pane's content used a substring/regex
+match, and `@testing-library`'s default text matching normalizes whitespace (including newlines)
+before comparing — a regex check passes identically whether the underlying text is pretty-printed
+or crammed onto one line. The hub's own live usage, not this package's test suite, is what actually
+surfaced it. Fixed: `safeStringifyOrNull` gains an optional `pretty` parameter (default `false`,
+so the dirty-check's two comparison values stay exactly as compact as before — unchanged, and
+critically, both sides of that string-equality check still use the identical format); `codeText`'s
+own call site now passes `pretty: true`. The new regression test reads `.textContent` directly off
+the `<pre>` element rather than using a whitespace-normalizing matcher — the same gap that let the
+original regression through.
+
+**A visible resolver pill outside the Fields tab.** `state.serverResolver` was previously visible
+only on the Fields tab's "Whole cronoton" sub-tab — an operator viewing the Pact-code pane had no
+signal the cronoton was resolver-bound at all. A small pill (`⟳ <resolver>`) now renders in the
+always-visible title row (a sibling of the whole pane-toggle block, never nested inside any pane),
+so it's visible regardless of which pane(s) are currently shown. Read-only; the editable select
+stays on Fields, unchanged. Renders nothing for an ordinary cronoton.
+
+Reviewed via nectar (a single focused correctness pass, proportionate to this change's small size
+rather than a full lens dispatch): no findings — directly verified the dirty-check's two comparison
+values still use the identical compact format, that `pretty` only changes whitespace never the
+underlying value, that the pill's JSX is structurally outside every pane, that the pill and the
+Fields-tab select read the exact same `state.serverResolver` scalar, and that pretty-printing
+doesn't weaken the existing 0.19.1-era deep-nesting stack-overflow guard.
+
+**1609 specs pass.** `npx tsc --noEmit` clean; `npm run build` clean.
+
 ## 0.22.0 — 2026-11-28
 
 **MINOR — `ChainedBuilder` surfaces the fire-time SERVER RESOLVER, so system cronotons (`pool-payout`, `stoicism-mint`, …) can finally be edited in the packaged builder instead of being shunted to the hub's legacy editor. Purely additive; create + ordinary edit are unchanged when the new field/prop are absent.**

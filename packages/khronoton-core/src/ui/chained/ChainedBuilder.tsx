@@ -281,14 +281,25 @@ const paneStyle: CSSProperties = {
   gap: 12,
 };
 
-/** `JSON.stringify` has no depth cap of its own — a pathologically deep (but
- *  otherwise valid) hand-typed raw-JSON payload/planner-params value can
- *  overflow the call stack (see the 0.19.1 fix for `codeText`, the read-only
- *  preview's own prior instance of exactly this). Shared by `codeText` AND
- *  the edit-mode dirty check below, so there's one try/catch, not two. */
-function safeStringifyOrNull(value: unknown): string | null {
+/**
+ * `JSON.stringify` has no depth cap of its own — a pathologically deep (but
+ * otherwise valid) hand-typed raw-JSON payload/planner-params value can
+ * overflow the call stack (see the 0.19.1 fix for `codeText`, the read-only
+ * preview's own prior instance of exactly this). Shared by `codeText` AND
+ * the edit-mode dirty check below, so there's one try/catch, not two.
+ *
+ * `pretty` defaults to `false` (compact) — the dirty check's own two
+ * comparison values (`baselineDocJson`/`commitBodyJson`) MUST stay on the
+ * SAME side of this default, since the check is a plain string-equality
+ * test: pretty-printing only one of them would make every comparison read
+ * as "dirty" even when nothing actually changed. Only `codeText` (the
+ * read-only preview a human actually looks at) passes `pretty: true` — see
+ * that call site's own comment for why this parameter exists at all (a
+ * regression this file already shipped once).
+ */
+function safeStringifyOrNull(value: unknown, pretty = false): string | null {
   try {
-    return JSON.stringify(value);
+    return pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
   } catch {
     return null;
   }
@@ -563,7 +574,15 @@ export function ChainedBuilder({
   // on — it must guard itself, or the whole component crashes on render
   // instead of the Raw JSON pane merely failing to preview.
   const codeText = useMemo(() => {
-    const text = safeStringifyOrNull(previewAsSingle ? singleCronotonBody() : commitBody);
+    // `pretty: true` — a human reads this pane; the original (0.19.1-era)
+    // implementation pretty-printed it, but that was silently LOST when
+    // this call was factored into the shared `safeStringifyOrNull` helper
+    // during 0.21.0's edit-mode work (every test asserting on this pane's
+    // content used a substring/regex match, and `@testing-library`'s
+    // default text matching normalizes whitespace — including newlines —
+    // before comparing, so the regression passed every existing test
+    // undetected; only the hub's own live usage surfaced it).
+    const text = safeStringifyOrNull(previewAsSingle ? singleCronotonBody() : commitBody, true);
     return text ?? "Could not render the Raw JSON preview: value is too deeply nested to serialize.";
   }, [commitBody, previewAsSingle, singleCronotonBody]);
   // Edit-mode dirty check: the CHAIN shape (never the single-cronoton shape —
@@ -809,14 +828,35 @@ export function ChainedBuilder({
       <meta name="robots" content={robots} />
       <style>{`@keyframes khr-attn-pulse{0%,100%{opacity:1}50%{opacity:.4}}.khr-attn{animation:khr-attn-pulse 1.1s ease-in-out infinite;color:var(--khr-amber)!important;}`}</style>
 
-      {/* Header: title only — all display controls now live on the control line.
+      {/* Header: title + (when bound) a resolver pill — both ALWAYS visible,
+          regardless of which pane(s) are currently toggled on/off, so an
+          operator on the Pact-code pane still sees what the cronoton is
+          bound to without switching to the Fields tab (the editable select
+          itself stays on Fields — this is read-only visibility only).
           No `Builder.tsx`-style `EDIT_BANNER` block here (yet) — deliberately
           out of scope for this pass, same as the design doc's "unsaved
           changes?" confirm; the "Edit " title prefix is the one minimal,
           unambiguous edit-mode signal this pass adds. */}
-      <div style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>
-        {isEdit ? "Edit " : ""}
-        {previewAsSingle ? "Cronoton" : "Chained cronoton"} builder
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>
+          {isEdit ? "Edit " : ""}
+          {previewAsSingle ? "Cronoton" : "Chained cronoton"} builder
+        </div>
+        {state.serverResolver && (
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "3px 10px",
+              borderRadius: "var(--khr-radius)",
+              background: "var(--khr-accent-tint)",
+              color: "var(--khr-accent)",
+            }}
+            title="Fire-time server resolver this cronoton is bound to"
+          >
+            ⟳ {state.serverResolver}
+          </span>
+        )}
       </div>
 
       {loadError ? (
@@ -1305,6 +1345,7 @@ export function ChainedBuilder({
                     ) : (
                       <>
                         <pre
+                          data-testid="chained-builder-raw-json-pre"
                           style={{
                             margin: 0,
                             flex: 1,

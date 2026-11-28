@@ -1310,3 +1310,59 @@ describe("ChainedBuilder — server resolver", () => {
     TEST_TIMEOUT,
   );
 });
+
+describe("ChainedBuilder — Raw JSON pane is pretty-printed (regression: a 0.21.0 refactor silently dropped the original JSON.stringify(…, null, 2) call)", () => {
+  it(
+    "renders the Raw JSON preview as real multi-line, 2-space-indented JSON — checked via raw .textContent, NOT a whitespace-normalizing text matcher (that normalization is exactly what let the original regression slip past every prior test)",
+    () => {
+      mount(makeAdapter());
+      setPactCode("(+ 1 2)");
+      openRawJsonPane();
+
+      const pre = screen.getByTestId("chained-builder-raw-json-pre");
+      expect(pre.textContent).toContain("\n");
+      // The 2-space-indent JSON.stringify(…, null, 2) convention specifically
+      // (not just "contains a newline somewhere" — the real indentation
+      // shape every other field in this preview already produces).
+      expect(pre.textContent).toMatch(/\{\n {2}"name":/);
+    },
+  );
+
+  it("the dirty check is unaffected by the pretty-print fix — both comparison sides stay compact, so an untouched load is still NOT dirty", () => {
+    mount(makeAdapter(), { editId: "cr_1", initialDocument: STOICISM_FIXTURE });
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", true);
+  });
+});
+
+describe("ChainedBuilder — a visible resolver pill outside the Fields tab", () => {
+  it("shows a pill with the resolver name in the always-visible title row when state.serverResolver is set, regardless of which pane is active", () => {
+    const fixture: ChainCommitBody = {
+      name: "Daily Pool Payout",
+      serverResolver: "pool-payout",
+      steps: [
+        {
+          mode: "single",
+          pactCode: "(placeholder)",
+          gasPayer: { type: "gas-station", gasStationSignerKey: "k:gasstation" },
+          signers: [{ publicKey: "k:alice", capabilityMode: "pure", capabilities: "" }],
+        },
+      ],
+    };
+    mount(makeAdapter(), { editId: "cr_1", initialDocument: fixture });
+
+    // The default visible panes are Pact code + Fields — the pill must be
+    // visible WITHOUT ever opening the Fields tab (the whole point: an
+    // operator on the Pact-code pane sees it without switching tabs).
+    expect(screen.getByText(/⟳ pool-payout/)).toBeTruthy();
+
+    // Still visible after hiding Fields entirely (Pact code alone shown) —
+    // proving the pill lives in the title row, not inside any pane.
+    fireEvent.click(screen.getByRole("button", { name: "Fields" }));
+    expect(screen.getByText(/⟳ pool-payout/)).toBeTruthy();
+  });
+
+  it("renders no pill at all for an ordinary cronoton (no resolver)", () => {
+    mount(makeAdapter());
+    expect(screen.queryByText(/⟳/)).toBeNull();
+  });
+});
